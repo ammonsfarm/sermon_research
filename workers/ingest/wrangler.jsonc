@@ -1,0 +1,48 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "aic-ingest",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-15",
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "workers_dev": false,
+  "preview_urls": false,
+  "send_metrics": false,
+  "observability": { "enabled": false },
+  "vars": {
+    "AIC_ENVIRONMENT": "development",
+    "SOUNDCLOUD_FEED_URL": "https://feeds.soundcloud.example.invalid/aic.rss",
+    "MISTRAL_TRANSCRIPTION_URL": "https://api.mistral.ai/v1/audio/transcriptions",
+    "MISTRAL_TRANSCRIPTION_MODEL": "voxtral-mini-latest",
+    "R2_AUDIO_S3_ENDPOINT": "https://00000000000000000000000000000000.r2.cloudflarestorage.com/",
+    "GEMINI_INTELLIGENCE_MODEL": "gemini-3.8-flash",
+    "SILO_INTELLIGENCE_URL": "https://silo.example.invalid/v1/chat/completions",
+    "SILO_INTELLIGENCE_MODEL": "silo-episode-intelligence",
+    "SILO_INTELLIGENCE_BACKEND_MODE": "codex-direct",
+    "SILO_INTELLIGENCE_REASONING": "medium",
+    "SILO_INTELLIGENCE_MAX_TOKENS": "4096"
+  },
+  "triggers": { "crons": ["15 8 * * *", "15 9 * * *"] },
+  "d1_databases": [{
+    "binding": "AIC_DB",
+    "database_name": "aic-p4-local",
+    "database_id": "00000000-0000-0000-0000-000000000004",
+    "migrations_dir": "../../migrations/d1",
+    "remote": false
+  }],
+  "r2_buckets": [{
+    "binding": "AIC_PODCAST_AUDIO",
+    "bucket_name": "aic-p4-local-podcast-audio",
+    "preview_bucket_name": "aic-p4-local-podcast-audio",
+    "remote": false
+  }],
+  "vectorize": [{
+    "binding": "AIC_CONTENT_INDEX",
+    "index_name": "aic-content-v1-local",
+    "remote": false
+  }],
+  "workflows": [{
+    "binding": "AIC_EPISODE_INGEST_WORKFLOW",
+    "name": "aic-episode-ingest",
+    "class_name": "EpisodeIngestWorkflow"
+  }]
+}

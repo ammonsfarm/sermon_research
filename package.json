@@ -1,0 +1,25 @@
+{
+  "name": "sermon-research",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Podcast sermon ingest, transcription, summaries, vector search and RAG research on Cloudflare Workers",
+  "license": "MIT",
+  "packageManager": "npm@11.5.1",
+  "engines": {
+    "node": ">=24.7.0",
+    "npm": ">=11.5.1"
+  },
+  "workspaces": [
+    "workers/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm test --workspaces --if-present",
+    "check:cf-typegen": "npm run check:cf-typegen --workspaces --if-present",
+    "verify": "npm run typecheck && npm test && npm run check:cf-typegen"
+  },
+  "devDependencies": {
+    "@types/node": "26.2.0"
+  }
+}

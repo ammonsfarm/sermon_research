@@ -1,0 +1,37 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "aic-rag",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-15",
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "workers_dev": false,
+  "preview_urls": false,
+  "send_metrics": false,
+  "observability": {
+    "enabled": false
+  },
+  "vars": {
+    "AIC_ENVIRONMENT": "development",
+    "AIC_CANONICAL_ORIGIN": "https://aic.example.test",
+    "AIC_CLERK_AUTHORIZED_PARTIES": "http://127.0.0.1:8787,http://localhost:8787",
+    "GEMINI_CHAT_MODEL": "gemini-3.8-flash",
+    "SILO_CHAT_MODEL": "synthetic-local-model",
+    "AIC_RAG_ALLOW_OPENAI_FALLBACK": "false"
+  },
+  "d1_databases": [
+    {
+      "binding": "AIC_DB",
+      "database_name": "aic-p4-local",
+      "database_id": "00000000-0000-0000-0000-000000000004",
+      "migrations_dir": "../../migrations/d1",
+      "remote": false
+    }
+  ],
+  "vectorize": [
+    {
+      "binding": "AIC_CONTENT_INDEX",
+      "index_name": "aic-content-v1-local",
+      "remote": false
+    }
+  ]
+}

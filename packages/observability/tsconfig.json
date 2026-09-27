@@ -1,0 +1,7 @@
+{
+  "extends": "../contracts/tsconfig.json",
+  "compilerOptions": {
+    "baseUrl": "."
+  },
+  "include": ["src/**/*.ts", "test/**/*.type-test.ts"]
+}

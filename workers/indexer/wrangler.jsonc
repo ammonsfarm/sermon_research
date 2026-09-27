@@ -1,0 +1,39 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "aic-indexer",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-15",
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "workers_dev": false,
+  "preview_urls": false,
+  "send_metrics": false,
+  "observability": {
+    "enabled": false
+  },
+  "vars": {
+    "AIC_ENVIRONMENT": "development"
+  },
+  "d1_databases": [
+    {
+      "binding": "AIC_DB",
+      "database_name": "aic-p4-local",
+      "database_id": "00000000-0000-0000-0000-000000000004",
+      "migrations_dir": "../../migrations/d1",
+      "remote": false
+    }
+  ],
+  "vectorize": [
+    {
+      "binding": "AIC_CONTENT_INDEX",
+      "index_name": "aic-content-v1-local",
+      "remote": false
+    }
+  ],
+  "workflows": [
+    {
+      "binding": "AIC_CONTENT_INDEX_WORKFLOW",
+      "name": "aic-content-index",
+      "class_name": "ContentIndexWorkflow"
+    }
+  ]
+}

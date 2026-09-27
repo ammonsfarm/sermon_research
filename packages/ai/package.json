@@ -1,0 +1,28 @@
+{
+  "name": "@aic/ai",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Provider-neutral retrieval and AI adapters for AIC",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./provider-registry": {
+      "types": "./src/provider-registry.ts",
+      "default": "./src/provider-registry.ts"
+    }
+  },
+  "types": "./src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --project tsconfig.json --noEmit",
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@aic/contracts": "0.1.0"
+  },
+  "devDependencies": {
+    "typescript": "5.9.2"
+  }
+}

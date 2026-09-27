@@ -1,0 +1,24 @@
+{
+  "name": "@aic/storage",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Provider-neutral R2-backed object repositories for AIC",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "types": "./src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --project tsconfig.json --noEmit",
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@aic/contracts": "0.1.0"
+  },
+  "devDependencies": {
+    "typescript": "5.9.2"
+  }
+}
