@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { getKey } from "../src/keys.ts";
+import { providerMessage, sendEmail } from "../src/providers.ts";
 import { ADMIN, completeSetup, cookieFrom, createApp, fakeProviders, FEED_URL, MINISTRY, PROVIDERS, SECRET } from "./helpers.ts";
 
 async function atStep(step: string) {
@@ -63,7 +64,7 @@ test("a rejected key or bad address is explained and nothing is saved", async ()
     const rejected = await app.request("/setup/llm", { form: PROVIDERS.llm, cookie });
     assert.equal(rejected.status, 400);
     const body = await rejected.text();
-    assert.match(body, /rejected the key/);
+    assert.match(body, /refused the request \(HTTP 401\)\. It said: &quot;nope&quot;/);
     assert.doesNotMatch(body, /sk-llm-key-1234/, "the key is never echoed back");
     const insecure = await app.request("/setup/llm", { form: { ...PROVIDERS.llm, baseUrl: "http://gateway.example/v1" }, cookie });
     assert.match(await insecure.text(), /Use an https:\/\/ address/);
@@ -120,4 +121,19 @@ test("members can't reach the setup or admin steps", async () => {
   const cookie = `__Host-sr_session=${await createSession(app.env.DB, "m1")}`;
   assert.equal((await app.request("/admin/llm", { cookie })).status, 403);
   assert.equal((await app.request("/admin/llm", { form: PROVIDERS.llm, cookie })).status, 403);
+});
+
+test("provider errors pass on the provider's own message, such as an unverified Resend domain", async () => {
+  const resend = (async () => Response.json(
+    { statusCode: 403, name: "validation_error", message: "The sermons.example.org domain is not verified. Please, add and verify your domain." },
+    { status: 403 },
+  )) as typeof fetch;
+  await assert.rejects(
+    sendEmail({ apiKey: "re_x", from: "a@sermons.example.org", to: "b@example.org", subject: "s", text: "t" }, resend),
+    /Resend refused the request \(HTTP 403\)\. It said: "The sermons\.example\.org domain is not verified/,
+  );
+  assert.equal(providerMessage("{\"error\":{\"message\":\"Incorrect API key\",\"type\":\"x\"}}"), "Incorrect API key");
+  assert.equal(providerMessage("<html><body>Not found</body></html>"), "");
+  assert.equal(providerMessage("plain  text\nerror"), "plain text error");
+  assert.equal(providerMessage(""), "");
 });
