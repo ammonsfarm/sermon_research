@@ -1,0 +1,4 @@
+# Copy to .dev.vars for `npm run dev`. In production, set it with:
+#   npx wrangler secret put APP_SECRET
+# Use a random value of at least 32 characters, e.g. `openssl rand -base64 32`.
+APP_SECRET=

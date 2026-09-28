@@ -1,0 +1,25 @@
+node_modules/
+.npm/
+.wrangler/
+.dev.vars
+.env
+.env.*
+!.env.example
+dist/
+build/
+coverage/
+artifacts/
+.tmp/
+.DS_Store
+*.log
+*.sqlite
+*.sqlite-*
+__pycache__/
+*.py[cod]
+secrets/
+
+# Local worktrees and editor state
+.worktrees/
+.vscode/
+.idea/
+.cloudflare-env.check.d.ts

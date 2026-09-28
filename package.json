@@ -1,0 +1,24 @@
+{
+  "name": "sermon-research",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Turn a church's sermon podcast into a searchable, citable research archive on Cloudflare Workers",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "cf-typegen": "wrangler types worker-configuration.d.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import ./test/hooks.ts --test --no-warnings=ExperimentalWarning test/*.test.ts",
+    "verify": "npm run typecheck && npm test"
+  },
+  "devDependencies": {
+    "@types/node": "26.2.0",
+    "typescript": "5.9.2",
+    "wrangler": "4.142.0"
+  }
+}
