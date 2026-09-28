@@ -8,6 +8,8 @@ export interface Ministry {
   readonly logoUrl: string;
   /** One of `SCHEMES` in theme.ts. Missing on sites set up before schemes existed. */
   readonly colorScheme?: string;
+  /** Put the logo on a white tile, for dark logos on the dark header. */
+  readonly logoTile?: boolean;
 }
 
 /** Wizard order. Admins land on the first step not yet finished. */
@@ -66,6 +68,7 @@ export function parseMinistry(form: FormData): { ministry: Ministry } | { errors
     description: text("description", 1000),
     logoUrl: text("logoUrl", 2048),
     colorScheme: text("colorScheme", 40),
+    logoTile: form.get("logoTile") ? "on" : "",
   };
   const errors: Record<string, string> = {};
   if (!values.siteTitle) errors.siteTitle = "Enter a site title.";
@@ -80,6 +83,7 @@ export function parseMinistry(form: FormData): { ministry: Ministry } | { errors
       description: values.description,
       logoUrl: values.logoUrl,
       colorScheme: isScheme(values.colorScheme) ? values.colorScheme : DEFAULT_SCHEME,
+      logoTile: values.logoTile === "on",
     },
   };
 }

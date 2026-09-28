@@ -44,7 +44,8 @@ ${field({ name: "siteTitle", label: "Site title", value: values.siteTitle ?? "",
 ${field({ name: "churchName", label: "Church or ministry name", value: values.churchName ?? "", error: errors.churchName, required: true })}
 ${field({ name: "speakerNames", label: "Speaker names", value: values.speakerNames ?? "", error: errors.speakerNames, hint: "Separate names with commas, for example “Pastor Jane Doe, John Smith”." })}
 ${field({ name: "description", label: "Short description", type: "textarea", value: values.description ?? "", error: errors.description })}
-${field({ name: "logoUrl", label: "Logo address", type: "url", value: values.logoUrl ?? "", error: errors.logoUrl, hint: "Optional. An https:// link to an image." })}
+${field({ name: "logoUrl", label: "Logo address", type: "url", value: values.logoUrl ?? "", error: errors.logoUrl, hint: "Optional. An https:// link to an image. It sits on the dark header, so a white or light logo works best." })}
+<label class="check"><input type="checkbox" name="logoTile"${values.logoTile === "on" ? html` checked` : ""}> Put the logo on a white tile (for dark logos)</label>
 ${schemePicker(values.colorScheme)}
 <button type="submit">${options.step ? "Continue" : "Save"}</button>
 </form>`;
@@ -58,6 +59,7 @@ export function ministryValues(ministry: Ministry): Values {
     description: ministry.description,
     logoUrl: ministry.logoUrl,
     colorScheme: ministry.colorScheme ?? DEFAULT_SCHEME,
+    logoTile: ministry.logoTile ? "on" : "",
   };
 }
 

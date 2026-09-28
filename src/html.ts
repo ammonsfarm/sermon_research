@@ -41,6 +41,7 @@ export interface PageOptions {
   readonly siteTitle?: string;
   /** The ministry's logo, shown beside the site title. */
   readonly logoUrl?: string;
+  readonly logoTile?: boolean;
   /** The admin's color scheme and the visitor's light / dark choice. */
   readonly scheme?: SchemeId;
   readonly mode?: Mode;
@@ -69,7 +70,7 @@ ${options.refreshSeconds ? html`<meta http-equiv="refresh" content="${options.re
 <script src="/assets/app.js" defer></script>
 </head>
 <body>
-<header class="site"><div class="bar"><a class="brand" href="/">${options.logoUrl ? html`<img class="logo" src="${options.logoUrl}" alt="" referrerpolicy="no-referrer">` : ""}<span>${heading}</span></a>${options.header ?? ""}</div></header>
+<header class="site"><div class="bar"><a class="brand" href="/">${options.logoUrl ? html`<img class="logo${options.logoTile ? " tile" : ""}" src="${options.logoUrl}" alt="" referrerpolicy="no-referrer">` : ""}<span>${heading}</span></a>${options.header ?? ""}</div></header>
 <main class="${options.wide || options.aside ? "wide" : "narrow"}">
 ${options.aside ? html`<div class="with-side">${options.aside}<div class="content">${body}</div></div>` : body}
 </main>

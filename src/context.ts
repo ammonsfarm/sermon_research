@@ -20,7 +20,7 @@ export interface Context {
 }
 
 /** The page chrome for this request: site title, main navigation and, on admin pages, the admin menu. */
-export function chrome(context: Context): { siteTitle?: string; logoUrl?: string; scheme?: SchemeId; mode?: Mode; header?: Html; aside?: Html } {
+export function chrome(context: Context): { siteTitle?: string; logoUrl?: string; logoTile?: boolean; scheme?: SchemeId; mode?: Mode; header?: Html; aside?: Html } {
   if (!context.ministry) return { mode: context.mode };
   const path = context.url.pathname;
   const isAdmin = context.session?.user.role === "admin";
@@ -28,7 +28,7 @@ export function chrome(context: Context): { siteTitle?: string; logoUrl?: string
     siteTitle: context.ministry.siteTitle,
     scheme: isScheme(context.ministry.colorScheme) ? context.ministry.colorScheme : DEFAULT_SCHEME,
     mode: context.mode,
-    ...(context.ministry.logoUrl ? { logoUrl: context.ministry.logoUrl } : {}),
+    ...(context.ministry.logoUrl ? { logoUrl: context.ministry.logoUrl, logoTile: Boolean(context.ministry.logoTile) } : {}),
     header: siteHeader(context.session, path, context.researchOpen, context.mode, path + context.url.search),
     ...(isAdmin && path.startsWith("/admin") ? { aside: adminMenu(path) } : {}),
   };
