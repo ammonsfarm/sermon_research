@@ -204,6 +204,8 @@ label.follow input { width: auto; }
 .sermon-panel h2 { margin-top: 8px; }
 .sermon-panel textarea { min-height: 5em; }
 .sermon-transcript .passage { margin-bottom: 18px; }
+.transcript-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 16px; }
+.transcript-head .downloads { margin: 0; font-size: .9rem; color: var(--muted); }
 .sermon-transcript .passage p:last-child { font-family: var(--serif); font-size: 1.05rem; line-height: 1.7; margin: 0; }
 @media (min-width: 960px) {
   .sermon { grid-template-columns: minmax(0, 1fr) 360px; grid-template-rows: auto 1fr; column-gap: 36px; }

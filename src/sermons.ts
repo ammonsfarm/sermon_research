@@ -1,5 +1,6 @@
 import { askBox, OUTPUTS } from "./ask.ts";
 import { chrome, type Context, clientIp } from "./context.ts";
+import { fileName } from "./documents.ts";
 import { html, type Html, page } from "./html.ts";
 import type { Segment } from "./pipeline.ts";
 import { formatTime, gate, nearest, SEARCHES_PER_HOUR } from "./research.ts";
@@ -170,7 +171,8 @@ ${(["outline", "questions"] as const).map((kind) => html`<form method="post" act
 </section>
 </aside>
 <section class="sermon-transcript" aria-label="Transcript">
-<h2>Transcript</h2>
+<div class="transcript-head"><h2>Transcript</h2>
+<p class="downloads">Download <a href="/episodes/${episode.id}/transcript.md" download>Markdown</a> · <a href="/episodes/${episode.id}/transcript.txt" download>Plain text</a></p></div>
 ${segments ? html`<p class="hint">Click any sentence to play from there. Highlighted words are estimated from sentence timings.</p>` : ""}
 <div class="${segments ? "reader" : "transcript"}">
 ${chunks.map((chunk, index) => html`<div class="passage" id="t-${chunk.seq}">
@@ -181,6 +183,47 @@ ${chunk.start_seconds !== null ? html`<p class="hint">${audio ? html`<a href="${
 </div>
 </section>
 </div>`, { wide: true, ...chrome(context) });
+}
+
+/**
+ * The full transcript as a file: Markdown with the summary, topics, scripture
+ * and a timestamp before each passage, or plain text with timestamps.
+ */
+export async function transcriptDownload(context: Context, id: string, format: "md" | "txt"): Promise<Response> {
+  const blocked = await gate(context);
+  if (blocked) return blocked;
+  const { db } = context;
+  const episode = await db.prepare(
+    `SELECT e.id, e.title, e.published_at, s.summary, s.topics_json, s.scriptures_json
+     FROM episodes e JOIN summaries s ON s.episode_id = e.id WHERE e.id = ? AND e.status = 'done'`,
+  ).bind(id).first<{ id: string; title: string; published_at: string | null; summary: string; topics_json: string; scriptures_json: string }>();
+  if (!episode) return new Response("Sermon not found.", { status: 404, headers: { "Content-Type": "text/plain; charset=utf-8" } });
+  const { results: chunks } = await db.prepare("SELECT text, start_seconds FROM chunks WHERE episode_id = ? AND kind = 'transcript' ORDER BY seq")
+    .bind(id).all<{ text: string; start_seconds: number | null }>();
+  const date = episode.published_at?.slice(0, 10) ?? "";
+  const church = context.ministry?.churchName ?? "";
+  const link = `${context.url.origin}/episodes/${episode.id}`;
+  const stamp = (seconds: number | null) => seconds === null ? "" : `[${formatTime(seconds)}] `;
+  const body = format === "md"
+    ? [
+      `# ${episode.title}`,
+      [date, church].filter(Boolean).join(" · "),
+      `## Summary\n\n${episode.summary.trim()}`,
+      ...(parseList(episode.topics_json).length ? [`**Topics:** ${parseList(episode.topics_json).join(", ")}`] : []),
+      ...(parseList(episode.scriptures_json).length ? [`**Scripture:** ${parseList(episode.scriptures_json).join(", ")}`] : []),
+      "## Transcript",
+      ...chunks.map((chunk) => `${chunk.start_seconds === null ? "" : `**${formatTime(chunk.start_seconds)}** `}${chunk.text.trim()}`),
+      `---\n\nFrom ${link}`,
+    ].filter(Boolean).join("\n\n")
+    : [episode.title, [date, church].filter(Boolean).join(" · "), "", ...chunks.map((chunk) => `${stamp(chunk.start_seconds)}${chunk.text.trim()}\n`), `From ${link}`].join("\n");
+  return new Response(`${body}\n`, {
+    headers: {
+      "Content-Type": `${format === "md" ? "text/markdown" : "text/plain"}; charset=utf-8`,
+      "Content-Disposition": `attachment; filename="${fileName(`${date} ${episode.title} transcript`, `.${format}`)}"`,
+      "Cache-Control": "no-store",
+      "X-Content-Type-Options": "nosniff",
+    },
+  });
 }
 
 /**

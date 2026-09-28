@@ -150,7 +150,7 @@ export async function deleteDocument(context: Context, id: string): Promise<Resp
   return redirect("/library");
 }
 
-export function fileName(title: string): string {
+export function fileName(title: string, extension = ".md"): string {
   const slug = title.toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/gu, "-").replace(/^-+|-+$/gu, "").slice(0, 80);
-  return `${slug || "document"}.md`;
+  return `${slug || "document"}${extension}`;
 }
