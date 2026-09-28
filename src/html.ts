@@ -30,19 +30,20 @@ function render(value: unknown): string {
 }
 
 export const SECURITY_HEADERS: Readonly<Record<string, string>> = {
-  "Content-Security-Policy": "default-src 'none'; style-src 'self'; img-src 'self' https:; media-src https: http:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+  "Content-Security-Policy": "default-src 'none'; style-src 'self'; img-src 'self' https:; media-src 'self' https: http:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
   "X-Content-Type-Options": "nosniff",
   "Referrer-Policy": "same-origin",
 };
 
-export function page(title: string, body: Html, options: { siteTitle?: string; status?: number; headers?: HeadersInit } = {}): Response {
+export function page(title: string, body: Html, options: { siteTitle?: string; status?: number; headers?: HeadersInit; refreshSeconds?: number } = {}): Response {
   const heading = options.siteTitle ?? "Sermon Research";
   const document = html`<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${title} · ${heading}</title>
+${options.refreshSeconds ? html`<meta http-equiv="refresh" content="${options.refreshSeconds}">
+` : ""}<title>${title} · ${heading}</title>
 <link rel="stylesheet" href="/assets/app.css">
 </head>
 <body>
@@ -123,6 +124,9 @@ form.search input { flex: 1; min-width: 12rem; width: auto; }
 ul.episode-list { padding-left: 18px; }
 ul.episode-list li { margin-bottom: 10px; }
 .passage { margin-bottom: 12px; }
+.live { color: var(--accent); font-weight: 600; margin: 0 0 12px; }
+label.inline-label { display: inline; margin: 0; }
+.row select { width: auto; }
 audio { width: 100%; margin: 12px 0; }
 pre { background: color-mix(in srgb, var(--line) 40%, transparent); padding: 8px 12px; border-radius: 6px; overflow-x: auto; }
 `;

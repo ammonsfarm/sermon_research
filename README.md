@@ -26,8 +26,9 @@ npx wrangler secret put APP_SECRET   # paste it; keep a copy somewhere safe
 **Or deploy from GitHub:** fork this repo, add the `CLOUDFLARE_API_TOKEN`,
 `CLOUDFLARE_ACCOUNT_ID` and `APP_SECRET` repository secrets, then run the
 **Deploy** workflow from the Actions tab. It creates the search index if
-needed, deploys, and sets `APP_SECRET`. The token needs edit rights for
-Workers Scripts, D1 and Vectorize.
+needed, creates the R2 bucket for episode audio, deploys, and sets
+`APP_SECRET`. The token needs edit rights for Workers Scripts, D1, Vectorize
+and R2 (the "Edit Cloudflare Workers" template plus D1 and Vectorize).
 
 Open the `workers.dev` address Wrangler printed. The setup wizard asks for
 the `APP_SECRET` value as a setup code, so only whoever deployed the site can
@@ -61,11 +62,17 @@ assistant at this repo. [AGENTS.md](AGENTS.md) tells it how to help.
 - API keys encrypted at rest (AES-GCM); only the last 4 characters are ever shown
 - Optional emailed sign-in links through Resend. They work once and expire after 15 minutes, and they need a button press so email scanners can't use them up.
 - A database schema that installs and upgrades itself, so there's no migration step
-- Episode processing: Mistral transcribes each episode from the feed's audio
-  link, the answers AI writes a summary with topics and scripture references,
+- Episode processing: the Worker copies each episode's audio into R2 (so a
+  church website's bot check can't block the transcription service), Mistral
+  transcribes it from a short-lived signed link to that copy, the answers AI writes a summary with topics and scripture references,
   and the transcript is split into timestamped passages and indexed for search
-- An episodes dashboard with progress, errors, retry, "check now" and
-  importing older episodes later
+- A live episodes dashboard that refreshes itself while work runs, showing
+  each episode's current step, retry errors and when the background worker
+  last ran, with retry (one or all failed), "check now" and importing older
+  episodes later
+- An "episodes at once" setting (1 to 5, default 2) for providers with low
+  rate limits
+- Episode pages play the audio from your own R2 copy
 - A schedule set in Admin (daily or weekly, at a local hour); there's no cron
   to edit
 - A research page: ask a question and get an answer drawn only from your

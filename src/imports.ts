@@ -1,5 +1,6 @@
 import { type Context, redirect, requireAdmin, siteTitle } from "./context.ts";
-import { dispatchQueued, type EpisodeRow, listEpisodes, queueAllNotImported, queueEpisodes, recordFeed, statusCounts } from "./episodes.ts";
+import { formatBytes } from "./audio.ts";
+import { concurrency, dispatchQueued, type EpisodeRow, listEpisodes, MAX_CONCURRENCY, type ProcessingSettings, queueAllFailed, queueAllNotImported, queueEpisodes, recordFeed, statusCounts } from "./episodes.ts";
 import { type Feed, FeedError, fetchFeed } from "./feed.ts";
 import { html, page, type Html } from "./html.ts";
 import { DEFAULT_SCHEDULE, describeSchedule, isDue, isValidTimeZone, localSlot, parseSchedule, type Schedule, WEEKDAYS } from "./schedule.ts";
@@ -101,6 +102,7 @@ export async function importStep(context: Context): Promise<Response> {
   if ("error" in parsed) return page("Import", importView(context, feed, defaults, parsed.error), { status: 400, ...siteTitle(context) });
   if (!Number.isInteger(count) || count < 0) return page("Import", importView(context, feed, parsed.schedule, "Choose how many episodes to import."), { status: 400, ...siteTitle(context) });
   await putSetting(context.db, "schedule", parsed.schedule);
+  await rememberOrigin(context);
   await recordFeed(context.db, feed, { backfill: count });
   await putSetting(context.db, "setup_step", "complete");
   await dispatchQueued(context.env);
@@ -115,11 +117,37 @@ const STATUS_LABELS: Record<EpisodeRow["status"], string> = {
   failed: "Failed",
 };
 
-const STAGE_LABELS: Record<NonNullable<EpisodeRow["stage"]>, string> = {
-  transcribe: "transcribing",
-  summarize: "summarizing",
-  index: "indexing",
-};
+/** Seconds between automatic reloads of the dashboard while anything is waiting or working. */
+const LIVE_REFRESH_SECONDS = 10;
+
+/** "just now", "4 min ago", "3 h ago". */
+export function ago(iso: string | null, now = Date.now()): string {
+  if (!iso) return "never";
+  const seconds = Math.max(0, Math.round((now - Date.parse(iso)) / 1000));
+  if (seconds < 45) return "just now";
+  if (seconds < 3_600) return `${Math.round(seconds / 60)} min ago`;
+  if (seconds < 172_800) return `${Math.round(seconds / 3_600)} h ago`;
+  return `${Math.round(seconds / 86_400)} days ago`;
+}
+
+/**
+ * The Workflow needs the site's public address to give Mistral a link to the
+ * stored audio, and Workers don't know their own hostname, so admin pages save it.
+ */
+export async function rememberOrigin(context: Context): Promise<void> {
+  if ((await getSetting<string>(context.db, "site_origin")) !== context.url.origin) await putSetting(context.db, "site_origin", context.url.origin);
+}
+
+function episodeStatus(episode: EpisodeRow): Html {
+  const label = STATUS_LABELS[episode.status];
+  if (episode.status === "running") {
+    return html`<strong>${label}</strong> · attempt ${episode.attempts}<br><span class="hint">${episode.detail ?? "Starting"} · updated ${ago(episode.updated_at)}</span>
+${episode.last_error ? html`<br><span class="error">Last error: ${episode.last_error}</span>` : ""}`;
+  }
+  if (episode.status === "failed") return html`<strong>${label}</strong> · ${ago(episode.updated_at)}<br><span class="error">${episode.error ?? "Unknown error."}</span>`;
+  if (episode.status === "done") return html`${label}${episode.audio_bytes ? html`<br><span class="hint">${formatBytes(episode.audio_bytes)} of audio</span>` : ""}`;
+  return html`${label}`;
+}
 
 /** GET /admin/episodes */
 export async function episodesDashboard(context: Context): Promise<Response> {
@@ -127,16 +155,23 @@ export async function episodesDashboard(context: Context): Promise<Response> {
   if (denied) return denied;
   const current = await getSetupStep(context.db);
   if (current !== "complete") return redirect(`/setup/${current}`);
-  const [counts, episodes, schedule, lastCheck] = await Promise.all([
+  await rememberOrigin(context);
+  const [counts, episodes, schedule, lastCheck, lastTick, atOnce] = await Promise.all([
     statusCounts(context.db),
     listEpisodes(context.db),
     getSetting<Schedule>(context.db, "schedule"),
     getSetting<{ at: string; queued: number; error?: string }>(context.db, "last_check"),
+    getSetting<string>(context.db, "last_tick"),
+    concurrency(context.db),
   ]);
   const notice = context.url.searchParams.get("notice");
+  const live = counts.running + counts.queued > 0;
   return page("Episodes", html`<p class="steps"><a href="/admin">Admin</a></p>
 <h1>Episodes</h1>
-${notice ? html`<p>${notice}</p>` : ""}
+${notice ? html`<p class="alert-ok">${notice}</p>` : ""}
+<p class="${live ? "live" : "hint"}">${live
+    ? `Processing: ${counts.running} working, ${counts.queued} waiting. This page updates every ${LIVE_REFRESH_SECONDS} seconds.`
+    : "Nothing is processing right now."}</p>
 <dl>
 <dt>Done</dt><dd>${counts.done}</dd>
 <dt>Working</dt><dd>${counts.running}</dd>
@@ -144,25 +179,43 @@ ${notice ? html`<p>${notice}</p>` : ""}
 <dt>Failed</dt><dd>${counts.failed}</dd>
 <dt>Not imported</dt><dd>${counts.not_imported}</dd>
 <dt>Schedule</dt><dd>${schedule ? describeSchedule(schedule) : "Not set"} · <a href="/admin/schedule">Change</a></dd>
-<dt>Last check</dt><dd>${lastCheck ? `${lastCheck.at.slice(0, 16).replace("T", " ")} UTC · ${lastCheck.error ?? `${lastCheck.queued} new`}` : "Not yet"}</dd>
+<dt>Last feed check</dt><dd>${lastCheck ? `${ago(lastCheck.at)} · ${lastCheck.error ?? `${lastCheck.queued} new`}` : "Not yet"}</dd>
+<dt>Background worker</dt><dd>${lastTick ? `last ran ${ago(lastTick)}` : "hasn't run yet"} · runs hourly and restarts stalled work</dd>
 </dl>
+<form class="row" method="post" action="/admin/episodes/concurrency">
+<label for="f-concurrency" class="inline-label">Episodes at once</label>
+<select id="f-concurrency" name="concurrency">${Array.from({ length: MAX_CONCURRENCY }, (_unused, index) => index + 1).map((value) => html`<option value="${value}"${value === atOnce ? html` selected` : ""}>${value}</option>`)}</select>
+<button class="quiet" type="submit">Save</button>
+<span class="hint">Use 1 if your transcription or AI plan has low rate limits.</span>
+</form>
 <div class="row">
 <form class="inline" method="post" action="/admin/episodes/check"><button class="quiet" type="submit">Check for new episodes now</button></form>
+${counts.failed > 0 ? html`<form class="inline" method="post" action="/admin/episodes/queue"><input type="hidden" name="failed" value="1"><button class="quiet" type="submit">Retry all ${counts.failed} failed</button></form>` : ""}
 ${counts.not_imported > 0 ? html`<form class="inline" method="post" action="/admin/episodes/queue"><input type="hidden" name="all" value="1"><button class="quiet" type="submit">Import all ${counts.not_imported} older episodes</button></form>` : ""}
 </div>
-<p class="hint">Up to 3 episodes are processed at a time. This page doesn't refresh itself; reload to see progress.</p>
 <table class="episodes">
 <thead><tr><th>Episode</th><th>Status</th><th></th></tr></thead>
 <tbody>
 ${episodes.map((episode) => html`<tr>
-<td>${episode.title}<br><span class="hint">${episode.published_at?.slice(0, 10) ?? ""}</span></td>
-<td>${STATUS_LABELS[episode.status]}${episode.status === "running" && episode.stage ? ` (${STAGE_LABELS[episode.stage]})` : ""}${episode.error ? html`<br><span class="error">${episode.error}</span>` : ""}</td>
+<td>${episode.status === "done" ? html`<a href="/episodes/${episode.id}">${episode.title}</a>` : episode.title}<br><span class="hint">${episode.published_at?.slice(0, 10) ?? ""}</span></td>
+<td>${episodeStatus(episode)}</td>
 <td>${episode.status === "failed" || episode.status === "not_imported"
     ? html`<form method="post" action="/admin/episodes/queue"><input type="hidden" name="id" value="${episode.id}"><button class="quiet" type="submit">${episode.status === "failed" ? "Retry" : "Import"}</button></form>`
     : ""}</td>
 </tr>`)}
 </tbody>
-</table>`, siteTitle(context));
+</table>`, { ...siteTitle(context), ...(live ? { refreshSeconds: LIVE_REFRESH_SECONDS } : {}) });
+}
+
+/** POST /admin/episodes/concurrency */
+export async function saveConcurrency(context: Context): Promise<Response> {
+  const denied = requireAdmin(context);
+  if (denied) return denied;
+  const value = Number((await context.request.formData()).get("concurrency"));
+  if (!Number.isInteger(value) || value < 1 || value > MAX_CONCURRENCY) return redirect(`/admin/episodes?notice=${encodeURIComponent(`Choose between 1 and ${MAX_CONCURRENCY}.`)}`);
+  await putSetting(context.db, "processing", { concurrency: value } satisfies ProcessingSettings);
+  await dispatchQueued(context.env);
+  return redirect(`/admin/episodes?notice=${encodeURIComponent(`Now processing up to ${value} episode${value === 1 ? "" : "s"} at once. Episodes already working finish first.`)}`);
 }
 
 /** Fetches the feed, queues anything new and starts work. Shared by the button and the hourly tick. */
@@ -184,6 +237,7 @@ export async function checkFeed(env: AppEnv): Promise<{ queued: number; error?: 
 export async function checkNow(context: Context): Promise<Response> {
   const denied = requireAdmin(context);
   if (denied) return denied;
+  await rememberOrigin(context);
   const result = await checkFeed(context.env);
   const notice = result.error ?? (result.queued === 0 ? "No new episodes." : `Found ${result.queued} new episode${result.queued === 1 ? "" : "s"}.`);
   return redirect(`/admin/episodes?notice=${encodeURIComponent(notice)}`);
@@ -193,8 +247,10 @@ export async function checkNow(context: Context): Promise<Response> {
 export async function queueFromDashboard(context: Context): Promise<Response> {
   const denied = requireAdmin(context);
   if (denied) return denied;
+  await rememberOrigin(context);
   const form = await context.request.formData();
   if (form.get("all") === "1") await queueAllNotImported(context.db);
+  else if (form.get("failed") === "1") await queueAllFailed(context.db);
   else await queueEpisodes(context.db, [String(form.get("id") ?? "")]);
   await dispatchQueued(context.env);
   return redirect("/admin/episodes");
@@ -226,6 +282,7 @@ ${error ? html`<p class="alert">${error}</p>` : ""}
 /** The hourly cron: check the feed when the schedule says so, and always keep the queue moving. */
 export async function hourlyTick(env: AppEnv, at: Date): Promise<void> {
   if ((await getSetupStep(env.DB)) !== "complete") return;
+  await putSetting(env.DB, "last_tick", at.toISOString());
   const schedule = await getSetting<Schedule>(env.DB, "schedule");
   const lastSlot = await getSetting<string>(env.DB, "last_scheduled_slot");
   if (schedule && isDue(schedule, at, lastSlot)) {

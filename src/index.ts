@@ -20,10 +20,11 @@ import { timingSafeEqual } from "./crypto.ts";
 import { clientIp, type Context, redirect, requireAdmin, siteTitle } from "./context.ts";
 import type { AppEnv } from "./env.ts";
 import { page, SECURITY_HEADERS, STYLESHEET } from "./html.ts";
-import { checkNow, episodesDashboard, hourlyTick, importStep, queueFromDashboard, scheduleSettings } from "./imports.ts";
+import { serveAudio } from "./audio.ts";
+import { checkNow, episodesDashboard, hourlyTick, importStep, queueFromDashboard, saveConcurrency, scheduleSettings } from "./imports.ts";
 import { keyInfo } from "./keys.ts";
 import { acceptInvite, membersPage, reinviteMember, removeMember, showInvite } from "./members.ts";
-import { episodePage, episodesPage, researchAdmin, researchAsk, researchPage, researchSettings } from "./research.ts";
+import { canViewResearch, episodePage, episodesPage, researchAdmin, researchAsk, researchPage, researchSettings } from "./research.ts";
 import { confirmLink, emailSignInEnabled, requestLink, showLink } from "./links.ts";
 import { ensureSchema } from "./schema.ts";
 import {
@@ -107,6 +108,7 @@ async function route(context: Context): Promise<Response> {
     case "GET /admin/episodes": return episodesDashboard(context);
     case "POST /admin/episodes/check": return checkNow(context);
     case "POST /admin/episodes/queue": return queueFromDashboard(context);
+    case "POST /admin/episodes/concurrency": return saveConcurrency(context);
     case "GET /admin/schedule":
     case "POST /admin/schedule": return scheduleSettings(context);
     case "GET /research": return researchPage(context);
@@ -123,6 +125,8 @@ async function route(context: Context): Promise<Response> {
     default: {
       const episode = /^\/episodes\/([0-9a-f-]{36})$/u.exec(url.pathname);
       if (episode && request.method === "GET") return episodePage(context, episode[1]!);
+      const audio = /^\/audio\/([0-9a-f-]{36})$/u.exec(url.pathname);
+      if (audio && (request.method === "GET" || request.method === "HEAD")) return serveAudio(context, audio[1]!, () => canViewResearch(context));
       const match = /^\/(setup|admin)\/([a-z]+)$/u.exec(url.pathname);
       if (match && isProviderStep(match[2]!) && (request.method === "GET" || request.method === "POST")) {
         const wizard = match[1] === "setup";

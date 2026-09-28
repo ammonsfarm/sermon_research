@@ -1,5 +1,6 @@
 import type { AppEnv } from "./env.ts";
 import type { Feed, FeedEpisode } from "./feed.ts";
+import { getSetting } from "./settings.ts";
 
 export type EpisodeStatus = "not_imported" | "queued" | "running" | "done" | "failed";
 export type EpisodeStage = "transcribe" | "summarize" | "index";
@@ -15,11 +16,24 @@ export interface EpisodeRow {
   readonly stage: EpisodeStage | null;
   readonly attempts: number;
   readonly error: string | null;
+  readonly detail: string | null;
+  readonly last_error: string | null;
+  readonly audio_bytes: number | null;
   readonly updated_at: string;
 }
 
-/** Episodes processed at once. Keeps provider rate limits and spend predictable. */
-export const MAX_RUNNING = 3;
+/** Episodes processed at once unless an admin changes it. Free provider tiers often allow only one or two. */
+export const DEFAULT_CONCURRENCY = 2;
+export const MAX_CONCURRENCY = 5;
+
+export interface ProcessingSettings {
+  readonly concurrency: number;
+}
+
+export async function concurrency(db: D1Database): Promise<number> {
+  const value = (await getSetting<ProcessingSettings>(db, "processing"))?.concurrency;
+  return typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= MAX_CONCURRENCY ? value : DEFAULT_CONCURRENCY;
+}
 /** A run still marked running after this long is treated as lost and marked failed. */
 const STALE_RUN_MS = 6 * 3_600_000;
 
@@ -58,8 +72,14 @@ export async function recordFeed(db: D1Database, feed: Feed, options: { backfill
 export async function queueEpisodes(db: D1Database, ids: readonly string[]): Promise<void> {
   const now = new Date().toISOString();
   await db.batch(ids.map((id) => db.prepare(
-    "UPDATE episodes SET status = 'queued', stage = NULL, error = NULL, updated_at = ? WHERE id = ? AND status IN ('failed', 'not_imported')",
+    "UPDATE episodes SET status = 'queued', stage = NULL, detail = NULL, last_error = NULL, error = NULL, updated_at = ? WHERE id = ? AND status IN ('failed', 'not_imported')",
   ).bind(now, id)));
+}
+
+export async function queueAllFailed(db: D1Database): Promise<number> {
+  const result = await db.prepare("UPDATE episodes SET status = 'queued', stage = NULL, detail = NULL, last_error = NULL, error = NULL, updated_at = ? WHERE status = 'failed'")
+    .bind(new Date().toISOString()).run();
+  return result.meta.changes;
 }
 
 export async function queueAllNotImported(db: D1Database): Promise<number> {
@@ -68,17 +88,17 @@ export async function queueAllNotImported(db: D1Database): Promise<number> {
 }
 
 /**
- * Starts workflow runs for queued episodes, newest first, up to MAX_RUNNING at
+ * Starts workflow runs for queued episodes, newest first, up to the concurrency setting at
  * once. Each run starts the next when it finishes; the hourly tick also calls
  * this, so a lost hand-off only delays work.
  */
 export async function dispatchQueued(env: AppEnv, now = Date.now()): Promise<number> {
   const db = env.DB;
   await db.prepare(
-    "UPDATE episodes SET status = 'failed', stage = NULL, error = 'The run stopped reporting progress. Retry it.', updated_at = ? WHERE status = 'running' AND updated_at < ?",
+    "UPDATE episodes SET status = 'failed', stage = NULL, detail = NULL, error = COALESCE('The run stopped reporting progress. Last error: ' || last_error, 'The run stopped reporting progress. Retry it.'), last_error = NULL, updated_at = ? WHERE status = 'running' AND updated_at < ?",
   ).bind(new Date(now).toISOString(), new Date(now - STALE_RUN_MS).toISOString()).run();
   const running = await db.prepare("SELECT count(*) AS n FROM episodes WHERE status = 'running'").first<{ n: number }>();
-  const slots = MAX_RUNNING - (running?.n ?? 0);
+  const slots = (await concurrency(db)) - (running?.n ?? 0);
   if (slots <= 0) return 0;
   const { results } = await db.prepare(
     "SELECT id, attempts FROM episodes WHERE status = 'queued' ORDER BY published_at DESC, created_at DESC LIMIT ?",
@@ -87,7 +107,7 @@ export async function dispatchQueued(env: AppEnv, now = Date.now()): Promise<num
   for (const episode of results) {
     const attempt = episode.attempts + 1;
     const claimed = await db.prepare(
-      "UPDATE episodes SET status = 'running', stage = 'transcribe', attempts = ?, error = NULL, updated_at = ? WHERE id = ? AND status = 'queued'",
+      "UPDATE episodes SET status = 'running', stage = 'transcribe', detail = 'Starting', last_error = NULL, attempts = ?, error = NULL, updated_at = ? WHERE id = ? AND status = 'queued'",
     ).bind(attempt, new Date(now).toISOString(), episode.id).run();
     if (claimed.meta.changes !== 1) continue;
     try {
@@ -95,7 +115,7 @@ export async function dispatchQueued(env: AppEnv, now = Date.now()): Promise<num
       started += 1;
     } catch (error) {
       console.error("could not start episode workflow", episode.id, error);
-      await db.prepare("UPDATE episodes SET status = 'queued', stage = NULL, updated_at = ? WHERE id = ?").bind(new Date(now).toISOString(), episode.id).run();
+      await db.prepare("UPDATE episodes SET status = 'queued', stage = NULL, detail = NULL, updated_at = ? WHERE id = ?").bind(new Date(now).toISOString(), episode.id).run();
       break;
     }
   }
@@ -111,7 +131,7 @@ export async function statusCounts(db: D1Database): Promise<Record<EpisodeStatus
 
 export async function listEpisodes(db: D1Database, limit = 200): Promise<EpisodeRow[]> {
   const { results } = await db.prepare(
-    `SELECT id, guid, title, published_at, audio_url, duration_seconds, status, stage, attempts, error, updated_at
+    `SELECT id, guid, title, published_at, audio_url, duration_seconds, status, stage, attempts, error, detail, last_error, audio_bytes, updated_at
      FROM episodes ORDER BY published_at DESC, created_at DESC LIMIT ?`,
   ).bind(limit).all<EpisodeRow>();
   return results;
