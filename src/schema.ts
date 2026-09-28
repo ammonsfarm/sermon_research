@@ -124,6 +124,23 @@ export const MIGRATIONS: readonly { readonly version: number; readonly statement
       `ALTER TABLE episodes ADD COLUMN audio_bytes INTEGER`,
     ],
   },
+  {
+    version: 6,
+    statements: [
+      // Outlines, study guides and other Markdown documents written from the sermons.
+      `CREATE TABLE IF NOT EXISTS documents (
+        id TEXT PRIMARY KEY,
+        user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+        kind TEXT NOT NULL,
+        request TEXT NOT NULL,
+        title TEXT NOT NULL,
+        markdown TEXT NOT NULL,
+        sources_json TEXT NOT NULL CHECK (json_valid(sources_json)),
+        created_at TEXT NOT NULL
+      )`,
+      `CREATE INDEX IF NOT EXISTS documents_by_user ON documents(user_id, created_at)`,
+    ],
+  },
 ];
 
 let applied: Promise<void> | undefined;

@@ -119,6 +119,8 @@ export const TRANSCRIPT_SEGMENTS = [
 ];
 export const SUMMARY_REPLY = "```json\n{\"summary\": \"Grace is a gift.\", \"topics\": [\"grace\"], \"scriptures\": [\"Ephesians 2:8\"]}\n```";
 
+export const DOCUMENT_REPLY = "```markdown\n# Saved by Grace\n\n**Big idea:** grace is a gift [1].\n\n## Main points\n\n1. Grace is unearned [1]\n   - Read Ephesians 2:8\n2. Faith receives it [2]\n\n<script>alert(1)</script> [evil](javascript:alert(1))\n```";
+
 export const ANSWER_REPLY = "Salvation is by grace [1].\n\nSee also [1, 2] and <b>[9]</b>.";
 
 export interface FakeCall { readonly url: string; readonly method: string; readonly authorization: string | null; readonly userAgent: string | null; readonly body: unknown }
@@ -141,7 +143,7 @@ export function fakeProviders(fail: Record<string, number> = {}): { calls: FakeC
     if (url === FEED_URL) return new Response(FEED_XML, { headers: { "Content-Type": "application/rss+xml" } });
     if (url.endsWith("/chat/completions")) {
       const system = ((body as { messages?: { role: string; content: string }[] } | null)?.messages ?? []).find((message) => message.role === "system")?.content ?? "";
-      const content = system.includes("numbered sources") ? ANSWER_REPLY : system ? SUMMARY_REPLY : "OK";
+      const content = system.includes("Markdown document") ? DOCUMENT_REPLY : system.includes("numbered sources") ? ANSWER_REPLY : system ? SUMMARY_REPLY : "OK";
       return Response.json({ choices: [{ message: { content } }] });
     }
     if (url === "https://api.openai.com/v1/embeddings") {

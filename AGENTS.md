@@ -26,10 +26,11 @@ before anything in the "Ask first" list below.
 | `src/workflow.ts` | The Cloudflare Workflow class that runs `pipeline.ts` for one episode |
 | `src/schedule.ts` | Daily/weekly schedule in the church's time zone |
 | `src/research.ts` | Research page (cited answers), episode search and pages, research access settings |
+| `src/documents.ts`, `src/markdown.ts` | Markdown documents written from the sermons (outline, study questions, custom), their pages and `.md` download; a small Markdown renderer that escapes everything it doesn't handle |
 | `src/members.ts` | Member invites, invite acceptance, removing members |
 | `src/usage.ts` | Hourly and daily counters for questions and searches |
 | `src/context.ts` | Request context and shared redirects |
-| `src/views.ts`, `src/html.ts` | Server-rendered pages; `html` escapes every value |
+| `src/views.ts`, `src/html.ts` | Server-rendered pages; `html` escapes every value. `READER_SCRIPT` (served at `/assets/reader.js`) is the only JavaScript: the episode read-along |
 | `test/` | `node:test` suites; `test/d1-sqlite.ts` stands in for D1 |
 | `wrangler.jsonc` | Worker name, D1, Vectorize, Workflow and the hourly cron |
 
@@ -83,7 +84,14 @@ first request after each deploy.
   `src/research.ts`.
 - **Answers are poor or say the sources don't cover it:** check that episodes
   show Done in Admin → Episodes. A stronger answers-AI model helps most.
-  `SOURCES` in `src/research.ts` sets how many passages each answer sees.
+  `SOURCES` in `src/research.ts` sets how many passages each answer sees;
+  `DOCUMENT_SOURCES` in `src/documents.ts` does the same for documents.
+- **Add or change a document type:** edit `OUTPUTS` in `src/research.ts` (the
+  menu) and `INSTRUCTIONS` in `src/documents.ts` (what the AI is told).
+  Documents count against the same question limits and need a signed-in person.
+- **Word highlighting is early or late:** Mistral returns sentence timings, so
+  the word is estimated by spreading each sentence evenly over its words.
+  Sentence highlighting is exact; true word timings would need re-transcribing.
 - **The admin is locked out (forgot password):** there's no reset for admins. With the
   person's permission, generate a hash locally:
   `node -e "import('./src/crypto.ts').then(async c => console.log(await c.hashPassword(process.argv[1])))" 'new password here'`

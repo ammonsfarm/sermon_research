@@ -1,9 +1,10 @@
 import { type Context, clientIp, redirect, requireAdmin, siteTitle } from "./context.ts";
 import { html, type Html, page } from "./html.ts";
 import { ProviderError, withUserAgent } from "./providers.ts";
-import { embed, requireKey } from "./pipeline.ts";
+import { embed, requireKey, type Segment } from "./pipeline.ts";
 import { getSetting, getSetupStep, type LlmSettingsRecord, type Ministry, putSetting } from "./settings.ts";
 import { HOUR_MS, recordUse, startOfUtcDay, usedSince } from "./usage.ts";
+import { createDocument } from "./documents.ts";
 import type { AppEnv } from "./env.ts";
 
 export interface ResearchSettings {
@@ -37,12 +38,30 @@ export async function canViewResearch(context: Context): Promise<boolean> {
 }
 
 /** Null when the visitor may use the research pages, otherwise the response to send. */
-async function gate(context: Context): Promise<Response | null> {
+export async function gate(context: Context): Promise<Response | null> {
   if ((await getSetupStep(context.db)) !== "complete") {
     return context.session?.user.role === "admin" ? redirect("/admin") : page("Not ready", html`<h1>Not ready yet</h1><p class="lead">This site is still being set up.</p>`, { status: 503, ...siteTitle(context) });
   }
   if (context.session) return null;
   return (await researchSettings(context.db)).access === "public" ? null : redirect("/login");
+}
+
+/**
+ * Counts one question or document against the per-person hourly limit and
+ * the site's daily limit (admins are exempt from the daily one). Returns the
+ * message to show when a limit is reached.
+ */
+async function useQuota(context: Context): Promise<string | null> {
+  const { db } = context;
+  const who = actor(context);
+  const now = Date.now();
+  if (await usedSince(db, who.bucket, now - HOUR_MS) >= who.perHour) return "You've asked a lot of questions this hour. Try again later.";
+  const isAdmin = context.session?.user.role === "admin";
+  if (!isAdmin && await usedSince(db, "ask-all", startOfUtcDay(now)) >= (await researchSettings(db)).dailyQuestions) {
+    return "This site has reached its limit of questions for today. Try again tomorrow.";
+  }
+  await recordUse(db, isAdmin ? [who.bucket] : [who.bucket, "ask-all"], now);
+  return null;
 }
 
 function actor(context: Context): { bucket: string; perHour: number } {
@@ -60,9 +79,10 @@ export function formatTime(seconds: number | null): string {
   return h > 0 ? `${h}:${String(m).padStart(2, "0")}:${s}` : `${m}:${s}`;
 }
 
-function nav(context: Context, current: "ask" | "episodes"): Html {
+export function nav(context: Context, current: "ask" | "episodes" | "documents" | null): Html {
   const user = context.session?.user;
-  return html`<p class="steps">${current === "ask" ? html`<strong>Ask</strong>` : html`<a href="/research">Ask</a>`} · ${current === "episodes" ? html`<strong>Episodes</strong>` : html`<a href="/episodes">Episodes</a>`}${user?.role === "admin" ? html` · <a href="/admin">Admin</a>` : ""}${user ? "" : html` · <a href="/login">Sign in</a>`}</p>`;
+  const item = (key: typeof current, href: string, label: string) => key === current ? html`<strong>${label}</strong>` : html`<a href="${href}">${label}</a>`;
+  return html`<p class="steps">${item("ask", "/research", "Ask")} · ${item("episodes", "/episodes", "Episodes")}${user ? html` · ${item("documents", "/documents", "Documents")}` : ""}${user?.role === "admin" ? html` · <a href="/admin">Admin</a>` : ""}${user ? "" : html` · <a href="/login">Sign in</a>`}</p>`;
 }
 
 // ---------------------------------------------------------------- retrieval
@@ -86,8 +106,8 @@ async function nearest(env: AppEnv, text: string, topK: number): Promise<{ id: s
   return result.matches.map((match) => ({ id: match.id, score: match.score }));
 }
 
-export async function retrieve(env: AppEnv, question: string): Promise<Passage[]> {
-  const matches = await nearest(env, question, SOURCES);
+export async function retrieve(env: AppEnv, question: string, topK = SOURCES): Promise<Passage[]> {
+  const matches = await nearest(env, question, topK);
   if (matches.length === 0) return [];
   const { results } = await env.DB.prepare(
     `SELECT c.id, c.episode_id, c.kind, c.seq, c.text, c.start_seconds, e.title, e.published_at
@@ -101,29 +121,53 @@ export async function retrieve(env: AppEnv, question: string): Promise<Passage[]
   }));
 }
 
-export async function answer(env: AppEnv, ministry: Ministry | null, question: string, passages: readonly Passage[]): Promise<string> {
+/** Who the sermons come from, for the answers AI's instructions. */
+export function preamble(ministry: Ministry | null): string {
+  const church = ministry?.churchName ?? "this church";
+  const speakers = ministry?.speakerNames.length ? ` The speakers include ${ministry.speakerNames.join(", ")}.` : "";
+  return `You help people study sermons preached at ${church}.${speakers}`;
+}
+
+/** The numbered sources block every prompt shares. */
+export function sourcesPrompt(passages: readonly Passage[]): string {
+  return passages.map((passage) =>
+    `[${passage.n}] "${passage.title}" (${passage.publishedAt?.slice(0, 10) ?? "undated"})${passage.kind === "summary" ? ", summary" : passage.start !== null ? `, at ${formatTime(passage.start)}` : ""}:\n${passage.text}`).join("\n\n");
+}
+
+/** One chat completion from the configured answers AI. */
+export async function chat(env: AppEnv, system: string, user: string, options: { maxTokens: number; timeoutMs: number }): Promise<string> {
   const llm = await getSetting<LlmSettingsRecord>(env.DB, "llm");
   if (!llm) throw new ProviderError("The answers AI isn't set up.");
   const apiKey = await requireKey(env, "llm");
-  const church = ministry?.churchName ?? "this church";
-  const speakers = ministry?.speakerNames.length ? ` The speakers include ${ministry.speakerNames.join(", ")}.` : "";
-  const system = `You help people study sermons preached at ${church}.${speakers} Answer only from the numbered sources, which are passages from sermon transcripts and summaries. Cite every claim with the source number in square brackets, like [2]. If the sources don't answer the question, say so plainly and don't guess. Keep answers under 250 words, in plain paragraphs.`;
-  const sources = passages.map((passage) =>
-    `[${passage.n}] "${passage.title}" (${passage.publishedAt?.slice(0, 10) ?? "undated"})${passage.kind === "summary" ? ", summary" : passage.start !== null ? `, at ${formatTime(passage.start)}` : ""}:\n${passage.text}`).join("\n\n");
   const response = await fetch(`${llm.baseUrl}/chat/completions`, {
     method: "POST",
     headers: withUserAgent({ Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" }),
     body: JSON.stringify({
       model: llm.model,
-      messages: [{ role: "system", content: system }, { role: "user", content: `Sources:\n\n${sources}\n\nQuestion: ${question}` }],
-      max_tokens: ANSWER_MAX_TOKENS,
+      messages: [{ role: "system", content: system }, { role: "user", content: user }],
+      max_tokens: options.maxTokens,
     }),
-    signal: AbortSignal.timeout(60_000),
+    signal: AbortSignal.timeout(options.timeoutMs),
   });
   if (!response.ok) throw new ProviderError(`The answers AI returned HTTP ${response.status}.`);
   const content = ((await response.json()) as { choices?: { message?: { content?: unknown } }[] }).choices?.[0]?.message?.content;
   if (typeof content !== "string" || !content.trim()) throw new ProviderError("The answers AI returned an empty answer.");
   return content.trim();
+}
+
+export async function answer(env: AppEnv, ministry: Ministry | null, question: string, passages: readonly Passage[]): Promise<string> {
+  const system = `${preamble(ministry)} Answer only from the numbered sources, which are passages from sermon transcripts and summaries. Cite every claim with the source number in square brackets, like [2]. If the sources don't answer the question, say so plainly and don't guess. Keep answers under 250 words, in plain paragraphs.`;
+  return chat(env, system, `Sources:\n\n${sourcesPrompt(passages)}\n\nQuestion: ${question}`, { maxTokens: ANSWER_MAX_TOKENS, timeoutMs: 60_000 });
+}
+
+/** The numbered list of sources under an answer or document. */
+export function sourcesList(passages: readonly Omit<Passage, "chunkId">[]): Html {
+  return html`<h2>Sources</h2>
+<ol class="sources">
+${passages.map((passage) => html`<li id="source-${passage.n}"><a href="/episodes/${passage.episodeId}#t-${passage.seq}">${passage.title}</a>
+<span class="hint">${passage.publishedAt?.slice(0, 10) ?? ""}${passage.kind === "summary" ? " · summary" : passage.start !== null ? ` · ${formatTime(passage.start)}` : ""}</span>
+<p class="quote">${passage.text.length > 400 ? `${passage.text.slice(0, 400)}…` : passage.text}</p></li>`)}
+</ol>`;
 }
 
 /** Escapes the answer and turns [1] or [1, 3] into links to the matching sources. */
@@ -147,11 +191,29 @@ export function renderAnswer(text: string, sourceCount: number): Html {
 
 // ---------------------------------------------------------------- pages
 
-function askForm(question = ""): Html {
+export const OUTPUTS = {
+  answer: "Answer",
+  outline: "Sermon outline",
+  questions: "Study questions",
+  custom: "Custom document",
+} as const;
+export type OutputKind = keyof typeof OUTPUTS;
+
+export function parseOutput(value: unknown): OutputKind {
+  return typeof value === "string" && Object.hasOwn(OUTPUTS, value) ? value as OutputKind : "answer";
+}
+
+export function askForm(context: Context, question = "", kind: OutputKind = "answer"): Html {
+  const signedIn = Boolean(context.session);
   return html`<form method="post" action="/research">
-<div class="field"><label for="f-question">Ask about the sermons</label>
+<div class="field"><label for="f-question">Ask about the sermons, or describe the document you want</label>
 <textarea id="f-question" name="question" rows="3" maxlength="${QUESTION_MAX}" required>${question}</textarea></div>
-<button type="submit">Ask</button>
+<div class="row">
+<label for="f-kind" class="inline-label">Create</label>
+<select id="f-kind" name="kind">${Object.entries(OUTPUTS).map(([value, label]) => html`<option value="${value}"${value === kind ? html` selected` : ""}${value !== "answer" && !signedIn ? html` disabled` : ""}>${label}</option>`)}</select>
+<button type="submit">Go</button>
+</div>
+${signedIn ? html`<p class="hint">Documents are written in Markdown from your sermons, saved under Documents, and can be downloaded as .md files.</p>` : html`<p class="hint"><a href="/login">Sign in</a> to create outlines, study questions and other documents.</p>`}
 </form>`;
 }
 
@@ -163,28 +225,23 @@ export async function researchPage(context: Context): Promise<Response> {
   return page("Ask", html`${nav(context, "ask")}
 <h1>Ask</h1>
 <p class="lead">Answers come only from ${done?.n ?? 0} indexed sermons, with links to the passages they're based on.</p>
-${askForm()}`, siteTitle(context));
+${askForm(context)}`, siteTitle(context));
 }
 
 /** POST /research */
 export async function researchAsk(context: Context): Promise<Response> {
   const blocked = await gate(context);
   if (blocked) return blocked;
-  const question = String((await context.request.formData()).get("question") ?? "").trim().slice(0, QUESTION_MAX);
-  const show = (body: Html, status = 200) => page("Ask", html`${nav(context, "ask")}<h1>Ask</h1>${askForm(question)}${body}`, { status, ...siteTitle(context) });
+  const form = await context.request.formData();
+  const question = String(form.get("question") ?? "").trim().slice(0, QUESTION_MAX);
+  const kind = parseOutput(form.get("kind"));
+  const show = (body: Html, status = 200) => page("Ask", html`${nav(context, "ask")}<h1>Ask</h1>${askForm(context, question, kind)}${body}`, { status, ...siteTitle(context) });
   if (question.length < 3) return show(html`<p class="alert">Type a question first.</p>`, 400);
+  if (kind !== "answer" && !context.session) return show(html`<p class="alert">Sign in to create documents.</p>`, 403);
 
-  const { db } = context;
-  const who = actor(context);
-  const now = Date.now();
-  if (await usedSince(db, who.bucket, now - HOUR_MS) >= who.perHour) {
-    return show(html`<p class="alert">You've asked a lot of questions this hour. Try again later.</p>`, 429);
-  }
-  const isAdmin = context.session?.user.role === "admin";
-  if (!isAdmin && await usedSince(db, "ask-all", startOfUtcDay(now)) >= (await researchSettings(db)).dailyQuestions) {
-    return show(html`<p class="alert">This site has reached its limit of questions for today. Try again tomorrow.</p>`, 429);
-  }
-  await recordUse(db, isAdmin ? [who.bucket] : [who.bucket, "ask-all"], now);
+  const limited = await useQuota(context);
+  if (limited) return show(html`<p class="alert">${limited}</p>`, 429);
+  if (kind !== "answer") return createDocument(context, kind, question, show);
 
   let passages: Passage[];
   let text: string;
@@ -197,12 +254,7 @@ export async function researchAsk(context: Context): Promise<Response> {
     return show(html`<p class="alert">The answer couldn't be generated right now. Try again in a minute.</p>`, 502);
   }
   return show(html`<section class="answer">${renderAnswer(text, passages.length)}</section>
-<h2>Sources</h2>
-<ol class="sources">
-${passages.map((passage) => html`<li id="source-${passage.n}"><a href="/episodes/${passage.episodeId}#t-${passage.seq}">${passage.title}</a>
-<span class="hint">${passage.publishedAt?.slice(0, 10) ?? ""}${passage.kind === "summary" ? " · summary" : passage.start !== null ? ` · ${formatTime(passage.start)}` : ""}</span>
-<p class="quote">${passage.text.length > 400 ? `${passage.text.slice(0, 400)}…` : passage.text}</p></li>`)}
-</ol>
+${sourcesList(passages)}
 <p class="hint">AI answers can be wrong. Check the sources before quoting them.</p>`);
 }
 
@@ -276,23 +328,50 @@ export async function episodePage(context: Context, id: string): Promise<Respons
      FROM episodes e JOIN summaries s ON s.episode_id = e.id WHERE e.id = ? AND e.status = 'done'`,
   ).bind(id).first<{ id: string; title: string; published_at: string | null; audio_url: string | null; audio_key: string | null; summary: string; topics_json: string; scriptures_json: string }>();
   if (!episode) return page("Not found", html`<h1>Episode not found</h1><p><a href="/episodes">All episodes</a></p>`, { status: 404, ...siteTitle(context) });
-  const chunks = (await db.prepare("SELECT seq, text, start_seconds FROM chunks WHERE episode_id = ? AND kind = 'transcript' ORDER BY seq")
-    .bind(id).all<{ seq: number; text: string; start_seconds: number | null }>()).results;
+  const [chunkRows, transcript] = await Promise.all([
+    db.prepare("SELECT seq, text, start_seconds FROM chunks WHERE episode_id = ? AND kind = 'transcript' ORDER BY seq")
+      .bind(id).all<{ seq: number; text: string; start_seconds: number | null }>(),
+    db.prepare("SELECT segments_json FROM transcripts WHERE episode_id = ?").bind(id).first<{ segments_json: string }>(),
+  ]);
+  const chunks = chunkRows.results;
   const topics = JSON.parse(episode.topics_json) as string[];
   const scriptures = JSON.parse(episode.scriptures_json) as string[];
   // Our own copy in R2 when we have one; the feed's link otherwise.
   const audio = episode.audio_key ? `/audio/${episode.id}` : isWebUrl(episode.audio_url) ? episode.audio_url : null;
+  const segments = audio && transcript ? segmentsByChunk(chunks, JSON.parse(transcript.segments_json) as Segment[]) : null;
   return page(episode.title, html`${nav(context, "episodes")}
 <h1>${episode.title}</h1>
 <p class="hint">${episode.published_at?.slice(0, 10) ?? ""}</p>
-${audio ? html`<audio controls preload="none" src="${audio}"></audio>` : ""}
+${audio ? html`<div class="player"><audio id="player" controls preload="metadata" src="${audio}"></audio>
+${segments ? html`<label class="follow"><input type="checkbox" id="follow" checked> Follow along as it plays</label>` : ""}</div>` : ""}
 <section id="t-0"><h2>Summary</h2>${episode.summary.split(/\n\s*\n/u).map((paragraph) => html`<p>${paragraph}</p>`)}
 ${topics.length ? html`<p><strong>Topics:</strong> ${topics.join(", ")}</p>` : ""}
 ${scriptures.length ? html`<p><strong>Scripture:</strong> ${scriptures.join(", ")}</p>` : ""}</section>
 <h2>Transcript</h2>
-${chunks.map((chunk) => html`<div class="passage" id="t-${chunk.seq}">
-${chunk.start_seconds !== null ? html`<p class="hint">${audio ? html`<a href="${audio}#t=${Math.floor(chunk.start_seconds)}">Listen from ${formatTime(chunk.start_seconds)}</a>` : formatTime(chunk.start_seconds)}</p>` : ""}
-<p>${chunk.text}</p></div>`)}`, siteTitle(context));
+${segments ? html`<p class="hint">Click any sentence to play from there. Highlighted words are estimated from sentence timings.</p>` : ""}
+<div class="${segments ? "reader" : "transcript"}">
+${chunks.map((chunk, index) => html`<div class="passage" id="t-${chunk.seq}">
+${chunk.start_seconds !== null ? html`<p class="hint">${audio ? html`<a href="${audio}#t=${Math.floor(chunk.start_seconds)}" data-seek="${chunk.start_seconds}">Listen from ${formatTime(chunk.start_seconds)}</a>` : formatTime(chunk.start_seconds)}</p>` : ""}
+<p>${segments?.[index]?.length
+    ? segments[index]!.map((segment) => html`<span class="seg" data-start="${segment.start}" data-end="${segment.end}">${segment.text.trim()}</span> `)
+    : chunk.text}</p></div>`)}
+</div>`, { ...siteTitle(context), ...(segments ? { scripts: ["/assets/reader.js"] } : {}) });
+}
+
+/**
+ * Splits the transcript's timed segments into the stored passages. Passages
+ * are built from consecutive segments, so each segment belongs to the last
+ * passage that starts at or before it.
+ */
+export function segmentsByChunk(chunks: readonly { start_seconds: number | null }[], segments: readonly Segment[]): Segment[][] {
+  const groups: Segment[][] = chunks.map(() => []);
+  let current = 0;
+  for (const segment of segments) {
+    if (!Number.isFinite(segment.start) || !Number.isFinite(segment.end) || !segment.text.trim()) continue;
+    while (current + 1 < chunks.length && (chunks[current + 1]!.start_seconds ?? Infinity) <= segment.start) current += 1;
+    groups[current]?.push(segment);
+  }
+  return groups;
 }
 
 // ---------------------------------------------------------------- admin
