@@ -50,7 +50,10 @@ code { background: var(--soft); padding: 1px 4px; border-radius: 4px; }
 header.site { position: sticky; top: 0; z-index: 10; background: var(--ink); color: var(--ink-fg); border-bottom: 3px solid var(--gold); box-shadow: 0 2px 12px rgb(0 0 0 / 12%); }
 header.site .bar { max-width: 1180px; margin: 0 auto; padding: 10px 16px; display: flex; gap: 8px 24px; align-items: center; flex-wrap: wrap; }
 header.site .brand { display: inline-flex; align-items: center; gap: 10px; color: var(--ink-fg); font-family: var(--serif); font-size: 1.2rem; font-weight: 600; letter-spacing: -.005em; text-decoration: none; margin-right: auto; }
-header.site .brand .logo { height: 34px; width: auto; max-width: 120px; object-fit: contain; border-radius: 6px; background: #fff; padding: 2px; }
+header.site .brand .logo { height: 36px; width: auto; max-width: 160px; object-fit: contain; }
+header.site .brand .logo.tile { border-radius: 6px; background: #fff; padding: 3px 6px; }
+label.check { display: flex; gap: 8px; align-items: center; font-weight: 400; margin: -8px 0 16px; }
+label.check input { width: auto; margin: 0; }
 nav.tabs-main { display: flex; gap: 2px; order: 3; width: 100%; overflow-x: auto; }
 nav.tabs-main a { position: relative; padding: 8px 12px; color: var(--ink-muted); text-decoration: none; font-weight: 500; font-size: .95rem; white-space: nowrap; border-radius: 8px; }
 nav.tabs-main a:hover { color: var(--ink-fg); background: rgb(255 255 255 / 8%); }

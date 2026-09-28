@@ -126,6 +126,9 @@ test("admins pick a color scheme and the logo shows in the header", async () => 
   const home = await (await app.request("/", { cookie })).text();
   assert.match(home, /<html lang="en" data-scheme="forest">/);
   assert.match(home, /<img class="logo" src="https:\/\/example.org\/logo.png"/);
+  await app.request("/admin/ministry", { form: { ...MINISTRY, logoUrl: "https://example.org/logo.png", colorScheme: "forest", logoTile: "on" }, cookie });
+  assert.match(await (await app.request("/", { cookie })).text(), /<img class="logo tile"/);
+  assert.match(await (await app.request("/admin/ministry", { cookie })).text(), /name="logoTile" checked/);
   await app.request("/admin/ministry", { form: { ...MINISTRY, colorScheme: "\" onload=\"x" }, cookie });
   assert.match(await (await app.request("/", { cookie })).text(), /data-scheme="navy"/);
 });
