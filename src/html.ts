@@ -1,3 +1,5 @@
+import type { Mode, SchemeId } from "./theme.ts";
+
 export function escapeHtml(value: string): string {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 }
@@ -39,6 +41,9 @@ export interface PageOptions {
   readonly siteTitle?: string;
   /** The ministry's logo, shown beside the site title. */
   readonly logoUrl?: string;
+  /** The admin's color scheme and the visitor's light / dark choice. */
+  readonly scheme?: SchemeId;
+  readonly mode?: Mode;
   readonly status?: number;
   readonly headers?: HeadersInit;
   readonly refreshSeconds?: number;
@@ -53,7 +58,7 @@ export interface PageOptions {
 export function page(title: string, body: Html, options: PageOptions = {}): Response {
   const heading = options.siteTitle ?? "Sermon Research";
   const document = html`<!doctype html>
-<html lang="en">
+<html lang="en" data-scheme="${options.scheme ?? "navy"}"${options.mode && options.mode !== "system" ? html` data-mode="${options.mode}"` : ""}>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">

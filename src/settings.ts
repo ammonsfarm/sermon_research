@@ -1,9 +1,13 @@
+import { DEFAULT_SCHEME, isScheme } from "./theme.ts";
+
 export interface Ministry {
   readonly siteTitle: string;
   readonly churchName: string;
   readonly speakerNames: readonly string[];
   readonly description: string;
   readonly logoUrl: string;
+  /** One of `SCHEMES` in theme.ts. Missing on sites set up before schemes existed. */
+  readonly colorScheme?: string;
 }
 
 /** Wizard order. Admins land on the first step not yet finished. */
@@ -61,6 +65,7 @@ export function parseMinistry(form: FormData): { ministry: Ministry } | { errors
     speakerNames: text("speakerNames", 500),
     description: text("description", 1000),
     logoUrl: text("logoUrl", 2048),
+    colorScheme: text("colorScheme", 40),
   };
   const errors: Record<string, string> = {};
   if (!values.siteTitle) errors.siteTitle = "Enter a site title.";
@@ -74,6 +79,7 @@ export function parseMinistry(form: FormData): { ministry: Ministry } | { errors
       speakerNames: values.speakerNames.split(",").map((name) => name.trim()).filter(Boolean),
       description: values.description,
       logoUrl: values.logoUrl,
+      colorScheme: isScheme(values.colorScheme) ? values.colorScheme : DEFAULT_SCHEME,
     },
   };
 }

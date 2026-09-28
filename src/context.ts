@@ -4,6 +4,7 @@ import { notFoundView } from "./views.ts";
 import { type Html, page } from "./html.ts";
 import { adminMenu, siteHeader } from "./layout.ts";
 import type { Ministry } from "./settings.ts";
+import { DEFAULT_SCHEME, isScheme, type Mode, type SchemeId } from "./theme.ts";
 
 export interface Context {
   readonly request: Request;
@@ -14,17 +15,21 @@ export interface Context {
   readonly ministry: Ministry | null;
   /** True when research is open to visitors who aren't signed in. */
   readonly researchOpen: boolean;
+  /** This visitor's light / dark choice, from a cookie. */
+  readonly mode: Mode;
 }
 
 /** The page chrome for this request: site title, main navigation and, on admin pages, the admin menu. */
-export function chrome(context: Context): { siteTitle?: string; logoUrl?: string; header?: Html; aside?: Html } {
-  if (!context.ministry) return {};
+export function chrome(context: Context): { siteTitle?: string; logoUrl?: string; scheme?: SchemeId; mode?: Mode; header?: Html; aside?: Html } {
+  if (!context.ministry) return { mode: context.mode };
   const path = context.url.pathname;
   const isAdmin = context.session?.user.role === "admin";
   return {
     siteTitle: context.ministry.siteTitle,
+    scheme: isScheme(context.ministry.colorScheme) ? context.ministry.colorScheme : DEFAULT_SCHEME,
+    mode: context.mode,
     ...(context.ministry.logoUrl ? { logoUrl: context.ministry.logoUrl } : {}),
-    header: siteHeader(context.session, path, context.researchOpen),
+    header: siteHeader(context.session, path, context.researchOpen, context.mode, path + context.url.search),
     ...(isAdmin && path.startsWith("/admin") ? { aside: adminMenu(path) } : {}),
   };
 }

@@ -1,24 +1,30 @@
+import { schemeStyles } from "./theme.ts";
+
 /** The site's only stylesheet, served at /assets/app.css. */
 export const STYLESHEET = `
+${schemeStyles()}
 :root {
   --bg: #f8f6f1; --surface: #ffffff; --fg: #1b2330; --muted: #5d6674; --line: #e3ded3; --soft: #f1ede4;
-  --ink: #16233a; --ink-2: #26426b; --ink-fg: #f6f1e6; --ink-muted: #b9c3d3;
-  --accent: #1f4e79; --accent-strong: #163b5d; --accent-fg: #ffffff; --accent-soft: #e7eef6;
-  --gold: #a8812f; --gold-bright: #d4ae5f; --gold-soft: #f6eedb;
+  --ink: var(--scheme-ink); --ink-2: color-mix(in srgb, var(--scheme-ink) 72%, var(--scheme-brand)); --ink-fg: #f6f1e6; --ink-muted: color-mix(in srgb, #ffffff 72%, var(--scheme-ink));
+  --accent: var(--scheme-brand); --accent-strong: color-mix(in srgb, var(--scheme-brand) 78%, #000000); --accent-fg: #ffffff; --accent-soft: color-mix(in srgb, var(--scheme-brand) 10%, #ffffff);
+  --gold: var(--scheme-trim); --gold-bright: color-mix(in srgb, var(--scheme-trim) 72%, #ffffff); --gold-soft: color-mix(in srgb, var(--scheme-trim) 16%, #ffffff);
   --error: #a3302a; --ok: #2e6b4f;
   --radius: 12px; --shadow: 0 1px 2px rgb(22 35 58 / 6%), 0 4px 16px rgb(22 35 58 / 6%);
   --shadow-lift: 0 2px 4px rgb(22 35 58 / 8%), 0 10px 28px rgb(22 35 58 / 10%);
   --sans: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
   --serif: "Source Serif 4", ui-serif, "Iowan Old Style", Georgia, serif;
-  color-scheme: light dark;
+  color-scheme: light;
 }
-@media (prefers-color-scheme: dark) {
-  :root { --bg: #0f131a; --surface: #171d27; --fg: #e9ecf1; --muted: #a2abb8; --line: #2a3240; --soft: #1e2531;
-    --ink: #0b1220; --ink-2: #1b2c48; --ink-fg: #f1ece1; --ink-muted: #9aa6b8;
-    --accent: #8db6e0; --accent-strong: #b1cdea; --accent-fg: #0d1826; --accent-soft: #1b2a3d;
-    --gold: #d8b56a; --gold-bright: #e6c67f; --gold-soft: #2c2616;
+@media (prefers-color-scheme: dark) { :root:not([data-mode="light"]) { color-scheme: dark; --bg: #0f131a; --surface: #171d27; --fg: #e9ecf1; --muted: #a2abb8; --line: #2a3240; --soft: #1e2531;
+    --ink: color-mix(in srgb, var(--scheme-ink) 70%, #000000); --ink-2: color-mix(in srgb, var(--scheme-ink) 60%, var(--scheme-brand)); --ink-fg: #f1ece1; --ink-muted: #a6afbd;
+    --accent: color-mix(in srgb, var(--scheme-brand) 45%, #ffffff); --accent-strong: color-mix(in srgb, var(--scheme-brand) 25%, #ffffff); --accent-fg: #0d1826; --accent-soft: color-mix(in srgb, var(--scheme-brand) 24%, #111723);
+    --gold: color-mix(in srgb, var(--scheme-trim) 70%, #ffffff); --gold-bright: color-mix(in srgb, var(--scheme-trim) 60%, #ffffff); --gold-soft: color-mix(in srgb, var(--scheme-trim) 20%, #141a22);
+    --error: #f08a80; --ok: #7fc2a1; --shadow: none; --shadow-lift: 0 0 0 1px var(--line); } }
+:root[data-mode="dark"] { color-scheme: dark; --bg: #0f131a; --surface: #171d27; --fg: #e9ecf1; --muted: #a2abb8; --line: #2a3240; --soft: #1e2531;
+    --ink: color-mix(in srgb, var(--scheme-ink) 70%, #000000); --ink-2: color-mix(in srgb, var(--scheme-ink) 60%, var(--scheme-brand)); --ink-fg: #f1ece1; --ink-muted: #a6afbd;
+    --accent: color-mix(in srgb, var(--scheme-brand) 45%, #ffffff); --accent-strong: color-mix(in srgb, var(--scheme-brand) 25%, #ffffff); --accent-fg: #0d1826; --accent-soft: color-mix(in srgb, var(--scheme-brand) 24%, #111723);
+    --gold: color-mix(in srgb, var(--scheme-trim) 70%, #ffffff); --gold-bright: color-mix(in srgb, var(--scheme-trim) 60%, #ffffff); --gold-soft: color-mix(in srgb, var(--scheme-trim) 20%, #141a22);
     --error: #f08a80; --ok: #7fc2a1; --shadow: none; --shadow-lift: 0 0 0 1px var(--line); }
-}
 @font-face { font-family: "Inter"; src: url("/fonts/inter.woff2") format("woff2"); font-weight: 100 900; font-style: normal; font-display: swap; }
 @font-face { font-family: "Source Serif 4"; src: url("/fonts/source-serif-4.woff2") format("woff2"); font-weight: 200 900; font-style: normal; font-display: swap; }
 @font-face { font-family: "Source Serif 4"; src: url("/fonts/source-serif-4-italic.woff2") format("woff2"); font-weight: 200 900; font-style: italic; font-display: swap; }
@@ -214,6 +220,24 @@ label.follow input { width: auto; }
 .tabs.js [role="tab"][aria-selected="true"] { color: var(--fg); border-bottom-color: var(--gold); }
 .tabs.js [role="tabpanel"] > h2.panel-heading { display: none; }
 .tabs.js [role="tabpanel"][hidden] { display: none; }
+
+/* Light / dark switch */
+form.mode-switch { display: inline-flex; padding: 2px; border-radius: 999px; background: rgb(255 255 255 / 8%); }
+form.mode-switch button { background: none; box-shadow: none; color: var(--ink-muted); padding: 3px 9px; border-radius: 999px; font-size: .9rem; line-height: 1.2; }
+form.mode-switch button:hover { background: rgb(255 255 255 / 10%); color: var(--ink-fg); }
+form.mode-switch button[aria-pressed="true"] { background: rgb(255 255 255 / 18%); color: var(--ink-fg); }
+
+/* Scheme picker */
+fieldset.schemes { display: grid; gap: 8px; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
+fieldset.schemes legend, fieldset.schemes .hint { grid-column: 1 / -1; }
+label.choice.scheme { align-items: center; margin: 0; cursor: pointer; }
+label.choice.scheme input { margin: 0; }
+label.choice.scheme:has(input:checked) { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.swatch { display: inline-flex; border-radius: 6px; overflow: hidden; border: 1px solid var(--line); }
+.swatch span { width: 18px; height: 24px; }
+.swatch .ink { background: var(--scheme-ink); }
+.swatch .brand { background: var(--scheme-brand); }
+.swatch .trim { background: var(--scheme-trim); }
 `;
 
 /**
