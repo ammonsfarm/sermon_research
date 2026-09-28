@@ -24,7 +24,7 @@ import { page, SECURITY_HEADERS } from "./html.ts";
 import { serveAudio } from "./audio.ts";
 import { ask, conversation, deleteConversation, home, library, researchRedirect } from "./ask.ts";
 import { deleteDocument, documentDownload, documentPage } from "./documents.ts";
-import { sermonPage, sermonsPage } from "./sermons.ts";
+import { sermonPage, sermonsPage, transcriptDownload } from "./sermons.ts";
 import { checkNow, episodesDashboard, hourlyTick, importStep, queueFromDashboard, saveConcurrency, scheduleSettings } from "./imports.ts";
 import { keyInfo } from "./keys.ts";
 import { acceptInvite, membersPage, reinviteMember, removeMember, showInvite } from "./members.ts";
@@ -136,6 +136,8 @@ async function route(context: Context): Promise<Response> {
     default: {
       const episode = /^\/episodes\/([0-9a-f-]{36})$/u.exec(url.pathname);
       if (episode && request.method === "GET") return sermonPage(context, episode[1]!);
+      const transcript = /^\/episodes\/([0-9a-f-]{36})\/transcript\.(md|txt)$/u.exec(url.pathname);
+      if (transcript && request.method === "GET") return transcriptDownload(context, transcript[1]!, transcript[2] as "md" | "txt");
       const thread = /^\/ask\/([0-9a-f-]{36})(\/delete)?$/u.exec(url.pathname);
       if (thread && request.method === "GET" && !thread[2]) return conversation(context, thread[1]!);
       if (thread && request.method === "POST" && thread[2]) return deleteConversation(context, thread[1]!);

@@ -413,3 +413,24 @@ test("series come from the part of a title after the last dash", () => {
   assert.equal(describeScope({ episodes: ["a", "b"] }, entries), "2 chosen sermons");
   assert.deepEqual(parseScope(new URLSearchParams("scope_series=Matthew&scope_from=nope&scope_episode=x&scope_to=2026-03-01")), { series: "Matthew", to: "2026-03-01" });
 });
+
+test("full transcripts download as Markdown or plain text, for people who can view the sermons", async () => {
+  const site = await indexedSite();
+  try {
+    const id = site.ids[0]!;
+    const page = await (await site.app.request(`/episodes/${id}`, { cookie: site.cookie })).text();
+    assert.match(page, new RegExp(`href="/episodes/${id}/transcript.md" download`));
+    assert.equal((await site.app.request(`/episodes/${id}/transcript.md`)).headers.get("Location"), "/login");
+    const md = await site.app.request(`/episodes/${id}/transcript.md`, { cookie: site.cookie });
+    assert.equal(md.headers.get("Content-Type"), "text/markdown; charset=utf-8");
+    assert.match(md.headers.get("Content-Disposition") ?? "", /attachment; filename="2026-09-14-faith-works-transcript\.md"/);
+    const markdown = await md.text();
+    assert.match(markdown, /^# Faith & Works\n\n2026-09-14 · Grace Church\n\n## Summary\n\nGrace is a gift\./u);
+    assert.match(markdown, /## Transcript\n\n\*\*0:00\*\* Welcome, church\./u);
+    const txt = await (await site.app.request(`/episodes/${id}/transcript.txt`, { cookie: site.cookie })).text();
+    assert.match(txt, /^Faith & Works\n2026-09-14 · Grace Church\n\n\[0:00\] Welcome, church\./u);
+    assert.equal((await site.app.request("/episodes/00000000-0000-0000-0000-000000000000/transcript.txt", { cookie: site.cookie })).status, 404);
+  } finally {
+    site.restore();
+  }
+});
