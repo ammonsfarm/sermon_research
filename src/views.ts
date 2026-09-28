@@ -1,3 +1,4 @@
+import type { ResearchSettings } from "./research.ts";
 import type { User } from "./auth.ts";
 import type { keyInfo } from "./keys.ts";
 import { field, html, type Html } from "./html.ts";
@@ -72,10 +73,13 @@ ${field({ name: "email", label: "Email", type: "email", value: values.email ?? "
 </form>` : ""}`;
 }
 
-export function homeView(ministry: Ministry | null, user: User | null): Html {
+export function homeView(ministry: Ministry | null, user: User | null, canResearch: boolean): Html {
   return html`<h1>${ministry?.siteTitle ?? "Sermon Research"}</h1>
 ${ministry?.description ? html`<p class="lead">${ministry.description}</p>` : ""}
-<p>The sermon research page is coming soon.</p>
+${canResearch
+    ? html`<p>Ask questions about the sermons and get answers with links to the exact passages, or browse and search every episode.</p>
+<div class="row"><a class="button" href="/research">Ask a question</a><a href="/episodes">Browse episodes</a></div>`
+    : html`<p>Sign in to ask questions about the sermons and search every episode.</p>`}
 <div class="row">
 ${user
     ? html`${user.role === "admin" ? html`<a href="/admin">Admin</a>` : ""}
@@ -94,6 +98,7 @@ export interface AdminOverview {
   readonly transcription: CheckedSettings | null;
   readonly email: EmailSettings | null;
   readonly keys: Awaited<ReturnType<typeof keyInfo>>;
+  readonly research: ResearchSettings;
 }
 
 function keyLabel(info: { last4: string } | undefined): string {
@@ -122,7 +127,12 @@ ${overview.saved ? html`<p>Saved.</p>` : ""}
 </dl>
 <h2>Episodes</h2>
 <p><a href="/admin/episodes">Import progress and episodes</a> · <a href="/admin/schedule">Schedule</a></p>
-<p>The research page arrives in the next release.</p>
+<h2>Research</h2>
+<dl>
+<dt><a href="/admin/research">Access</a></dt><dd>${overview.research.access === "public" ? "Anyone" : "Members only"} · up to ${overview.research.dailyQuestions} questions a day</dd>
+<dt><a href="/admin/members">Members</a></dt><dd>Invite and remove people</dd>
+</dl>
+<p><a href="/research">Open the research page</a></p>
 <h2>Sessions</h2>
 <div class="row">
 <form class="inline" method="post" action="/logout"><button class="quiet" type="submit">Sign out</button></form>

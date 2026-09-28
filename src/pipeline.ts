@@ -128,7 +128,7 @@ async function setStage(db: D1Database, episodeId: string, stage: "transcribe" |
   await db.prepare("UPDATE episodes SET stage = ?, updated_at = ? WHERE id = ?").bind(stage, new Date().toISOString(), episodeId).run();
 }
 
-async function requireKey(env: AppEnv, slot: "llm" | "embeddings" | "transcription"): Promise<string> {
+export async function requireKey(env: AppEnv, slot: "llm" | "embeddings" | "transcription"): Promise<string> {
   const key = await getKey(env.DB, env.APP_SECRET ?? "", slot);
   if (!key) throw new ProviderError(`The ${slot === "llm" ? "answers AI" : slot} key is missing or unreadable. Re-enter it in Admin.`);
   return key;

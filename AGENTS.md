@@ -24,6 +24,9 @@ before anything in the "Ask first" list below.
 | `src/pipeline.ts` | The per-episode steps: transcribe (Mistral), summarize (answers AI), chunk, embed and write to Vectorize |
 | `src/workflow.ts` | The Cloudflare Workflow class that runs `pipeline.ts` for one episode |
 | `src/schedule.ts` | Daily/weekly schedule in the church's time zone |
+| `src/research.ts` | Research page (cited answers), episode search and pages, research access settings |
+| `src/members.ts` | Member invites, invite acceptance, removing members |
+| `src/usage.ts` | Hourly and daily counters for questions and searches |
 | `src/context.ts` | Request context and shared redirects |
 | `src/views.ts`, `src/html.ts` | Server-rendered pages; `html` escapes every value |
 | `test/` | `node:test` suites; `test/d1-sqlite.ts` stands in for D1 |
@@ -61,7 +64,18 @@ first request after each deploy.
   anywhere; the app uses the request's own origin.
 - **Rename the Worker:** change `name` in `wrangler.jsonc` and redeploy. The
   old `workers.dev` URL stops working.
-- **Locked out (forgot password):** no reset flow exists yet. With the
+- **A member forgot their password:** an admin opens Admin → Members and
+  presses "New invite link" next to them. The link lets them choose a new
+  password and signs them out elsewhere.
+- **Make the research page public or change the daily cap:** Admin →
+  Research access. Public visitors get 20 questions an hour each; signed-in
+  people get 60. The daily cap covers everyone but admins and resets at
+  midnight UTC. These hourly numbers are constants at the top of
+  `src/research.ts`.
+- **Answers are poor or say the sources don't cover it:** check that episodes
+  show Done in Admin → Episodes. A stronger answers-AI model helps most.
+  `SOURCES` in `src/research.ts` sets how many passages each answer sees.
+- **The admin is locked out (forgot password):** there's no reset for admins. With the
   person's permission, generate a hash locally:
   `node -e "import('./src/crypto.ts').then(async c => console.log(await c.hashPassword(process.argv[1])))" 'new password here'`
   Then run `npx wrangler d1 execute sermon-research --remote --command "UPDATE users SET password_hash='<hash>' WHERE email='<email>'"`.

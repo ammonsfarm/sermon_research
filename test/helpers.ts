@@ -33,6 +33,9 @@ export function createApp(overrides: Partial<AppEnv> = {}): TestApp {
       for (const item of items) vectors.stored.set(item.id, item);
       return { mutationId: "m" };
     },
+    async query(_vector: number[], options: { topK?: number } = {}) {
+      return { count: 0, matches: [...vectors.stored.keys()].slice(0, options.topK ?? 5).map((id) => ({ id, score: 0.9 })) };
+    },
     async deleteByIds(ids: string[]) {
       for (const id of ids) { vectors.deleted.push(id); vectors.stored.delete(id); }
       return { mutationId: "m" };
@@ -86,6 +89,8 @@ export const TRANSCRIPT_SEGMENTS = [
 ];
 export const SUMMARY_REPLY = "```json\n{\"summary\": \"Grace is a gift.\", \"topics\": [\"grace\"], \"scriptures\": [\"Ephesians 2:8\"]}\n```";
 
+export const ANSWER_REPLY = "Salvation is by grace [1].\n\nSee also [1, 2] and <b>[9]</b>.";
+
 export interface FakeCall { readonly url: string; readonly method: string; readonly authorization: string | null; readonly body: unknown }
 
 /**
@@ -104,9 +109,9 @@ export function fakeProviders(fail: Record<string, number> = {}): { calls: FakeC
     if (failure) return new Response("{\"error\":\"nope\"}", { status: failure[1] });
     if (url === FEED_URL) return new Response(FEED_XML, { headers: { "Content-Type": "application/rss+xml" } });
     if (url.endsWith("/chat/completions")) {
-      const messages = (body as { messages?: { role: string }[] } | null)?.messages ?? [];
-      const summarizing = messages.some((message) => message.role === "system");
-      return Response.json({ choices: [{ message: { content: summarizing ? SUMMARY_REPLY : "OK" } }] });
+      const system = ((body as { messages?: { role: string; content: string }[] } | null)?.messages ?? []).find((message) => message.role === "system")?.content ?? "";
+      const content = system.includes("numbered sources") ? ANSWER_REPLY : system ? SUMMARY_REPLY : "OK";
+      return Response.json({ choices: [{ message: { content } }] });
     }
     if (url === "https://api.openai.com/v1/embeddings") {
       const input = (body as { input?: unknown } | null)?.input;

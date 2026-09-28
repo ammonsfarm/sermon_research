@@ -3,8 +3,9 @@
 Turn a church's sermon podcast into a searchable, citable research archive,
 running entirely in your own Cloudflare account.
 
-> **Status:** early. Sign-in, the setup wizard and episode processing work.
-> The research page is next; see [Roadmap](#roadmap).
+> **Status:** early, feature complete for a first release: sign-in, the setup
+> wizard, episode processing and the research page all work. See
+> [Roadmap](#roadmap).
 
 ## Deploy
 
@@ -61,6 +62,13 @@ assistant at this repo. [AGENTS.md](AGENTS.md) tells it how to help.
   importing older episodes later
 - A schedule set in Admin (daily or weekly, at a local hour); there's no cron
   to edit
+- A research page: ask a question and get an answer drawn only from your
+  sermons, with numbered citations linking to the passage and its timestamp
+- Episode search by title, topic, scripture or meaning, and a page per episode
+  with an audio player, summary and timestamped transcript
+- Members-only by default: admins invite members by link (emailed too when
+  email is set up). A switch in Admin makes it public, with per-visitor hourly
+  limits and a daily cap on questions to control AI spending
 
 ## Roadmap
 
@@ -69,8 +77,11 @@ assistant at this repo. [AGENTS.md](AGENTS.md) tells it how to help.
    and emailed sign-in links, all configured in the wizard.
 3. **Pipeline** (done): import the last N episodes with a cost estimate, a schedule
    set in the admin screen, and a progress dashboard with retries.
-4. **Research:** cited answers across all sermons, episode search and episode
+4. **Research** (done): cited answers across all sermons, episode search and episode
    pages. It's members-only by default, with a switch to make it public.
+
+Ideas for later: follow-up questions in a conversation, a password reset
+email, and importing transcripts that feeds already publish.
 
 ## Develop
 

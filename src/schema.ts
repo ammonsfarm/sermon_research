@@ -100,6 +100,19 @@ export const MIGRATIONS: readonly { readonly version: number; readonly statement
       `CREATE INDEX IF NOT EXISTS chunks_by_episode ON chunks(episode_id, seq)`,
     ],
   },
+  {
+    version: 4,
+    statements: [
+      `CREATE TABLE IF NOT EXISTS invites (
+        token_hash TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        used_at TEXT
+      )`,
+      `CREATE INDEX IF NOT EXISTS invites_by_user ON invites(user_id)`,
+    ],
+  },
 ];
 
 let applied: Promise<void> | undefined;

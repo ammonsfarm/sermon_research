@@ -22,6 +22,8 @@ import type { AppEnv } from "./env.ts";
 import { page, SECURITY_HEADERS, STYLESHEET } from "./html.ts";
 import { checkNow, episodesDashboard, hourlyTick, importStep, queueFromDashboard, scheduleSettings } from "./imports.ts";
 import { keyInfo } from "./keys.ts";
+import { acceptInvite, membersPage, reinviteMember, removeMember, showInvite } from "./members.ts";
+import { episodePage, episodesPage, researchAdmin, researchAsk, researchPage, researchSettings } from "./research.ts";
 import { confirmLink, emailSignInEnabled, requestLink, showLink } from "./links.ts";
 import { ensureSchema } from "./schema.ts";
 import {
@@ -107,7 +109,20 @@ async function route(context: Context): Promise<Response> {
     case "POST /admin/episodes/queue": return queueFromDashboard(context);
     case "GET /admin/schedule":
     case "POST /admin/schedule": return scheduleSettings(context);
+    case "GET /research": return researchPage(context);
+    case "POST /research": return researchAsk(context);
+    case "GET /episodes": return episodesPage(context);
+    case "GET /admin/research":
+    case "POST /admin/research": return researchAdmin(context);
+    case "GET /admin/members":
+    case "POST /admin/members": return membersPage(context);
+    case "POST /admin/members/invite": return reinviteMember(context);
+    case "POST /admin/members/remove": return removeMember(context);
+    case "GET /invite": return showInvite(context);
+    case "POST /invite": return acceptInvite(context);
     default: {
+      const episode = /^\/episodes\/([0-9a-f-]{36})$/u.exec(url.pathname);
+      if (episode && request.method === "GET") return episodePage(context, episode[1]!);
       const match = /^\/(setup|admin)\/([a-z]+)$/u.exec(url.pathname);
       if (match && isProviderStep(match[2]!) && (request.method === "GET" || request.method === "POST")) {
         const wizard = match[1] === "setup";
@@ -129,7 +144,10 @@ function isSameOrigin(request: Request, url: URL): boolean {
 
 async function home(context: Context): Promise<Response> {
   if (!(await hasAdmin(context.db))) return redirect("/setup");
-  return page("Home", homeView(context.ministry, context.session?.user ?? null), siteTitle(context));
+  const research = await researchSettings(context.db);
+  const ready = (await getSetupStep(context.db)) === "complete";
+  const canResearch = ready && (Boolean(context.session) || research.access === "public");
+  return page("Home", homeView(context.ministry, context.session?.user ?? null, canResearch), siteTitle(context));
 }
 
 async function setupForm(context: Context): Promise<Response> {
@@ -198,17 +216,18 @@ async function admin(context: Context): Promise<Response> {
   const current = await getSetupStep(context.db);
   if (!context.ministry || current !== "complete") return redirect(`/setup/${current}`);
   const { db } = context;
-  const [podcast, llm, embeddings, transcription, email, keys] = await Promise.all([
+  const [podcast, llm, embeddings, transcription, email, keys, research] = await Promise.all([
     getSetting<PodcastSettings>(db, "podcast"),
     getSetting<LlmSettingsRecord>(db, "llm"),
     getSetting<CheckedSettings>(db, "embeddings"),
     getSetting<CheckedSettings>(db, "transcription"),
     getSetting<EmailSettings>(db, "email"),
     keyInfo(db),
+    researchSettings(db),
   ]);
   return page("Admin", adminView({
     user: context.session!.user, ministry: context.ministry, saved: context.url.searchParams.has("saved"),
-    podcast, llm, embeddings, transcription, email, keys,
+    podcast, llm, embeddings, transcription, email, keys, research,
   }), siteTitle(context));
 }
 
