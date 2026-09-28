@@ -116,3 +116,33 @@ test("pages carry a strict content security policy", async () => {
   const css = await app.request("/assets/app.css");
   assert.equal(css.headers.get("Content-Type"), "text/css; charset=utf-8");
 });
+
+test("admins pick a color scheme and the logo shows in the header", async () => {
+  const app = createApp();
+  const cookie = await completeSetup(app);
+  const form = await (await app.request("/admin/ministry", { cookie })).text();
+  assert.match(form, /name="colorScheme" value="navy" checked/);
+  await app.request("/admin/ministry", { form: { ...MINISTRY, logoUrl: "https://example.org/logo.png", colorScheme: "forest" }, cookie });
+  const home = await (await app.request("/", { cookie })).text();
+  assert.match(home, /<html lang="en" data-scheme="forest">/);
+  assert.match(home, /<img class="logo" src="https:\/\/example.org\/logo.png"/);
+  await app.request("/admin/ministry", { form: { ...MINISTRY, colorScheme: "\" onload=\"x" }, cookie });
+  assert.match(await (await app.request("/", { cookie })).text(), /data-scheme="navy"/);
+});
+
+test("each visitor chooses light, dark or their device's setting", async () => {
+  const app = createApp();
+  const cookie = await completeSetup(app);
+  const dark = await app.request("/appearance", { form: { mode: "dark", back: "/episodes?q=grace" }, cookie });
+  assert.equal(dark.status, 303);
+  assert.equal(dark.headers.get("Location"), "/episodes?q=grace");
+  const mode = cookieFrom(dark);
+  assert.equal(mode, "sr_mode=dark");
+  const page = await (await app.request("/episodes", { cookie: `${cookie}; ${mode}` })).text();
+  assert.match(page, /data-mode="dark"/);
+  assert.match(page, /name="mode" value="dark"[^>]*aria-pressed="true"/);
+  const system = await app.request("/appearance", { form: { mode: "system", back: "//evil.example" }, cookie });
+  assert.equal(system.headers.get("Location"), "/");
+  assert.match(system.headers.get("Set-Cookie") ?? "", /sr_mode=; .*Max-Age=0/);
+  assert.doesNotMatch(await (await app.request("/", { cookie })).text(), /data-mode=/);
+});

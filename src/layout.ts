@@ -1,5 +1,6 @@
 import type { Session } from "./auth.ts";
 import { html, type Html } from "./html.ts";
+import { modeSwitch, type Mode } from "./theme.ts";
 
 interface Place { readonly path: string; readonly signedIn: boolean; readonly admin: boolean; readonly researchOpen: boolean }
 
@@ -13,7 +14,7 @@ function section(path: string): "ask" | "sermons" | "library" | "admin" | null {
 }
 
 /** The main navigation and account links shown in the header of every page after setup. */
-export function siteHeader(session: Session | null, path: string, researchOpen: boolean): Html {
+export function siteHeader(session: Session | null, path: string, researchOpen: boolean, mode: Mode = "system", back = path): Html {
   const place: Place = { path, signedIn: Boolean(session), admin: session?.user.role === "admin", researchOpen };
   if (path.startsWith("/setup")) return html``;
   const current = section(path);
@@ -24,7 +25,7 @@ export function siteHeader(session: Session | null, path: string, researchOpen: 
   if (place.signedIn) tabs.push(link("library", "/library", "Library"));
   if (place.admin) tabs.push(link("admin", "/admin", "Admin"));
   return html`${tabs.length ? html`<nav class="tabs-main" aria-label="Main">${tabs}</nav>` : ""}
-<div class="account">${session
+<div class="account">${modeSwitch(mode, back)}${session
     ? html`<span class="who">${session.user.name}</span><form class="inline" method="post" action="/logout"><button class="link" type="submit">Sign out</button></form>`
     : html`<a href="/login">Sign in</a>`}</div>`;
 }

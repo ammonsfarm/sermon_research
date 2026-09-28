@@ -1,3 +1,4 @@
+import { DEFAULT_SCHEME, schemePicker } from "./theme.ts";
 import type { ResearchSettings } from "./research.ts";
 import type { User } from "./auth.ts";
 import type { keyInfo } from "./keys.ts";
@@ -44,6 +45,7 @@ ${field({ name: "churchName", label: "Church or ministry name", value: values.ch
 ${field({ name: "speakerNames", label: "Speaker names", value: values.speakerNames ?? "", error: errors.speakerNames, hint: "Separate names with commas, for example “Pastor Jane Doe, John Smith”." })}
 ${field({ name: "description", label: "Short description", type: "textarea", value: values.description ?? "", error: errors.description })}
 ${field({ name: "logoUrl", label: "Logo address", type: "url", value: values.logoUrl ?? "", error: errors.logoUrl, hint: "Optional. An https:// link to an image." })}
+${schemePicker(values.colorScheme)}
 <button type="submit">${options.step ? "Continue" : "Save"}</button>
 </form>`;
 }
@@ -55,6 +57,7 @@ export function ministryValues(ministry: Ministry): Values {
     speakerNames: ministry.speakerNames.join(", "),
     description: ministry.description,
     logoUrl: ministry.logoUrl,
+    colorScheme: ministry.colorScheme ?? DEFAULT_SCHEME,
   };
 }
 

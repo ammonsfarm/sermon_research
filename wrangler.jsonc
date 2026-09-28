@@ -5,6 +5,9 @@
   "compatibility_date": "2026-09-01",
   "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
   "observability": { "enabled": true },
+  // Fonts (SIL Open Font License, see public/fonts/LICENSE.txt), served by
+  // Cloudflare before the Worker runs.
+  "assets": { "directory": "./public" },
   // Wrangler creates this database on first deploy when it does not exist yet.
   // The Worker applies its own schema on the first request, so no migration
   // command is needed. See AGENTS.md if your Wrangler version asks for an id.

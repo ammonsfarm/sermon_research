@@ -31,6 +31,7 @@ import { acceptInvite, membersPage, reinviteMember, removeMember, showInvite } f
 import { canViewResearch, researchAdmin, researchSettings } from "./research.ts";
 import { confirmLink, emailSignInEnabled, requestLink, showLink } from "./links.ts";
 import { ensureSchema } from "./schema.ts";
+import { MODE_COOKIE, modeCookie, parseMode, safeBack } from "./theme.ts";
 import {
   type CheckedSettings,
   type EmailSettings,
@@ -72,7 +73,7 @@ export default {
     await ensureSchema(env.DB);
     const session = await readSession(env.DB, readCookie(request, SESSION_COOKIE));
     const [ministry, research] = await Promise.all([getSetting<Ministry>(env.DB, "ministry"), getSetting<{ access?: string }>(env.DB, "research")]);
-    const context: Context = { request, env, db: env.DB, url, session, ministry, researchOpen: research?.access === "public" };
+    const context: Context = { request, env, db: env.DB, url, session, ministry, researchOpen: research?.access === "public", mode: parseMode(readCookie(request, MODE_COOKIE)) };
     const response = await route(context);
     if (session?.refreshedToken && !response.headers.has("Set-Cookie")) {
       const headers = new Headers(response.headers);
@@ -106,6 +107,7 @@ async function route(context: Context): Promise<Response> {
     case "POST /login/link": return requestLink(context);
     case "GET /login/link": return showLink(context);
     case "POST /login/link/confirm": return confirmLink(context);
+    case "POST /appearance": return appearance(context);
     case "POST /logout": return logout(context, false);
     case "POST /logout-all": return logout(context, true);
     case "GET /admin": return admin(context);
@@ -264,6 +266,12 @@ async function loginSubmit(context: Context): Promise<Response> {
   }
   if (context.session) await endSession(db, context.session.tokenHash);
   return redirect(user.role === "admin" ? "/admin" : "/", sessionCookie(await createSession(db, user.id)));
+}
+
+/** Saves the visitor's light / dark / system choice and returns them to the page they were on. */
+async function appearance(context: Context): Promise<Response> {
+  const form = await context.request.formData();
+  return redirect(safeBack(form.get("back")), modeCookie(parseMode(form.get("mode"))));
 }
 
 async function logout(context: Context, everywhere: boolean): Promise<Response> {
