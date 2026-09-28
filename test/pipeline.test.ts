@@ -4,7 +4,7 @@ import test from "node:test";
 import worker from "../src/index.ts";
 import { dispatchQueued, MAX_RUNNING, recordFeed } from "../src/episodes.ts";
 import { hourlyTick } from "../src/imports.ts";
-import { buildChunks, parseSummary, type PipelineStep, runEpisode } from "../src/pipeline.ts";
+import { buildChunks, parseSummary, summarize, type PipelineStep, runEpisode } from "../src/pipeline.ts";
 import { ensureSchema } from "../src/schema.ts";
 import { isDue, localSlot, type Schedule } from "../src/schedule.ts";
 import { getSetting, putSetting } from "../src/settings.ts";
@@ -254,4 +254,17 @@ test("summaries are parsed leniently and transcripts chunk with time ranges", ()
     [0, "summary", null, null], [1, "transcript", 0, 60], [2, "transcript", 60, 125],
   ]);
   assert.equal(chunks[0]!.text, "S\nTopics: t");
+});
+
+test("a summary cut off by the length limit gets a clear error", async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = (async () => Response.json({ choices: [{ finish_reason: "length", message: { content: "{\"summary\": \"Grace is" } }] })) as typeof fetch;
+  try {
+    await assert.rejects(
+      summarize({ llm: { baseUrl: "https://llm.example", model: "m", checkedAt: "" }, apiKey: "k", ministry: null, title: "T", publishedAt: null, transcript: "words" }),
+      /ran out of room/,
+    );
+  } finally {
+    globalThis.fetch = original;
+  }
 });

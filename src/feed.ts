@@ -1,3 +1,5 @@
+import { withUserAgent } from "./providers.ts";
+
 /** A podcast episode as listed in the RSS feed. */
 export interface FeedEpisode {
   readonly guid: string;
@@ -27,7 +29,7 @@ export async function fetchFeed(feedUrl: string, fetcher: typeof fetch = fetch):
   if (url.protocol !== "https:" && url.protocol !== "http:") throw new FeedError("Use an http:// or https:// address.");
   let response: Response;
   try {
-    response = await fetcher(url, { headers: { Accept: "application/rss+xml, application/xml, text/xml, */*" }, signal: AbortSignal.timeout(15_000), redirect: "follow" });
+    response = await fetcher(url, { headers: withUserAgent({ Accept: "application/rss+xml, application/xml, text/xml, */*" }), signal: AbortSignal.timeout(15_000), redirect: "follow" });
   } catch {
     throw new FeedError("The feed didn't respond. Check the address and try again.");
   }

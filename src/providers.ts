@@ -4,6 +4,20 @@ export const EMBEDDING_DIMENSIONS = 1536;
 export const OPENAI_BASE_URL = "https://api.openai.com/v1";
 export const MISTRAL_TRANSCRIPTION_MODEL = "voxtral-mini-latest";
 
+/**
+ * Sent on every outbound request. Workers' fetch sends no User-Agent by default,
+ * and APIs behind Cloudflare's bot checks (Resend among them) can refuse such
+ * requests with a 403 that looks like a bad key.
+ */
+export const USER_AGENT = "sermon-research/1.0 (+https://github.com/ammonsfarm/sermon_research)";
+
+/** Adds the User-Agent to a request's headers. */
+export function withUserAgent(headers: HeadersInit = {}): Headers {
+  const merged = new Headers(headers);
+  merged.set("User-Agent", USER_AGENT);
+  return merged;
+}
+
 export class ProviderError extends Error {}
 
 export interface LlmSettings {
@@ -11,19 +25,36 @@ export interface LlmSettings {
   readonly model: string;
 }
 
+/** Pulls the human-readable message out of a provider's error body (OpenAI, Gemini, Mistral and Resend shapes). */
+export function providerMessage(body: string): string {
+  if (body.trimStart().startsWith("<")) return ""; // an HTML error page says nothing useful
+  let message: unknown = body;
+  try {
+    const parsed = JSON.parse(body) as { message?: unknown; error?: unknown; detail?: unknown };
+    const error = parsed.error;
+    message = typeof error === "object" && error !== null && "message" in error ? (error as { message: unknown }).message
+      : parsed.message ?? (typeof error === "string" ? error : undefined) ?? parsed.detail ?? body;
+  } catch {
+    // Not JSON: use the text as is.
+  }
+  return (typeof message === "string" ? message : JSON.stringify(message)).replace(/\s+/gu, " ").trim().slice(0, 240);
+}
+
 async function call(url: string, init: RequestInit, fetcher: typeof fetch, what: string): Promise<Response> {
   let response: Response;
   try {
-    response = await fetcher(url, { ...init, signal: AbortSignal.timeout(30_000) });
+    response = await fetcher(url, { ...init, headers: withUserAgent(init.headers), signal: AbortSignal.timeout(30_000) });
   } catch {
     throw new ProviderError(`${what} didn't respond. Check the address and try again.`);
   }
   if (response.ok) return response;
-  if (response.status === 401 || response.status === 403) throw new ProviderError(`${what} rejected the key.`);
-  if (response.status === 404) throw new ProviderError(`${what} couldn't find that model or address.`);
-  if (response.status === 429) throw new ProviderError(`${what} says the account is rate limited or out of credit.`);
-  const detail = (await response.text().catch(() => "")).replace(/\s+/gu, " ").slice(0, 200);
-  throw new ProviderError(`${what} returned HTTP ${response.status}${detail ? `: ${detail}` : "."}`);
+  const detail = providerMessage(await response.text().catch(() => ""));
+  const said = detail ? ` It said: "${detail}"` : "";
+  // A 403 isn't always the key: Resend uses it for an unverified sending domain, for example.
+  if (response.status === 401 || response.status === 403) throw new ProviderError(`${what} refused the request (HTTP ${response.status}).${said || " Check the key."}`);
+  if (response.status === 404) throw new ProviderError(`${what} couldn't find that model or address.${said}`);
+  if (response.status === 429) throw new ProviderError(`${what} says the account is rate limited or out of credit.${said}`);
+  throw new ProviderError(`${what} returned HTTP ${response.status}.${said}`);
 }
 
 /** Sends one tiny chat completion to confirm the endpoint, model and key work together. */

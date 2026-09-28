@@ -91,7 +91,7 @@ export const SUMMARY_REPLY = "```json\n{\"summary\": \"Grace is a gift.\", \"top
 
 export const ANSWER_REPLY = "Salvation is by grace [1].\n\nSee also [1, 2] and <b>[9]</b>.";
 
-export interface FakeCall { readonly url: string; readonly method: string; readonly authorization: string | null; readonly body: unknown }
+export interface FakeCall { readonly url: string; readonly method: string; readonly authorization: string | null; readonly userAgent: string | null; readonly body: unknown }
 
 /**
  * Replaces global fetch with fake podcast, OpenAI, Mistral and Resend endpoints.
@@ -104,7 +104,7 @@ export function fakeProviders(fail: Record<string, number> = {}): { calls: FakeC
     const url = String(input instanceof Request ? input.url : input);
     const headers = new Headers(init.headers);
     const body = typeof init.body === "string" ? JSON.parse(init.body) : null;
-    calls.push({ url, method: init.method ?? "GET", authorization: headers.get("Authorization"), body });
+    calls.push({ url, method: init.method ?? "GET", authorization: headers.get("Authorization"), userAgent: headers.get("User-Agent"), body });
     const failure = Object.entries(fail).find(([prefix]) => url.startsWith(prefix));
     if (failure) return new Response("{\"error\":\"nope\"}", { status: failure[1] });
     if (url === FEED_URL) return new Response(FEED_XML, { headers: { "Content-Type": "application/rss+xml" } });
