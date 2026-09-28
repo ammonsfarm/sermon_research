@@ -40,6 +40,7 @@ const FINISH: StepConfig = { retries: { limit: 5, delay: "10 seconds", backoff: 
 
 /** Transcript characters sent for summarizing; roughly 30k tokens. */
 const SUMMARY_INPUT_CHARS = 120_000;
+const SUMMARY_MAX_TOKENS = 8_000;
 const CHUNK_CHARS = 1_200;
 const EMBED_BATCH = 64;
 
@@ -180,10 +181,15 @@ export async function summarize(input: {
         { role: "system", content: system },
         { role: "user", content: `Title: ${input.title}\nDate: ${input.publishedAt?.slice(0, 10) ?? "unknown"}\n\nTranscript:\n${transcript}` },
       ],
-      max_tokens: 2_000,
+      // Generous because thinking models (Gemini 3.x, o-series) can spend part of this before replying.
+      max_tokens: SUMMARY_MAX_TOKENS,
     }),
-  }, "The answers AI", 4 * 60_000) as { choices?: { message?: { content?: unknown } }[] };
-  return parseSummary(result.choices?.[0]?.message?.content);
+  }, "The answers AI", 4 * 60_000) as { choices?: { finish_reason?: unknown; message?: { content?: unknown } }[] };
+  const choice = result.choices?.[0];
+  if (choice?.finish_reason === "length" && !String(choice.message?.content ?? "").includes("}")) {
+    throw new ProviderError("The answers AI ran out of room before finishing the summary. Try a model that thinks less, or retry.");
+  }
+  return parseSummary(choice?.message?.content);
 }
 
 /** Accepts JSON with or without Markdown fences or surrounding prose. */

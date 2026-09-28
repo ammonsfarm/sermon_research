@@ -22,7 +22,8 @@ const SIGNED_IN_PER_HOUR = 60;
 const SEARCHES_PER_HOUR = 60;
 const QUESTION_MAX = 500;
 const SOURCES = 8;
-const ANSWER_MAX_TOKENS = 1_200;
+/** Generous because thinking models can spend part of this before replying; the prompt keeps answers short. */
+const ANSWER_MAX_TOKENS = 4_000;
 
 export async function researchSettings(db: D1Database): Promise<ResearchSettings> {
   return { ...DEFAULT_RESEARCH, ...(await getSetting<Partial<ResearchSettings>>(db, "research")) };
