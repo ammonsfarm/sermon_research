@@ -30,12 +30,12 @@ function render(value: unknown): string {
 }
 
 export const SECURITY_HEADERS: Readonly<Record<string, string>> = {
-  "Content-Security-Policy": "default-src 'none'; style-src 'self'; img-src 'self' https:; media-src 'self' https: http:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+  "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' https:; media-src 'self' https: http:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
   "X-Content-Type-Options": "nosniff",
   "Referrer-Policy": "same-origin",
 };
 
-export function page(title: string, body: Html, options: { siteTitle?: string; status?: number; headers?: HeadersInit; refreshSeconds?: number } = {}): Response {
+export function page(title: string, body: Html, options: { siteTitle?: string; status?: number; headers?: HeadersInit; refreshSeconds?: number; scripts?: readonly string[] } = {}): Response {
   const heading = options.siteTitle ?? "Sermon Research";
   const document = html`<!doctype html>
 <html lang="en">
@@ -45,7 +45,8 @@ export function page(title: string, body: Html, options: { siteTitle?: string; s
 ${options.refreshSeconds ? html`<meta http-equiv="refresh" content="${options.refreshSeconds}">
 ` : ""}<title>${title} · ${heading}</title>
 <link rel="stylesheet" href="/assets/app.css">
-</head>
+${(options.scripts ?? []).map((src) => html`<script src="${src}" defer></script>
+`)}</head>
 <body>
 <header class="site"><a href="/">${heading}</a></header>
 <main>
@@ -124,9 +125,103 @@ form.search input { flex: 1; min-width: 12rem; width: auto; }
 ul.episode-list { padding-left: 18px; }
 ul.episode-list li { margin-bottom: 10px; }
 .passage { margin-bottom: 12px; }
+.document { margin: 24px 0; }
+.document h2, .document h3, .document h4 { margin: 20px 0 8px; }
+.document li { margin-bottom: 4px; }
+.document blockquote { margin: 8px 0; padding-left: 12px; border-left: 3px solid var(--line); color: var(--muted); }
 .live { color: var(--accent); font-weight: 600; margin: 0 0 12px; }
 label.inline-label { display: inline; margin: 0; }
 .row select { width: auto; }
 audio { width: 100%; margin: 12px 0; }
+.player { position: sticky; top: 0; z-index: 1; background: var(--bg); padding: 4px 0; border-bottom: 1px solid var(--line); }
+.player audio { margin: 4px 0; }
+label.follow { display: inline-flex; gap: 6px; align-items: center; font-weight: 400; font-size: .9rem; color: var(--muted); margin: 0; }
+label.follow input { width: auto; }
+.reader .seg { cursor: pointer; border-radius: 3px; }
+.reader .seg:hover { text-decoration: underline dotted var(--muted); }
+.reader .seg-active { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.reader .word-active { background: color-mix(in srgb, var(--accent) 40%, transparent); border-radius: 3px; }
 pre { background: color-mix(in srgb, var(--line) 40%, transparent); padding: 8px 12px; border-radius: 6px; overflow-x: auto; }
+`;
+
+/**
+ * Read-along for episode pages: highlights the sentence being played and
+ * estimates the word by spreading the sentence's time evenly across its words
+ * (the transcript has sentence timings, not word timings). Clicking a sentence
+ * or a "Listen from" link seeks the player.
+ */
+export const READER_SCRIPT = `(() => {
+  const audio = document.getElementById("player");
+  const reader = document.querySelector(".reader");
+  if (!audio || !reader) return;
+  const follow = document.getElementById("follow");
+  const segments = Array.from(reader.querySelectorAll(".seg"), (el) => ({ el, start: Number(el.dataset.start), end: Number(el.dataset.end), text: el.textContent, words: null }));
+  let active = null;
+  let activeWord = -1;
+
+  function find(time) {
+    let low = 0, high = segments.length - 1, found = null;
+    while (low <= high) {
+      const mid = (low + high) >> 1;
+      if (segments[mid].start <= time) { found = segments[mid]; low = mid + 1; } else high = mid - 1;
+    }
+    return found;
+  }
+
+  function release(segment) {
+    segment.el.classList.remove("seg-active");
+    segment.el.textContent = segment.text;
+    segment.words = null;
+  }
+
+  function activate(segment) {
+    if (active) release(active);
+    active = segment;
+    activeWord = -1;
+    if (!segment) return;
+    segment.el.textContent = "";
+    segment.words = [];
+    for (const part of segment.text.split(/(\\s+)/)) {
+      if (!part.trim()) { segment.el.append(part); continue; }
+      const word = document.createElement("span");
+      word.className = "word";
+      word.textContent = part;
+      segment.el.append(word);
+      segment.words.push(word);
+    }
+    segment.el.classList.add("seg-active");
+    if (follow && follow.checked && !audio.paused) segment.el.scrollIntoView({ block: "center", behavior: "smooth" });
+  }
+
+  function update() {
+    const time = audio.currentTime;
+    const segment = find(time);
+    if (segment !== active) activate(segment);
+    if (!segment || segment.words.length === 0) return;
+    const span = Math.max(0.001, segment.end - segment.start);
+    const progress = Math.min(0.999, Math.max(0, (time - segment.start) / span));
+    const index = Math.floor(progress * segment.words.length);
+    if (index === activeWord) return;
+    if (activeWord >= 0) segment.words[activeWord].classList.remove("word-active");
+    segment.words[index].classList.add("word-active");
+    activeWord = index;
+  }
+
+  let frame = 0;
+  function loop() { update(); frame = audio.paused ? 0 : requestAnimationFrame(loop); }
+  audio.addEventListener("play", () => { if (!frame) frame = requestAnimationFrame(loop); });
+  audio.addEventListener("seeked", update);
+  audio.addEventListener("timeupdate", () => { if (!frame) update(); });
+
+  function seek(seconds) {
+    audio.currentTime = seconds;
+    audio.play().catch(() => {});
+  }
+  reader.addEventListener("click", (event) => {
+    const link = event.target.closest("a[data-seek]");
+    if (link) { event.preventDefault(); seek(Number(link.dataset.seek)); return; }
+    const segment = event.target.closest(".seg");
+    if (segment && !window.getSelection().toString()) seek(Number(segment.dataset.start));
+  });
+})();
 `;

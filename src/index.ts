@@ -19,8 +19,9 @@ import {
 import { timingSafeEqual } from "./crypto.ts";
 import { clientIp, type Context, redirect, requireAdmin, siteTitle } from "./context.ts";
 import type { AppEnv } from "./env.ts";
-import { page, SECURITY_HEADERS, STYLESHEET } from "./html.ts";
+import { page, READER_SCRIPT, SECURITY_HEADERS, STYLESHEET } from "./html.ts";
 import { serveAudio } from "./audio.ts";
+import { deleteDocument, documentDownload, documentPage, documentsPage } from "./documents.ts";
 import { checkNow, episodesDashboard, hourlyTick, importStep, queueFromDashboard, saveConcurrency, scheduleSettings } from "./imports.ts";
 import { keyInfo } from "./keys.ts";
 import { acceptInvite, membersPage, reinviteMember, removeMember, showInvite } from "./members.ts";
@@ -59,6 +60,9 @@ export default {
     const url = new URL(request.url);
     if (url.pathname === "/assets/app.css") {
       return new Response(STYLESHEET, { headers: { "Content-Type": "text/css; charset=utf-8", "Cache-Control": "public, max-age=3600", ...SECURITY_HEADERS } });
+    }
+    if (url.pathname === "/assets/reader.js") {
+      return new Response(READER_SCRIPT, { headers: { "Content-Type": "text/javascript; charset=utf-8", "Cache-Control": "public, max-age=3600", ...SECURITY_HEADERS } });
     }
     if (request.method === "POST" && !isSameOrigin(request, url)) {
       return new Response("Cross-site form submissions are not allowed.", { status: 403 });
@@ -114,6 +118,7 @@ async function route(context: Context): Promise<Response> {
     case "GET /research": return researchPage(context);
     case "POST /research": return researchAsk(context);
     case "GET /episodes": return episodesPage(context);
+    case "GET /documents": return documentsPage(context);
     case "GET /admin/research":
     case "POST /admin/research": return researchAdmin(context);
     case "GET /admin/members":
@@ -125,6 +130,10 @@ async function route(context: Context): Promise<Response> {
     default: {
       const episode = /^\/episodes\/([0-9a-f-]{36})$/u.exec(url.pathname);
       if (episode && request.method === "GET") return episodePage(context, episode[1]!);
+      const document = /^\/documents\/([0-9a-f-]{36})(\.md|\/delete)?$/u.exec(url.pathname);
+      if (document && request.method === "GET" && !document[2]) return documentPage(context, document[1]!);
+      if (document && request.method === "GET" && document[2] === ".md") return documentDownload(context, document[1]!);
+      if (document && request.method === "POST" && document[2] === "/delete") return deleteDocument(context, document[1]!);
       const audio = /^\/audio\/([0-9a-f-]{36})$/u.exec(url.pathname);
       if (audio && (request.method === "GET" || request.method === "HEAD")) return serveAudio(context, audio[1]!, () => canViewResearch(context));
       const match = /^\/(setup|admin)\/([a-z]+)$/u.exec(url.pathname);

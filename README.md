@@ -78,7 +78,13 @@ assistant at this repo. [AGENTS.md](AGENTS.md) tells it how to help.
 - A research page: ask a question and get an answer drawn only from your
   sermons, with numbered citations linking to the passage and its timestamp
 - Episode search by title, topic, scripture or meaning, and a page per episode
-  with an audio player, summary and timestamped transcript
+  with an audio player, summary and a read-along transcript: the sentence
+  being played is highlighted (the word is estimated from sentence timings),
+  and clicking any sentence plays from there
+- Documents: from the Ask page, signed-in people can have the answers AI write
+  a sermon outline, a small-group study guide or any custom document from the
+  sermons, with citations. Each is saved under Documents and downloads as a
+  Markdown (.md) file with its sources linked
 - Members-only by default: admins invite members by link (emailed too when
   email is set up). A switch in Admin makes it public, with per-visitor hourly
   limits and a daily cap on questions to control AI spending
