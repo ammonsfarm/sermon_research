@@ -26,3 +26,5 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run verify
+      - name: Bundle the Worker
+        run: npx wrangler deploy --dry-run --outdir .tmp/dry-run

@@ -1,4 +1,0 @@
-{
-  "extends": "../contracts/tsconfig.json",
-  "include": ["src/**/*.ts", "test/**/*.type-test.ts"]
-}

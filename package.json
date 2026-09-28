@@ -2,24 +2,23 @@
   "name": "sermon-research",
   "version": "0.1.0",
   "private": true,
-  "description": "Podcast sermon ingest, transcription, summaries, vector search and RAG research on Cloudflare Workers",
+  "description": "Turn a church's sermon podcast into a searchable, citable research archive on Cloudflare Workers",
   "license": "MIT",
-  "packageManager": "npm@11.5.1",
+  "type": "module",
   "engines": {
-    "node": ">=24.7.0",
-    "npm": ">=11.5.1"
+    "node": ">=22.18.0"
   },
-  "workspaces": [
-    "workers/*",
-    "packages/*"
-  ],
   "scripts": {
-    "typecheck": "npm run typecheck --workspaces --if-present",
-    "test": "npm test --workspaces --if-present",
-    "check:cf-typegen": "npm run check:cf-typegen --workspaces --if-present",
-    "verify": "npm run typecheck && npm test && npm run check:cf-typegen"
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "cf-typegen": "wrangler types worker-configuration.d.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test --no-warnings=ExperimentalWarning test/*.test.ts",
+    "verify": "npm run typecheck && npm test"
   },
   "devDependencies": {
-    "@types/node": "26.2.0"
+    "@types/node": "26.2.0",
+    "typescript": "5.9.2",
+    "wrangler": "4.142.0"
   }
 }
