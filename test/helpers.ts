@@ -21,6 +21,8 @@ export interface TestApp {
   readonly env: AppEnv;
   readonly vectors: FakeVectors;
   readonly workflow: FakeWorkflow;
+  /** Objects in the fake AUDIO bucket, by key. */
+  readonly audio: Map<string, { bytes: Uint8Array; contentType: string | undefined }>;
   request(path: string, init?: { method?: string; form?: Record<string, string>; cookie?: string; headers?: Record<string, string> }): Promise<Response>;
 }
 
@@ -48,11 +50,36 @@ export function createApp(overrides: Partial<AppEnv> = {}): TestApp {
       return { id: options.id };
     },
   };
-  const env = { DB: createTestD1(), APP_SECRET: SECRET, VECTORS, EPISODE_WORKFLOW, ...overrides } as unknown as AppEnv;
+  const audio: TestApp["audio"] = new Map();
+  const AUDIO = {
+    async put(key: string, value: ReadableStream | ArrayBuffer, options: { httpMetadata?: { contentType?: string } } = {}) {
+      const bytes = new Uint8Array(value instanceof ArrayBuffer ? value : await new Response(value).arrayBuffer());
+      audio.set(key, { bytes, contentType: options.httpMetadata?.contentType });
+      return { key, size: bytes.byteLength };
+    },
+    async head(key: string) {
+      const stored = audio.get(key);
+      return stored ? { key, size: stored.bytes.byteLength } : null;
+    },
+    async get(key: string, options: { range?: Headers } = {}) {
+      const stored = audio.get(key);
+      if (!stored) return null;
+      const size = stored.bytes.byteLength;
+      const match = /^bytes=(\d+)-(\d*)$/u.exec(options.range?.get("Range") ?? "");
+      const range = match ? { offset: Number(match[1]), length: (match[2] ? Number(match[2]) + 1 : size) - Number(match[1]) } : undefined;
+      const bytes = range ? stored.bytes.slice(range.offset, range.offset + range.length) : stored.bytes;
+      return {
+        key, size, range, body: new Response(bytes).body,
+        writeHttpMetadata(headers: Headers) { if (stored.contentType) headers.set("Content-Type", stored.contentType); },
+      };
+    },
+  };
+  const env = { DB: createTestD1(), APP_SECRET: SECRET, VECTORS, EPISODE_WORKFLOW, AUDIO, ...overrides } as unknown as AppEnv;
   return {
     env,
     vectors,
     workflow,
+    audio,
     request(path, init = {}) {
       const headers = new Headers(init.headers);
       if (init.cookie) headers.set("Cookie", init.cookie);
@@ -83,6 +110,9 @@ export const FEED_XML = `<?xml version="1.0"?>
 <enclosure url="https://cdn.example.org/ep1.mp3" length="1" type="audio/mpeg"/><itunes:duration>2700</itunes:duration></item>
 </channel></rss>`;
 
+/** What the fake church website serves for every episode's MP3. */
+export const AUDIO_BYTES = new TextEncoder().encode("ID3 fake mp3 audio bytes");
+
 export const TRANSCRIPT_SEGMENTS = [
   { text: "Welcome, church.", start: 0, end: 4.5 },
   { text: "Today we read Ephesians 2:8.", start: 4.5, end: 11 },
@@ -107,6 +137,7 @@ export function fakeProviders(fail: Record<string, number> = {}): { calls: FakeC
     calls.push({ url, method: init.method ?? "GET", authorization: headers.get("Authorization"), userAgent: headers.get("User-Agent"), body });
     const failure = Object.entries(fail).find(([prefix]) => url.startsWith(prefix));
     if (failure) return new Response("{\"error\":\"nope\"}", { status: failure[1] });
+    if (url.startsWith("https://cdn.example.org/")) return new Response(AUDIO_BYTES, { headers: { "Content-Type": "audio/mpeg", "Content-Length": String(AUDIO_BYTES.byteLength) } });
     if (url === FEED_URL) return new Response(FEED_XML, { headers: { "Content-Type": "application/rss+xml" } });
     if (url.endsWith("/chat/completions")) {
       const system = ((body as { messages?: { role: string; content: string }[] } | null)?.messages ?? []).find((message) => message.role === "system")?.content ?? "";

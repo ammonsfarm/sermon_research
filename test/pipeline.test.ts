@@ -2,13 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import worker from "../src/index.ts";
-import { dispatchQueued, MAX_RUNNING, recordFeed } from "../src/episodes.ts";
+import { DEFAULT_CONCURRENCY, dispatchQueued, recordFeed } from "../src/episodes.ts";
 import { hourlyTick } from "../src/imports.ts";
 import { buildChunks, parseSummary, summarize, type PipelineStep, runEpisode } from "../src/pipeline.ts";
 import { ensureSchema } from "../src/schema.ts";
 import { isDue, localSlot, type Schedule } from "../src/schedule.ts";
 import { getSetting, putSetting } from "../src/settings.ts";
-import { completeSetup, createApp, fakeProviders, SCHEDULE_FORM, type TestApp } from "./helpers.ts";
+import { AUDIO_BYTES, completeSetup, createApp, fakeProviders, ORIGIN, SCHEDULE_FORM, type TestApp } from "./helpers.ts";
 
 /** Runs workflow steps inline, like a Workflow run with no retries. */
 const inlineStep: PipelineStep = { do: (_name, _config, callback) => callback() };
@@ -42,7 +42,9 @@ test("the import step shows cost estimates and queues only the chosen number of 
 
     const dashboard = await (await app.request("/admin/episodes", { cookie })).text();
     assert.match(dashboard, /Faith &amp; Works/);
-    assert.match(dashboard, /Working \(transcribing\)/);
+    assert.match(dashboard, /<meta http-equiv="refresh" content="10">/, "the page refreshes itself while work runs");
+    assert.match(dashboard, /1 working, 0 waiting/);
+    assert.match(dashboard, /<strong>Working<\/strong> · attempt 1<br><span class="hint">Starting · updated just now/);
     assert.match(dashboard, /Every Sunday at 09:00 America\/Chicago/);
     assert.match(dashboard, /Import all 1 older episodes/);
     assert.equal((await app.request("/setup/import", { cookie })).headers.get("Location"), "/admin/episodes", "the wizard is finished");
@@ -85,6 +87,10 @@ test("an episode runs end to end: transcript, summary, chunks and vectors", asyn
     assert.equal(done!.stage, null);
     const transcription = providers.calls.find((call) => call.url === "https://api.mistral.ai/v1/audio/transcriptions");
     assert.equal(transcription?.authorization, "Bearer mistral-key-5678");
+    assert.deepEqual([...app.audio.keys()], [`episodes/${episode!.id}.mp3`], "the audio is copied into R2 first");
+    assert.equal(app.audio.get(`episodes/${episode!.id}.mp3`)?.contentType, "audio/mpeg");
+    const row = await app.env.DB.prepare("SELECT audio_key, audio_bytes FROM episodes WHERE id = ?").bind(episode!.id).first();
+    assert.deepEqual({ ...row }, { audio_key: `episodes/${episode!.id}.mp3`, audio_bytes: AUDIO_BYTES.byteLength });
 
     const summary = await app.env.DB.prepare("SELECT summary, topics_json, scriptures_json FROM summaries WHERE episode_id = ?").bind(episode!.id).first();
     assert.deepEqual({ ...summary }, { summary: "Grace is a gift.", topics_json: "[\"grace\"]", scriptures_json: "[\"Ephesians 2:8\"]" });
@@ -151,21 +157,21 @@ test("importing older episodes from the dashboard queues them all", async () => 
   }
 });
 
-test("dispatch runs at most three at once, fails stale runs and keeps episodes queued if Workflows is down", async () => {
+test("dispatch runs two at once by default, fails stale runs and keeps episodes queued if Workflows is down", async () => {
   const app = createApp();
   await ensureSchema(app.env.DB);
   await recordFeed(app.env.DB, feedOf(5));
-  assert.equal(await dispatchQueued(app.env), MAX_RUNNING);
+  assert.equal(await dispatchQueued(app.env), DEFAULT_CONCURRENCY);
   assert.equal(await dispatchQueued(app.env), 0, "no free slots");
   const running = (await episodes(app)).filter((row) => row.status === "running");
-  assert.deepEqual(running.map((row) => row.guid), ["g-4", "g-3", "g-2"], "newest first");
+  assert.deepEqual(running.map((row) => row.guid), ["g-4", "g-3"], "newest first");
 
   // Six hours later the runs are presumed lost.
   const later = Date.now() + 7 * 3_600_000;
   app.workflow.failing = true;
   assert.equal(await dispatchQueued(app.env, later), 0);
   const rows = await episodes(app);
-  assert.deepEqual(rows.map((row) => row.status), ["failed", "failed", "failed", "queued", "queued"]);
+  assert.deepEqual(rows.map((row) => row.status), ["failed", "failed", "queued", "queued", "queued"]);
   assert.match(rows[0]!.error ?? "", /stopped reporting progress/);
 });
 
@@ -266,5 +272,96 @@ test("a summary cut off by the length limit gets a clear error", async () => {
     );
   } finally {
     globalThis.fetch = original;
+  }
+});
+
+test("transcription gets a signed link to our copy of the audio, never the church's own link", async () => {
+  const app = createApp();
+  const original = globalThis.fetch;
+  let fileUrl = "";
+  const providers = fakeProviders();
+  const faked = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (String(input) === "https://api.mistral.ai/v1/audio/transcriptions") fileUrl = String((init?.body as FormData).get("file_url"));
+    return faked(input, init);
+  }) as typeof fetch;
+  try {
+    await completeSetup(app, { count: 1 });
+    const [episode] = await episodes(app);
+    await runEpisode(app.env, inlineStep, episode!.id);
+    assert.match(fileUrl, new RegExp(`^${ORIGIN}/audio/${episode!.id}\\?expires=\\d+&signature=[\\w-]+$`));
+    const link = new URL(fileUrl);
+    const served = await app.request(link.pathname + link.search);
+    assert.equal(served.status, 200, "the signed link works without signing in");
+  } finally {
+    providers.restore();
+    globalThis.fetch = original;
+  }
+});
+
+test("a bot-check page instead of audio fails the episode with a clear message", async () => {
+  const app = createApp();
+  const setup = fakeProviders();
+  try {
+    await completeSetup(app, { count: 1 });
+  } finally {
+    setup.restore();
+  }
+  const [episode] = await episodes(app);
+  const original = globalThis.fetch;
+  globalThis.fetch = (async () => new Response("<html>Just a moment...</html>", { headers: { "Content-Type": "text/html; charset=UTF-8" } })) as typeof fetch;
+  try {
+    await runEpisode(app.env, inlineStep, episode!.id);
+  } finally {
+    globalThis.fetch = original;
+  }
+  const [failed] = await episodes(app);
+  assert.equal(failed!.status, "failed");
+  assert.match(failed!.error ?? "", /web page instead of the audio file/);
+  assert.equal(app.audio.size, 0);
+});
+
+test("admins choose how many episodes run at once and can retry every failure", async () => {
+  const app = createApp();
+  const providers = fakeProviders();
+  try {
+    const cookie = await completeSetup(app, { count: 0 });
+    await recordFeed(app.env.DB, feedOf(6), { backfill: 6 });
+    const bad = await app.request("/admin/episodes/concurrency", { form: { concurrency: "9" }, cookie });
+    assert.match(decodeURIComponent(bad.headers.get("Location") ?? ""), /Choose between 1 and 5/);
+    const saved = await app.request("/admin/episodes/concurrency", { form: { concurrency: "1" }, cookie });
+    assert.match(decodeURIComponent(saved.headers.get("Location") ?? ""), /up to 1 episode at once/);
+    assert.equal(await dispatchQueued(app.env), 0, "saving already started the one allowed run");
+    assert.equal((await episodes(app)).filter((row) => row.status === "running").length, 1);
+
+    await app.request("/admin/episodes/concurrency", { form: { concurrency: "3" }, cookie });
+    assert.equal((await episodes(app)).filter((row) => row.status === "running").length, 3);
+    assert.match(await (await app.request("/admin/episodes", { cookie })).text(), /<option value="3" selected>/);
+
+    await app.env.DB.prepare("UPDATE episodes SET status = 'failed', error = 'boom' WHERE status = 'running'").run();
+    const page = await (await app.request("/admin/episodes", { cookie })).text();
+    assert.match(page, /Retry all 3 failed/);
+    await app.request("/admin/episodes/queue", { form: { failed: "1" }, cookie });
+    const rows = await episodes(app);
+    assert.equal(rows.filter((row) => row.status === "failed").length, 0);
+    assert.equal(rows.filter((row) => row.status === "running").length, 3);
+  } finally {
+    providers.restore();
+  }
+});
+
+test("the dashboard shows when the background worker last ran and stops refreshing when idle", async () => {
+  const app = createApp();
+  const providers = fakeProviders();
+  try {
+    const cookie = await completeSetup(app, { count: 0 });
+    let page = await (await app.request("/admin/episodes", { cookie })).text();
+    assert.doesNotMatch(page, /http-equiv="refresh"/);
+    assert.match(page, /Background worker<\/dt><dd>hasn(?:'|&#39;|&#x27;)t run yet/);
+    await hourlyTick(app.env, new Date());
+    page = await (await app.request("/admin/episodes", { cookie })).text();
+    assert.match(page, /Background worker<\/dt><dd>last ran just now/);
+  } finally {
+    providers.restore();
   }
 });

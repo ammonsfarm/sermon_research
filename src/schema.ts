@@ -113,6 +113,17 @@ export const MIGRATIONS: readonly { readonly version: number; readonly statement
       `CREATE INDEX IF NOT EXISTS invites_by_user ON invites(user_id)`,
     ],
   },
+  {
+    version: 5,
+    statements: [
+      // What a running episode is doing right now, and the last error a retry is working past.
+      `ALTER TABLE episodes ADD COLUMN detail TEXT`,
+      `ALTER TABLE episodes ADD COLUMN last_error TEXT`,
+      // The copy of the episode's audio in R2, once downloaded.
+      `ALTER TABLE episodes ADD COLUMN audio_key TEXT`,
+      `ALTER TABLE episodes ADD COLUMN audio_bytes INTEGER`,
+    ],
+  },
 ];
 
 let applied: Promise<void> | undefined;

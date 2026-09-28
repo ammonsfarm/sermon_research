@@ -1,3 +1,4 @@
+import { downloadAudio, formatBytes, signedAudioUrl } from "./audio.ts";
 import type { AppEnv } from "./env.ts";
 import { getKey } from "./keys.ts";
 import { EMBEDDING_MODEL, MISTRAL_TRANSCRIPTION_MODEL, ProviderError, withUserAgent } from "./providers.ts";
@@ -33,6 +34,7 @@ export interface StepConfig {
   readonly timeout: `${number} ${"minute" | "minutes"}`;
 }
 
+const DOWNLOAD: StepConfig = { retries: { limit: 3, delay: "1 minute", backoff: "exponential" }, timeout: "15 minutes" };
 const TRANSCRIBE: StepConfig = { retries: { limit: 3, delay: "1 minute", backoff: "exponential" }, timeout: "15 minutes" };
 const SUMMARIZE: StepConfig = { retries: { limit: 3, delay: "30 seconds", backoff: "exponential" }, timeout: "5 minutes" };
 const INDEX: StepConfig = { retries: { limit: 3, delay: "30 seconds", backoff: "exponential" }, timeout: "10 minutes" };
@@ -49,19 +51,31 @@ export async function runEpisode(env: AppEnv, step: PipelineStep, episodeId: str
   const db = env.DB;
   const secret = env.APP_SECRET ?? "";
   try {
-    await step.do("transcribe", TRANSCRIBE, async () => {
-      await setStage(db, episodeId, "transcribe");
+    await step.do("download audio", DOWNLOAD, tracked(db, episodeId, "transcribe", "Downloading the audio", async () => {
       if (await db.prepare("SELECT 1 FROM transcripts WHERE episode_id = ?").bind(episodeId).first()) return;
-      const episode = await db.prepare("SELECT audio_url FROM episodes WHERE id = ?").bind(episodeId).first<{ audio_url: string | null }>();
+      const episode = await db.prepare("SELECT audio_url, audio_key FROM episodes WHERE id = ?").bind(episodeId).first<{ audio_url: string | null; audio_key: string | null }>();
+      if (episode?.audio_key && await env.AUDIO.head(episode.audio_key)) return;
       if (!episode?.audio_url) throw new ProviderError("This episode has no audio file in the feed.");
+      const stored = await downloadAudio(env, episodeId, episode.audio_url);
+      await db.prepare("UPDATE episodes SET audio_key = ?, audio_bytes = ?, updated_at = ? WHERE id = ?").bind(stored.key, stored.bytes, new Date().toISOString(), episodeId).run();
+    }));
+
+    await step.do("transcribe", TRANSCRIBE, tracked(db, episodeId, "transcribe", "Transcribing with Mistral (often 2 to 10 minutes)", async () => {
+      if (await db.prepare("SELECT 1 FROM transcripts WHERE episode_id = ?").bind(episodeId).first()) return;
+      const [episode, origin] = await Promise.all([
+        db.prepare("SELECT audio_bytes FROM episodes WHERE id = ?").bind(episodeId).first<{ audio_bytes: number | null }>(),
+        getSetting<string>(db, "site_origin"),
+      ]);
+      if (!origin) throw new ProviderError("The site doesn't know its own address yet. Open Admin → Episodes once, then retry.");
+      if (episode?.audio_bytes) await setDetail(db, episodeId, `Transcribing ${formatBytes(episode.audio_bytes)} of audio with Mistral (often 2 to 10 minutes)`);
       const apiKey = await requireKey(env, "transcription");
-      const segments = await transcribe(episode.audio_url, apiKey);
+      // Mistral fetches our own copy through a short-lived signed link.
+      const segments = await transcribe(await signedAudioUrl(secret, origin, episodeId), apiKey);
       await db.prepare("INSERT OR REPLACE INTO transcripts (episode_id, text, segments_json, model, created_at) VALUES (?, ?, ?, ?, ?)")
         .bind(episodeId, segments.map((segment) => segment.text.trim()).join(" "), JSON.stringify(segments), MISTRAL_TRANSCRIPTION_MODEL, new Date().toISOString()).run();
-    });
+    }));
 
-    await step.do("summarize", SUMMARIZE, async () => {
-      await setStage(db, episodeId, "summarize");
+    await step.do("summarize", SUMMARIZE, tracked(db, episodeId, "summarize", "Writing the summary", async () => {
       if (await db.prepare("SELECT 1 FROM summaries WHERE episode_id = ?").bind(episodeId).first()) return;
       const [llm, ministry, row] = await Promise.all([
         getSetting<LlmSettingsRecord>(db, "llm"),
@@ -75,10 +89,9 @@ export async function runEpisode(env: AppEnv, step: PipelineStep, episodeId: str
       const result = await summarize({ llm, apiKey, ministry, title: row.title, publishedAt: row.published_at, transcript: row.text });
       await db.prepare("INSERT OR REPLACE INTO summaries (episode_id, summary, topics_json, scriptures_json, model, created_at) VALUES (?, ?, ?, ?, ?, ?)")
         .bind(episodeId, result.summary, JSON.stringify(result.topics), JSON.stringify(result.scriptures), llm.model, new Date().toISOString()).run();
-    });
+    }));
 
-    await step.do("index", INDEX, async () => {
-      await setStage(db, episodeId, "index");
+    await step.do("index", INDEX, tracked(db, episodeId, "index", "Indexing for search", async () => {
       const [transcript, summary] = await Promise.all([
         db.prepare("SELECT segments_json FROM transcripts WHERE episode_id = ?").bind(episodeId).first<{ segments_json: string }>(),
         db.prepare("SELECT summary, topics_json, scriptures_json FROM summaries WHERE episode_id = ?").bind(episodeId).first<{ summary: string; topics_json: string; scriptures_json: string }>(),
@@ -106,15 +119,15 @@ export async function runEpisode(env: AppEnv, step: PipelineStep, episodeId: str
         ...chunks.map((chunk, index) => db.prepare("INSERT INTO chunks (id, episode_id, kind, seq, text, start_seconds, end_seconds) VALUES (?, ?, ?, ?, ?, ?, ?)")
           .bind(ids[index]!, episodeId, chunk.kind, chunk.seq, chunk.text, chunk.start, chunk.end)),
       ]);
-    });
+    }));
 
     await step.do("finish", FINISH, async () => {
       const now = new Date().toISOString();
-      await db.prepare("UPDATE episodes SET status = 'done', stage = NULL, error = NULL, completed_at = ?, updated_at = ? WHERE id = ?").bind(now, now, episodeId).run();
+      await db.prepare("UPDATE episodes SET status = 'done', stage = NULL, detail = NULL, last_error = NULL, error = NULL, completed_at = ?, updated_at = ? WHERE id = ?").bind(now, now, episodeId).run();
     });
   } catch (error) {
     await step.do("record failure", FINISH, async () => {
-      await db.prepare("UPDATE episodes SET status = 'failed', error = ?, updated_at = ? WHERE id = ?")
+      await db.prepare("UPDATE episodes SET status = 'failed', detail = NULL, last_error = NULL, error = ?, updated_at = ? WHERE id = ?")
         .bind(describeError(error), new Date().toISOString(), episodeId).run();
     });
   }
@@ -125,8 +138,26 @@ function describeError(error: unknown): string {
   return (error instanceof Error ? error.message : String(error)).slice(0, 500) || "Unknown error.";
 }
 
-async function setStage(db: D1Database, episodeId: string, stage: "transcribe" | "summarize" | "index"): Promise<void> {
-  await db.prepare("UPDATE episodes SET stage = ?, updated_at = ? WHERE id = ?").bind(stage, new Date().toISOString(), episodeId).run();
+async function setDetail(db: D1Database, episodeId: string, detail: string): Promise<void> {
+  await db.prepare("UPDATE episodes SET detail = ?, updated_at = ? WHERE id = ?").bind(detail, new Date().toISOString(), episodeId).run();
+}
+
+/**
+ * Wraps a step so the dashboard shows what it's doing, and so an error that
+ * Workflows is about to retry is visible instead of silent.
+ */
+function tracked(db: D1Database, episodeId: string, stage: "transcribe" | "summarize" | "index", detail: string, work: () => Promise<void>): () => Promise<void> {
+  return async () => {
+    await db.prepare("UPDATE episodes SET stage = ?, detail = ?, updated_at = ? WHERE id = ?").bind(stage, detail, new Date().toISOString(), episodeId).run();
+    try {
+      await work();
+    } catch (error) {
+      await db.prepare("UPDATE episodes SET last_error = ?, detail = ?, updated_at = ? WHERE id = ?")
+        .bind(describeError(error), `${detail}: hit an error, retrying automatically`, new Date().toISOString(), episodeId).run()
+        .catch(() => undefined);
+      throw error;
+    }
+  };
 }
 
 export async function requireKey(env: AppEnv, slot: "llm" | "embeddings" | "transcription"): Promise<string> {

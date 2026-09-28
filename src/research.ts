@@ -29,6 +29,13 @@ export async function researchSettings(db: D1Database): Promise<ResearchSettings
   return { ...DEFAULT_RESEARCH, ...(await getSetting<Partial<ResearchSettings>>(db, "research")) };
 }
 
+/** True when this visitor may use the research pages and play episode audio. */
+export async function canViewResearch(context: Context): Promise<boolean> {
+  if ((await getSetupStep(context.db)) !== "complete") return false;
+  if (context.session) return true;
+  return (await researchSettings(context.db)).access === "public";
+}
+
 /** Null when the visitor may use the research pages, otherwise the response to send. */
 async function gate(context: Context): Promise<Response | null> {
   if ((await getSetupStep(context.db)) !== "complete") {
@@ -265,15 +272,16 @@ export async function episodePage(context: Context, id: string): Promise<Respons
   if (blocked) return blocked;
   const { db } = context;
   const episode = await db.prepare(
-    `SELECT e.id, e.title, e.published_at, e.audio_url, s.summary, s.topics_json, s.scriptures_json
+    `SELECT e.id, e.title, e.published_at, e.audio_url, e.audio_key, s.summary, s.topics_json, s.scriptures_json
      FROM episodes e JOIN summaries s ON s.episode_id = e.id WHERE e.id = ? AND e.status = 'done'`,
-  ).bind(id).first<{ id: string; title: string; published_at: string | null; audio_url: string | null; summary: string; topics_json: string; scriptures_json: string }>();
+  ).bind(id).first<{ id: string; title: string; published_at: string | null; audio_url: string | null; audio_key: string | null; summary: string; topics_json: string; scriptures_json: string }>();
   if (!episode) return page("Not found", html`<h1>Episode not found</h1><p><a href="/episodes">All episodes</a></p>`, { status: 404, ...siteTitle(context) });
   const chunks = (await db.prepare("SELECT seq, text, start_seconds FROM chunks WHERE episode_id = ? AND kind = 'transcript' ORDER BY seq")
     .bind(id).all<{ seq: number; text: string; start_seconds: number | null }>()).results;
   const topics = JSON.parse(episode.topics_json) as string[];
   const scriptures = JSON.parse(episode.scriptures_json) as string[];
-  const audio = isWebUrl(episode.audio_url) ? episode.audio_url : null;
+  // Our own copy in R2 when we have one; the feed's link otherwise.
+  const audio = episode.audio_key ? `/audio/${episode.id}` : isWebUrl(episode.audio_url) ? episode.audio_url : null;
   return page(episode.title, html`${nav(context, "episodes")}
 <h1>${episode.title}</h1>
 <p class="hint">${episode.published_at?.slice(0, 10) ?? ""}</p>

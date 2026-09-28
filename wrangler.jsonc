@@ -23,6 +23,15 @@
       "index_name": "sermon-research"
     }
   ],
+  // Episode audio, copied from the feed so transcription and the episode
+  // player don't depend on the church's own site. The Deploy workflow (or
+  // Wrangler's automatic provisioning) creates the bucket.
+  "r2_buckets": [
+    {
+      "binding": "AUDIO",
+      "bucket_name": "sermon-research-audio"
+    }
+  ],
   // One run per episode: transcribe, summarize, index. Each step retries on its own.
   "workflows": [
     {

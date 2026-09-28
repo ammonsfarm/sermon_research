@@ -97,3 +97,26 @@ export async function unseal(appSecret: string, slot: string, sealed: string): P
     return null;
   }
 }
+
+const signingKeyCache = new Map<string, Promise<CryptoKey>>();
+
+function signingKey(appSecret: string): Promise<CryptoKey> {
+  let key = signingKeyCache.get(appSecret);
+  if (!key) {
+    key = crypto.subtle.importKey("raw", encoder.encode(appSecret), "HKDF", false, ["deriveKey"]).then((material) =>
+      crypto.subtle.deriveKey(
+        { name: "HKDF", hash: "SHA-256", salt: new Uint8Array(0), info: encoder.encode("sermon-research/signed-links/v1") },
+        material,
+        { name: "HMAC", hash: "SHA-256", length: 256 },
+        false,
+        ["sign"],
+      ));
+    signingKeyCache.set(appSecret, key);
+  }
+  return key;
+}
+
+/** HMAC-SHA256 of `message` under a key derived from APP_SECRET, for short-lived signed links. */
+export async function sign(appSecret: string, message: string): Promise<string> {
+  return base64url(new Uint8Array(await crypto.subtle.sign("HMAC", await signingKey(appSecret), encoder.encode(message))));
+}

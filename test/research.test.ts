@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { signedAudioUrl } from "../src/audio.ts";
 import { runEpisode, type PipelineStep } from "../src/pipeline.ts";
 import { formatTime, renderAnswer } from "../src/research.ts";
-import { completeSetup, cookieFrom, createApp, fakeProviders, type TestApp } from "./helpers.ts";
+import { AUDIO_BYTES, completeSetup, cookieFrom, createApp, fakeProviders, ORIGIN, SECRET, type TestApp } from "./helpers.ts";
 
 const inlineStep: PipelineStep = { do: (_name, _config, callback) => callback() };
 
@@ -78,11 +79,11 @@ test("episode pages show the summary, audio and timestamped transcript", async (
     const response = await site.app.request(`/episodes/${site.ids[0]}`, { cookie: site.cookie });
     const body = await response.text();
     assert.equal(response.status, 200);
-    assert.match(body, /<audio controls preload="none" src="https:\/\/cdn.example.org\/ep2.mp3\?a=1&amp;b=2">/);
+    assert.match(body, new RegExp(`<audio controls preload="none" src="/audio/${site.ids[0]}">`), "plays our own copy");
     assert.match(body, /Grace is a gift\./);
     assert.match(body, /<strong>Scripture:<\/strong> Ephesians 2:8/);
     assert.match(body, /<div class="passage" id="t-1">/);
-    assert.match(body, /href="https:\/\/cdn.example.org\/ep2.mp3\?a=1&amp;b=2#t=0">Listen from 0:00/);
+    assert.match(body, new RegExp(`href="/audio/${site.ids[0]}#t=0">Listen from 0:00`));
     assert.equal((await site.app.request("/episodes/00000000-0000-0000-0000-000000000000", { cookie: site.cookie })).status, 404);
   } finally {
     site.restore();
@@ -166,4 +167,32 @@ test("answers render safely and times format", () => {
   assert.equal(formatTime(3725), "1:02:05");
   assert.equal(formatTime(65.9), "1:05");
   assert.equal(formatTime(null), "");
+});
+
+test("episode audio is served from R2 to members, with ranges, and to signed links", async () => {
+  const site = await indexedSite();
+  try {
+    const path = `/audio/${site.ids[0]}`;
+    assert.equal((await site.app.request(path)).status, 404, "strangers can't play members-only audio");
+
+    const whole = await site.app.request(path, { cookie: site.cookie });
+    assert.equal(whole.status, 200);
+    assert.equal(whole.headers.get("Content-Type"), "audio/mpeg");
+    assert.equal(whole.headers.get("Accept-Ranges"), "bytes");
+    assert.deepEqual(new Uint8Array(await whole.arrayBuffer()), AUDIO_BYTES);
+
+    const part = await site.app.request(path, { cookie: site.cookie, headers: { Range: "bytes=0-2" } });
+    assert.equal(part.status, 206);
+    assert.equal(part.headers.get("Content-Range"), `bytes 0-2/${AUDIO_BYTES.byteLength}`);
+    assert.equal(await part.text(), "ID3");
+
+    const signed = new URL(await signedAudioUrl(SECRET, ORIGIN, site.ids[0]!));
+    assert.equal((await site.app.request(signed.pathname + signed.search)).status, 200, "the transcription service uses a signed link");
+    const other = new URL(await signedAudioUrl(SECRET, ORIGIN, site.ids[1]!));
+    assert.equal((await site.app.request(`${path}${other.search}`)).status, 404, "a link signed for one episode doesn't open another");
+    const expired = new URL(await signedAudioUrl(SECRET, ORIGIN, site.ids[0]!, Date.now() - 3 * 3_600_000));
+    assert.equal((await site.app.request(expired.pathname + expired.search)).status, 404, "signed links expire");
+  } finally {
+    site.restore();
+  }
 });

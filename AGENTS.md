@@ -20,7 +20,8 @@ before anything in the "Ask first" list below.
 | `src/keys.ts` | API keys stored AES-GCM encrypted in `provider_keys` |
 | `src/links.ts` | Emailed sign-in links |
 | `src/imports.ts` | Import step with cost estimate, episodes dashboard, schedule page, hourly cron logic |
-| `src/episodes.ts` | Episode rows from the feed, the queue, and starting workflow runs (at most `MAX_RUNNING` at once) |
+| `src/audio.ts` | Copies episode audio into the `AUDIO` R2 bucket, signs short-lived links for the transcription service, serves `/audio/:id` with ranges |
+| `src/episodes.ts` | Episode rows from the feed, the queue, and starting workflow runs (up to the admin's "episodes at once" setting) |
 | `src/pipeline.ts` | The per-episode steps: transcribe (Mistral), summarize (answers AI), chunk, embed and write to Vectorize |
 | `src/workflow.ts` | The Cloudflare Workflow class that runs `pipeline.ts` for one episode |
 | `src/schedule.ts` | Daily/weekly schedule in the church's time zone |
@@ -45,7 +46,8 @@ Commands: `npm run verify` (typecheck and tests), `npm run dev` (local),
 3. `npx wrangler deploy`. Current Wrangler creates the `sermon-research` D1
    database automatically when `database_id` is missing. If yours refuses:
    run `npx wrangler d1 create sermon-research` and paste the printed
-   `database_id` into `wrangler.jsonc`.
+   `database_id` into `wrangler.jsonc`. The `sermon-research-audio` R2
+   bucket is created the same way; if not, `npx wrangler r2 bucket create sermon-research-audio`.
 4. Set the secret: `openssl rand -base64 32`, then
    `npx wrangler secret put APP_SECRET`, and paste the value. Tell the person
    to save it in a password manager: it's their setup code, and it encrypts
@@ -56,7 +58,7 @@ Commands: `npm run verify` (typecheck and tests), `npm run dev` (local),
 **Deploying from GitHub instead:** `.github/workflows/deploy.yml` does steps
 2 to 4 when run from the Actions tab. It needs the repository secrets
 `CLOUDFLARE_API_TOKEN` (an API token from the "Edit Cloudflare Workers"
-template, plus D1 Edit and Vectorize Edit), `CLOUDFLARE_ACCOUNT_ID` and
+template, which includes Workers R2 Storage Edit, plus D1 Edit and Vectorize Edit), `CLOUDFLARE_ACCOUNT_ID` and
 `APP_SECRET`. Have the person create these themselves, and never ask them to
 paste the values into chat.
 
@@ -102,15 +104,20 @@ first request after each deploy.
 - **Change the schedule:** Admin → Episodes → Change. The cron in
   `wrangler.jsonc` stays hourly; don't edit it for schedule changes.
 - **An episode failed:** the dashboard shows the provider's error. Common
-  causes: the audio link in the feed doesn't play publicly (Mistral downloads
-  it itself), a key was revoked or ran out of credit, or the answers AI model
+  causes: the church's website sent a bot-check page instead of the MP3 (the
+  Worker downloads the audio into R2 itself; ask the site owner to allow it),
+  a key was revoked or ran out of credit, or the answers AI model
   doesn't return JSON (pick a stronger model). Fix the cause, then press Retry.
   Workflow runs are listed under Workers & Pages → Workflows →
   `sermon-research-episode`.
 - **An episode is stuck on "Working":** runs that report nothing for 6 hours
   are marked failed by the next hourly tick, and can then be retried.
-- **Process more episodes at once:** raise `MAX_RUNNING` in `src/episodes.ts`
-  (default 3) and redeploy. Higher values hit provider rate limits sooner.
+- **Process more or fewer episodes at once:** Admin → Episodes → "Episodes
+  at once" (1 to 5, default 2). Use 1 for free or low-limit provider plans.
+- **Transcription says the file couldn't be fetched:** Mistral downloads the
+  audio from `/audio/:id` on this site using a signed link, so the site must
+  be reachable publicly. The link's origin is saved as `site_origin` whenever
+  an admin opens Admin → Episodes; open it once after moving to a custom domain.
 - **Vectorize "dimension mismatch":** the index wasn't created with 1536
   dimensions. With permission, `npx wrangler vectorize delete sermon-research`,
   recreate it as in First deploy, then retry the episodes (retrying

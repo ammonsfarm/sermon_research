@@ -3,7 +3,7 @@ name: Deploy
 # Deploys this repo to your Cloudflare account. Run it from the Actions tab
 # ("Deploy" → "Run workflow"). It needs three repository secrets
 # (Settings → Secrets and variables → Actions):
-#   CLOUDFLARE_API_TOKEN   a token with Workers Scripts, D1 and Vectorize edit rights
+#   CLOUDFLARE_API_TOKEN   a token with Workers Scripts, D1, Vectorize and R2 edit rights
 #   CLOUDFLARE_ACCOUNT_ID  your account id, from the dashboard's Workers & Pages page
 #   APP_SECRET             32+ random characters; it's also your setup code, so keep a copy
 on:
@@ -27,6 +27,8 @@ jobs:
       APP_SECRET: ${{ secrets.APP_SECRET }}
       # Must match index_name in wrangler.jsonc.
       VECTORIZE_INDEX: sermon-research
+      # Must match bucket_name in wrangler.jsonc.
+      AUDIO_BUCKET: sermon-research-audio
     steps:
       - name: Check the secrets are set
         run: |
@@ -54,6 +56,14 @@ jobs:
             echo "episodeId metadata index already exists."
           else
             npx wrangler vectorize create-metadata-index "$VECTORIZE_INDEX" --property-name=episodeId --type=string
+          fi
+      - name: Create the audio bucket if it's missing
+        run: |
+          if npx wrangler r2 bucket info "$AUDIO_BUCKET" > /dev/null 2>&1; then
+            echo "Audio bucket $AUDIO_BUCKET already exists."
+          elif ! npx wrangler r2 bucket create "$AUDIO_BUCKET"; then
+            echo "::error::Couldn't create the R2 bucket $AUDIO_BUCKET. Give CLOUDFLARE_API_TOKEN \"Workers R2 Storage: Edit\", and enable R2 once in the Cloudflare dashboard if this account has never used it."
+            exit 1
           fi
       - name: Deploy the Worker
         run: npx wrangler deploy
