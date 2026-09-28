@@ -141,6 +141,26 @@ export const MIGRATIONS: readonly { readonly version: number; readonly statement
       `CREATE INDEX IF NOT EXISTS documents_by_user ON documents(user_id, created_at)`,
     ],
   },
+  {
+    version: 7,
+    statements: [
+      // Questions and answers, grouped into conversations by thread_id.
+      `CREATE TABLE IF NOT EXISTS turns (
+        id TEXT PRIMARY KEY,
+        thread_id TEXT NOT NULL,
+        user_id TEXT REFERENCES users(id) ON DELETE CASCADE,
+        question TEXT NOT NULL,
+        answer TEXT NOT NULL,
+        sources_json TEXT NOT NULL CHECK (json_valid(sources_json)),
+        scope_json TEXT NOT NULL CHECK (json_valid(scope_json)),
+        created_at TEXT NOT NULL
+      )`,
+      `CREATE INDEX IF NOT EXISTS turns_by_thread ON turns(thread_id, created_at)`,
+      `CREATE INDEX IF NOT EXISTS turns_by_user ON turns(user_id, created_at)`,
+      // Which sermons a document was written from; null means all of them.
+      `ALTER TABLE documents ADD COLUMN scope_json TEXT`,
+    ],
+  },
 ];
 
 let applied: Promise<void> | undefined;

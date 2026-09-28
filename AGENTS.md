@@ -25,12 +25,16 @@ before anything in the "Ask first" list below.
 | `src/pipeline.ts` | The per-episode steps: transcribe (Mistral), summarize (answers AI), chunk, embed and write to Vectorize |
 | `src/workflow.ts` | The Cloudflare Workflow class that runs `pipeline.ts` for one episode |
 | `src/schedule.ts` | Daily/weekly schedule in the church's time zone |
-| `src/research.ts` | Research page (cited answers), episode search and pages, research access settings |
+| `src/ask.ts` | Ask home page, the ask box, conversations (the `turns` table, with follow-ups) and the Library |
+| `src/scope.ts` | Question scope: series (taken from the " - Series" end of a title), date range and specific sermons |
+| `src/sermons.ts` | Sermons grid with search and filters, and the sermon page (player, read-along, Summary / Ask / Create panel) |
+| `src/research.ts` | Retrieval (Vectorize, filtered to a scope), cited answers, sources, question limits and research access settings |
 | `src/documents.ts`, `src/markdown.ts` | Markdown documents written from the sermons (outline, study questions, custom), their pages and `.md` download; a small Markdown renderer that escapes everything it doesn't handle |
 | `src/members.ts` | Member invites, invite acceptance, removing members |
 | `src/usage.ts` | Hourly and daily counters for questions and searches |
 | `src/context.ts` | Request context and shared redirects |
-| `src/views.ts`, `src/html.ts` | Server-rendered pages; `html` escapes every value. `READER_SCRIPT` (served at `/assets/reader.js`) is the only JavaScript: the episode read-along |
+| `src/views.ts`, `src/html.ts`, `src/layout.ts` | Server-rendered pages; `html` escapes every value. `layout.ts` holds the header tabs and the admin side menu (add admin pages to `ADMIN_MENU`) |
+| `src/assets.ts` | The only CSS (`/assets/app.css`) and JavaScript (`/assets/app.js`): busy state on forms, tabs, the read-along. Pages work without the script |
 | `test/` | `node:test` suites; `test/d1-sqlite.ts` stands in for D1 |
 | `wrangler.jsonc` | Worker name, D1, Vectorize, Workflow and the hourly cron |
 
@@ -86,9 +90,13 @@ first request after each deploy.
   show Done in Admin → Episodes. A stronger answers-AI model helps most.
   `SOURCES` in `src/research.ts` sets how many passages each answer sees;
   `DOCUMENT_SOURCES` in `src/documents.ts` does the same for documents.
-- **Add or change a document type:** edit `OUTPUTS` in `src/research.ts` (the
+- **Add or change a document type:** edit `OUTPUTS` in `src/ask.ts` (the
   menu) and `INSTRUCTIONS` in `src/documents.ts` (what the AI is told).
   Documents count against the same question limits and need a signed-in person.
+- **Scoped questions:** a scope of 40 sermons or fewer is filtered inside
+  Vectorize (`episodeId` metadata index); larger scopes fetch more matches and
+  filter afterwards. Follow-ups keep the conversation's scope and send the last
+  3 exchanges to the answers AI.
 - **Word highlighting is early or late:** Mistral returns sentence timings, so
   the word is estimated by spreading each sentence evenly over its words.
   Sentence highlighting is exact; true word timings would need re-transcribing.

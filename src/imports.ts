@@ -1,4 +1,4 @@
-import { type Context, redirect, requireAdmin, siteTitle } from "./context.ts";
+import { type Context, redirect, requireAdmin, chrome } from "./context.ts";
 import { formatBytes } from "./audio.ts";
 import { concurrency, dispatchQueued, type EpisodeRow, listEpisodes, MAX_CONCURRENCY, type ProcessingSettings, queueAllFailed, queueAllNotImported, queueEpisodes, recordFeed, statusCounts } from "./episodes.ts";
 import { type Feed, FeedError, fetchFeed } from "./feed.ts";
@@ -90,17 +90,17 @@ export async function importStep(context: Context): Promise<Response> {
     feed = await fetchFeed(podcast.feedUrl);
   } catch (error) {
     const message = error instanceof FeedError ? error.message : "The feed couldn't be read.";
-    return page("Import", html`<h1>Import episodes</h1><p class="alert">${message}</p><p><a href="/setup/import">Try again</a></p>`, { status: 502, ...siteTitle(context) });
+    return page("Import", html`<h1>Import episodes</h1><p class="alert">${message}</p><p><a href="/setup/import">Try again</a></p>`, { status: 502, ...chrome(context) });
   }
   const guessedZone = (context.request as Request & { cf?: { timezone?: string } }).cf?.timezone;
   const defaults: Schedule = { ...DEFAULT_SCHEDULE, timeZone: guessedZone && isValidTimeZone(guessedZone) ? guessedZone : DEFAULT_SCHEDULE.timeZone };
-  if (context.request.method === "GET") return page("Import", importView(context, feed, defaults), siteTitle(context));
+  if (context.request.method === "GET") return page("Import", importView(context, feed, defaults), chrome(context));
 
   const form = await context.request.formData();
   const parsed = parseSchedule(form);
   const count = Number(form.get("count"));
-  if ("error" in parsed) return page("Import", importView(context, feed, defaults, parsed.error), { status: 400, ...siteTitle(context) });
-  if (!Number.isInteger(count) || count < 0) return page("Import", importView(context, feed, parsed.schedule, "Choose how many episodes to import."), { status: 400, ...siteTitle(context) });
+  if ("error" in parsed) return page("Import", importView(context, feed, defaults, parsed.error), { status: 400, ...chrome(context) });
+  if (!Number.isInteger(count) || count < 0) return page("Import", importView(context, feed, parsed.schedule, "Choose how many episodes to import."), { status: 400, ...chrome(context) });
   await putSetting(context.db, "schedule", parsed.schedule);
   await rememberOrigin(context);
   await recordFeed(context.db, feed, { backfill: count });
@@ -166,8 +166,7 @@ export async function episodesDashboard(context: Context): Promise<Response> {
   ]);
   const notice = context.url.searchParams.get("notice");
   const live = counts.running + counts.queued > 0;
-  return page("Episodes", html`<p class="steps"><a href="/admin">Admin</a></p>
-<h1>Episodes</h1>
+  return page("Episodes", html`<h1>Episodes</h1>
 ${notice ? html`<p class="alert-ok">${notice}</p>` : ""}
 <p class="${live ? "live" : "hint"}">${live
     ? `Processing: ${counts.running} working, ${counts.queued} waiting. This page updates every ${LIVE_REFRESH_SECONDS} seconds.`
@@ -204,7 +203,7 @@ ${episodes.map((episode) => html`<tr>
     : ""}</td>
 </tr>`)}
 </tbody>
-</table>`, { ...siteTitle(context), ...(live ? { refreshSeconds: LIVE_REFRESH_SECONDS } : {}) });
+</table>`, { ...chrome(context), ...(live ? { refreshSeconds: LIVE_REFRESH_SECONDS } : {}) });
 }
 
 /** POST /admin/episodes/concurrency */
@@ -272,11 +271,10 @@ export async function scheduleSettings(context: Context): Promise<Response> {
     }
     error = parsed.error;
   }
-  return page("Schedule", html`<p class="steps"><a href="/admin">Admin</a></p>
-<h1>Schedule</h1>
+  return page("Schedule", html`<h1>Schedule</h1>
 <p class="lead">When the site checks your feed for new episodes.</p>
 ${error ? html`<p class="alert">${error}</p>` : ""}
-<form method="post" action="/admin/schedule">${scheduleFields(schedule)}<button type="submit">Save</button></form>`, { status: error ? 400 : 200, ...siteTitle(context) });
+<form method="post" action="/admin/schedule">${scheduleFields(schedule)}<button type="submit">Save</button></form>`, { status: error ? 400 : 200, ...chrome(context) });
 }
 
 /** The hourly cron: check the feed when the schedule says so, and always keep the queue moving. */

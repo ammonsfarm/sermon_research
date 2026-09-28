@@ -73,19 +73,16 @@ ${field({ name: "email", label: "Email", type: "email", value: values.email ?? "
 </form>` : ""}`;
 }
 
-export function homeView(ministry: Ministry | null, user: User | null, canResearch: boolean): Html {
-  return html`<h1>${ministry?.siteTitle ?? "Sermon Research"}</h1>
+/** The home page for visitors who can't use the research pages (members-only sites, or setup not finished). */
+export function homeView(ministry: Ministry | null, user: User | null, _canResearch: boolean): Html {
+  return html`<section class="ask-hero">
+<h1>${ministry?.siteTitle ?? "Sermon Research"}</h1>
 ${ministry?.description ? html`<p class="lead">${ministry.description}</p>` : ""}
-${canResearch
-    ? html`<p>Ask questions about the sermons and get answers with links to the exact passages, or browse and search every episode.</p>
-<div class="row"><a class="button" href="/research">Ask a question</a><a href="/episodes">Browse episodes</a></div>`
-    : html`<p>Sign in to ask questions about the sermons and search every episode.</p>`}
-<div class="row">
 ${user
-    ? html`${user.role === "admin" ? html`<a href="/admin">Admin</a>` : ""}
-<form class="inline" method="post" action="/logout"><button class="quiet" type="submit">Sign out</button></form>`
-    : html`<a href="/login">Sign in</a>`}
-</div>`;
+    ? html`<p>This site is still being set up. Check back soon.</p>`
+    : html`<p>Sign in to ask questions about the sermons, read and listen along, and create outlines and study guides.</p>
+<p><a class="button" href="/login">Sign in</a></p>`}
+</section>`;
 }
 
 export interface AdminOverview {
@@ -132,7 +129,7 @@ ${overview.saved ? html`<p>Saved.</p>` : ""}
 <dt><a href="/admin/research">Access</a></dt><dd>${overview.research.access === "public" ? "Anyone" : "Members only"} · up to ${overview.research.dailyQuestions} questions a day</dd>
 <dt><a href="/admin/members">Members</a></dt><dd>Invite and remove people</dd>
 </dl>
-<p><a href="/research">Open the research page</a></p>
+<p><a href="/">Open the Ask page</a></p>
 <h2>Sessions</h2>
 <div class="row">
 <form class="inline" method="post" action="/logout"><button class="quiet" type="submit">Sign out</button></form>

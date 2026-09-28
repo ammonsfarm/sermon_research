@@ -1,5 +1,5 @@
 import { createSession, isRateLimited, isValidEmail, normalizeEmail, recordFailure, sessionCookie } from "./auth.ts";
-import { type Context, clientIp, redirect, siteTitle } from "./context.ts";
+import { type Context, clientIp, redirect, chrome } from "./context.ts";
 import { randomToken, sha256 } from "./crypto.ts";
 import { html, page } from "./html.ts";
 import { getKey } from "./keys.ts";
@@ -22,7 +22,7 @@ export async function requestLink(context: Context): Promise<Response> {
   const email = normalizeEmail(String(form.get("email") ?? ""));
   const sent = page("Check your email", html`<h1>Check your email</h1>
 <p class="lead">If ${email} has an account here, a sign-in link is on its way. It works once and expires in ${LINK_MINUTES} minutes.</p>
-<p><a href="/login">Back to sign in</a></p>`, siteTitle(context));
+<p><a href="/login">Back to sign in</a></p>`, chrome(context));
 
   const settings = await getSetting<EmailSettings>(db, "email");
   if (!settings || !("from" in settings) || !isValidEmail(email)) return sent;
@@ -65,7 +65,7 @@ export async function showLink(context: Context): Promise<Response> {
 <form method="post" action="/login/link/confirm">
 <input type="hidden" name="token" value="${token}">
 <button type="submit">Continue signing in</button>
-</form>`, siteTitle(context));
+</form>`, chrome(context));
 }
 
 /** POST /login/link/confirm spends the token and starts a 30-day session. */
@@ -86,5 +86,5 @@ export async function confirmLink(context: Context): Promise<Response> {
 function expired(context: Context): Response {
   return page("Link expired", html`<h1>That link has expired</h1>
 <p class="lead">Sign-in links work once and expire after ${LINK_MINUTES} minutes.</p>
-<p><a href="/login">Get a new link</a></p>`, { status: 410, ...siteTitle(context) });
+<p><a href="/login">Get a new link</a></p>`, { status: 410, ...chrome(context) });
 }

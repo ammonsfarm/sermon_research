@@ -17,15 +17,18 @@ import {
   sessionCookie,
 } from "./auth.ts";
 import { timingSafeEqual } from "./crypto.ts";
-import { clientIp, type Context, redirect, requireAdmin, siteTitle } from "./context.ts";
+import { clientIp, type Context, redirect, requireAdmin, chrome } from "./context.ts";
 import type { AppEnv } from "./env.ts";
-import { page, READER_SCRIPT, SECURITY_HEADERS, STYLESHEET } from "./html.ts";
+import { APP_SCRIPT, STYLESHEET } from "./assets.ts";
+import { page, SECURITY_HEADERS } from "./html.ts";
 import { serveAudio } from "./audio.ts";
-import { deleteDocument, documentDownload, documentPage, documentsPage } from "./documents.ts";
+import { ask, conversation, deleteConversation, home, library, researchRedirect } from "./ask.ts";
+import { deleteDocument, documentDownload, documentPage } from "./documents.ts";
+import { sermonPage, sermonsPage } from "./sermons.ts";
 import { checkNow, episodesDashboard, hourlyTick, importStep, queueFromDashboard, saveConcurrency, scheduleSettings } from "./imports.ts";
 import { keyInfo } from "./keys.ts";
 import { acceptInvite, membersPage, reinviteMember, removeMember, showInvite } from "./members.ts";
-import { canViewResearch, episodePage, episodesPage, researchAdmin, researchAsk, researchPage, researchSettings } from "./research.ts";
+import { canViewResearch, researchAdmin, researchSettings } from "./research.ts";
 import { confirmLink, emailSignInEnabled, requestLink, showLink } from "./links.ts";
 import { ensureSchema } from "./schema.ts";
 import {
@@ -43,7 +46,6 @@ import {
 import { isProviderStep, stepForm, stepSubmit } from "./steps.ts";
 import {
   adminView,
-  homeView,
   loginView,
   ministryValues,
   ministryView,
@@ -61,15 +63,16 @@ export default {
     if (url.pathname === "/assets/app.css") {
       return new Response(STYLESHEET, { headers: { "Content-Type": "text/css; charset=utf-8", "Cache-Control": "public, max-age=3600", ...SECURITY_HEADERS } });
     }
-    if (url.pathname === "/assets/reader.js") {
-      return new Response(READER_SCRIPT, { headers: { "Content-Type": "text/javascript; charset=utf-8", "Cache-Control": "public, max-age=3600", ...SECURITY_HEADERS } });
+    if (url.pathname === "/assets/app.js") {
+      return new Response(APP_SCRIPT, { headers: { "Content-Type": "text/javascript; charset=utf-8", "Cache-Control": "public, max-age=3600", ...SECURITY_HEADERS } });
     }
     if (request.method === "POST" && !isSameOrigin(request, url)) {
       return new Response("Cross-site form submissions are not allowed.", { status: 403 });
     }
     await ensureSchema(env.DB);
     const session = await readSession(env.DB, readCookie(request, SESSION_COOKIE));
-    const context: Context = { request, env, db: env.DB, url, session, ministry: await getSetting<Ministry>(env.DB, "ministry") };
+    const [ministry, research] = await Promise.all([getSetting<Ministry>(env.DB, "ministry"), getSetting<{ access?: string }>(env.DB, "research")]);
+    const context: Context = { request, env, db: env.DB, url, session, ministry, researchOpen: research?.access === "public" };
     const response = await route(context);
     if (session?.refreshedToken && !response.headers.has("Set-Cookie")) {
       const headers = new Headers(response.headers);
@@ -93,6 +96,7 @@ async function route(context: Context): Promise<Response> {
   const key = `${request.method} ${url.pathname}`;
   switch (key) {
     case "GET /": return home(context);
+    case "GET /library": return library(context);
     case "GET /setup": return setupForm(context);
     case "POST /setup": return setupSubmit(context);
     case "GET /setup/ministry": return ministryForm(context, true);
@@ -115,10 +119,10 @@ async function route(context: Context): Promise<Response> {
     case "POST /admin/episodes/concurrency": return saveConcurrency(context);
     case "GET /admin/schedule":
     case "POST /admin/schedule": return scheduleSettings(context);
-    case "GET /research": return researchPage(context);
-    case "POST /research": return researchAsk(context);
-    case "GET /episodes": return episodesPage(context);
-    case "GET /documents": return documentsPage(context);
+    case "GET /research": return researchRedirect();
+    case "POST /research": return ask(context);
+    case "GET /episodes": return sermonsPage(context);
+    case "GET /documents": return redirect("/library");
     case "GET /admin/research":
     case "POST /admin/research": return researchAdmin(context);
     case "GET /admin/members":
@@ -129,7 +133,10 @@ async function route(context: Context): Promise<Response> {
     case "POST /invite": return acceptInvite(context);
     default: {
       const episode = /^\/episodes\/([0-9a-f-]{36})$/u.exec(url.pathname);
-      if (episode && request.method === "GET") return episodePage(context, episode[1]!);
+      if (episode && request.method === "GET") return sermonPage(context, episode[1]!);
+      const thread = /^\/ask\/([0-9a-f-]{36})(\/delete)?$/u.exec(url.pathname);
+      if (thread && request.method === "GET" && !thread[2]) return conversation(context, thread[1]!);
+      if (thread && request.method === "POST" && thread[2]) return deleteConversation(context, thread[1]!);
       const document = /^\/documents\/([0-9a-f-]{36})(\.md|\/delete)?$/u.exec(url.pathname);
       if (document && request.method === "GET" && !document[2]) return documentPage(context, document[1]!);
       if (document && request.method === "GET" && document[2] === ".md") return documentDownload(context, document[1]!);
@@ -141,7 +148,7 @@ async function route(context: Context): Promise<Response> {
         const wizard = match[1] === "setup";
         return request.method === "GET" ? stepForm(context, match[2], wizard) : stepSubmit(context, match[2], wizard);
       }
-      return page("Not found", notFoundView(), { status: 404, ...siteTitle(context) });
+      return page("Not found", notFoundView(), { status: 404, ...chrome(context) });
     }
   }
 }
@@ -154,14 +161,6 @@ function isSameOrigin(request: Request, url: URL): boolean {
   return request.headers.get("Sec-Fetch-Site") === "same-origin";
 }
 
-
-async function home(context: Context): Promise<Response> {
-  if (!(await hasAdmin(context.db))) return redirect("/setup");
-  const research = await researchSettings(context.db);
-  const ready = (await getSetupStep(context.db)) === "complete";
-  const canResearch = ready && (Boolean(context.session) || research.access === "public");
-  return page("Home", homeView(context.ministry, context.session?.user ?? null, canResearch), siteTitle(context));
-}
 
 async function setupForm(context: Context): Promise<Response> {
   if (await hasAdmin(context.db)) return redirect(context.session?.user.role === "admin" ? "/admin" : "/login");
@@ -204,7 +203,7 @@ async function ministryForm(context: Context, step: boolean): Promise<Response> 
   const current = await getSetupStep(context.db);
   if (step && current !== "ministry") return redirect(current === "complete" ? "/admin" : `/setup/${current}`);
   const values = context.ministry ? ministryValues(context.ministry) : {};
-  return page("Ministry", ministryView({ action: step ? "/setup/ministry" : "/admin/ministry", step, values }), siteTitle(context));
+  return page("Ministry", ministryView({ action: step ? "/setup/ministry" : "/admin/ministry", step, values }), chrome(context));
 }
 
 async function ministrySubmit(context: Context, step: boolean): Promise<Response> {
@@ -213,7 +212,7 @@ async function ministrySubmit(context: Context, step: boolean): Promise<Response
   const parsed = parseMinistry(await context.request.formData());
   if ("errors" in parsed) {
     const action = step ? "/setup/ministry" : "/admin/ministry";
-    return page("Ministry", ministryView({ action, step, errors: parsed.errors, values: parsed.values }), { status: 400, ...siteTitle(context) });
+    return page("Ministry", ministryView({ action, step, errors: parsed.errors, values: parsed.values }), { status: 400, ...chrome(context) });
   }
   await putSetting(context.db, "ministry", parsed.ministry);
   if (step && (await getSetupStep(context.db)) === "ministry") {
@@ -241,13 +240,13 @@ async function admin(context: Context): Promise<Response> {
   return page("Admin", adminView({
     user: context.session!.user, ministry: context.ministry, saved: context.url.searchParams.has("saved"),
     podcast, llm, embeddings, transcription, email, keys, research,
-  }), siteTitle(context));
+  }), chrome(context));
 }
 
 async function loginForm(context: Context): Promise<Response> {
   if (!(await hasAdmin(context.db))) return redirect("/setup");
   if (context.session) return redirect(context.session.user.role === "admin" ? "/admin" : "/");
-  return page("Sign in", loginView({}, {}, await emailSignInEnabled(context.db)), siteTitle(context));
+  return page("Sign in", loginView({}, {}, await emailSignInEnabled(context.db)), chrome(context));
 }
 
 async function loginSubmit(context: Context): Promise<Response> {
@@ -256,12 +255,12 @@ async function loginSubmit(context: Context): Promise<Response> {
   const email = normalizeEmail(String(form.get("email") ?? ""));
   const buckets = [`login-ip:${clientIp(request)}`, `login-email:${email}`];
   if (await isRateLimited(db, buckets)) {
-    return page("Sign in", loginView({ form: "Too many attempts. Wait 15 minutes and try again." }, { email }, await emailSignInEnabled(db)), { status: 429, ...siteTitle(context) });
+    return page("Sign in", loginView({ form: "Too many attempts. Wait 15 minutes and try again." }, { email }, await emailSignInEnabled(db)), { status: 429, ...chrome(context) });
   }
   const user = await authenticate(db, email, String(form.get("password") ?? ""));
   if (!user) {
     await recordFailure(db, buckets);
-    return page("Sign in", loginView({ form: "That email and password don't match." }, { email }, await emailSignInEnabled(db)), { status: 401, ...siteTitle(context) });
+    return page("Sign in", loginView({ form: "That email and password don't match." }, { email }, await emailSignInEnabled(db)), { status: 401, ...chrome(context) });
   }
   if (context.session) await endSession(db, context.session.tokenHash);
   return redirect(user.role === "admin" ? "/admin" : "/", sessionCookie(await createSession(db, user.id)));
