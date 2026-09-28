@@ -9,6 +9,8 @@ export const SECRET = "test-secret-0123456789-abcdefghijklmnop";
 export interface FakeVectors {
   readonly stored: Map<string, VectorizeVector>;
   readonly deleted: string[];
+  /** The options of every query, to check filters. */
+  readonly queries: unknown[];
 }
 
 export interface FakeWorkflow {
@@ -28,15 +30,18 @@ export interface TestApp {
 
 export function createApp(overrides: Partial<AppEnv> = {}): TestApp {
   resetSchemaCache();
-  const vectors: FakeVectors = { stored: new Map(), deleted: [] };
+  const vectors: FakeVectors = { stored: new Map(), deleted: [], queries: [] };
   const workflow: FakeWorkflow = { created: [], failing: false };
   const VECTORS = {
     async upsert(items: VectorizeVector[]) {
       for (const item of items) vectors.stored.set(item.id, item);
       return { mutationId: "m" };
     },
-    async query(_vector: number[], options: { topK?: number } = {}) {
-      return { count: 0, matches: [...vectors.stored.keys()].slice(0, options.topK ?? 5).map((id) => ({ id, score: 0.9 })) };
+    async query(_vector: number[], options: { topK?: number; filter?: { episodeId?: { $in?: string[] } } } = {}) {
+      const allowed = options.filter?.episodeId?.$in;
+      const ids = [...vectors.stored.values()].filter((item) => !allowed || allowed.includes(String(item.metadata?.episodeId))).map((item) => item.id);
+      vectors.queries.push(options);
+      return { count: 0, matches: ids.slice(0, options.topK ?? 5).map((id) => ({ id, score: 0.9 })) };
     },
     async deleteByIds(ids: string[]) {
       for (const id of ids) { vectors.deleted.push(id); vectors.stored.delete(id); }

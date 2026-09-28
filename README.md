@@ -75,16 +75,22 @@ assistant at this repo. [AGENTS.md](AGENTS.md) tells it how to help.
 - Episode pages play the audio from your own R2 copy
 - A schedule set in Admin (daily or weekly, at a local hour); there's no cron
   to edit
-- A research page: ask a question and get an answer drawn only from your
-  sermons, with numbered citations linking to the passage and its timestamp
-- Episode search by title, topic, scripture or meaning, and a page per episode
-  with an audio player, summary and a read-along transcript: the sentence
-  being played is highlighted (the word is estimated from sentence timings),
-  and clicking any sentence plays from there
-- Documents: from the Ask page, signed-in people can have the answers AI write
-  a sermon outline, a small-group study guide or any custom document from the
-  sermons, with citations. Each is saved under Documents and downloads as a
-  Markdown (.md) file with its sources linked
+- A clear layout: Ask, Sermons and Library tabs for everyone, and Admin with
+  its own side menu for admins
+- Ask: a question gets an answer drawn only from your sermons, with numbered
+  citations linking to the passage and its timestamp. Narrow any question to
+  a series, a date range or specific sermons. Answers become conversations
+  you can follow up on, saved to your Library
+- Sermons: searchable cards (title, topic, scripture or meaning) with series
+  and date filters, and a page per sermon with the player and a read-along
+  transcript: the sentence being played is highlighted (the word is estimated
+  from sentence timings), and clicking any sentence plays from there. Beside
+  it, tabs for the summary, asking about just that sermon, and creating an
+  outline, study questions or anything else from it
+- Documents: signed-in people can have the answers AI write a sermon outline,
+  a small-group study guide or any custom document, with citations. Each is
+  saved to the Library and downloads as a Markdown (.md) file with its
+  sources linked
 - Members-only by default: admins invite members by link (emailed too when
   email is set up). A switch in Admin makes it public, with per-visitor hourly
   limits and a daily cap on questions to control AI spending

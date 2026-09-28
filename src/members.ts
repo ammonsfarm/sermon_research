@@ -1,5 +1,5 @@
 import { createSession, endAllSessions, isRateLimited, isValidEmail, normalizeEmail, passwordProblem, recordFailure, sessionCookie } from "./auth.ts";
-import { type Context, clientIp, redirect, requireAdmin, siteTitle } from "./context.ts";
+import { type Context, clientIp, redirect, requireAdmin, chrome } from "./context.ts";
 import { hashPassword, randomToken, sha256 } from "./crypto.ts";
 import { field, html, type Html, page } from "./html.ts";
 import { getKey } from "./keys.ts";
@@ -12,8 +12,7 @@ interface MemberRow { readonly id: string; readonly name: string; readonly email
 
 function membersView(context: Context, members: readonly MemberRow[], options: { errors?: Record<string, string>; values?: Record<string, string>; invite?: { name: string; link: string; emailed: boolean } } = {}): Html {
   const { errors = {}, values = {}, invite } = options;
-  return html`<p class="steps"><a href="/admin">Admin</a></p>
-<h1>Members</h1>
+  return html`<h1>Members</h1>
 <p class="lead">Members can use the research pages when they're set to members only. Only admins can change settings.</p>
 ${invite ? html`<div class="alert-ok"><p><strong>${invite.name} is invited.</strong> ${invite.emailed ? "The invite was emailed, and you can also share this link:" : "Send them this link; it's shown only once:"}</p>
 <pre>${invite.link}</pre><p class="hint">It works once and expires in ${INVITE_DAYS} days.</p></div>` : ""}
@@ -74,7 +73,7 @@ export async function membersPage(context: Context): Promise<Response> {
   const denied = requireAdmin(context);
   if (denied) return denied;
   const { db } = context;
-  if (context.request.method === "GET") return page("Members", membersView(context, await listMembers(db)), siteTitle(context));
+  if (context.request.method === "GET") return page("Members", membersView(context, await listMembers(db)), chrome(context));
 
   const form = await context.request.formData();
   const values = { name: String(form.get("name") ?? "").trim().slice(0, 120), email: normalizeEmail(String(form.get("email") ?? "")) };
@@ -82,14 +81,14 @@ export async function membersPage(context: Context): Promise<Response> {
   if (!values.name) errors.name = "Enter their name.";
   if (!isValidEmail(values.email)) errors.email = "Enter a valid email address.";
   else if (await db.prepare("SELECT 1 FROM users WHERE email = ?").bind(values.email).first()) errors.email = "Someone with that email already has an account.";
-  if (Object.keys(errors).length > 0) return page("Members", membersView(context, await listMembers(db), { errors, values }), { status: 400, ...siteTitle(context) });
+  if (Object.keys(errors).length > 0) return page("Members", membersView(context, await listMembers(db), { errors, values }), { status: 400, ...chrome(context) });
 
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
   await db.prepare("INSERT INTO users (id, email, name, role, password_hash, created_at, updated_at) VALUES (?, ?, ?, 'member', NULL, ?, ?)")
     .bind(id, values.email, values.name, now, now).run();
   const invite = await issueInvite(context, { id, ...values });
-  return page("Members", membersView(context, await listMembers(db), { invite }), siteTitle(context));
+  return page("Members", membersView(context, await listMembers(db), { invite }), chrome(context));
 }
 
 async function findMember(context: Context): Promise<MemberRow | null> {
@@ -104,7 +103,7 @@ export async function reinviteMember(context: Context): Promise<Response> {
   const member = await findMember(context);
   if (!member) return redirect("/admin/members");
   const invite = await issueInvite(context, member);
-  return page("Members", membersView(context, await listMembers(context.db), { invite }), siteTitle(context));
+  return page("Members", membersView(context, await listMembers(context.db), { invite }), chrome(context));
 }
 
 /** POST /admin/members/remove */
@@ -142,20 +141,20 @@ ${field({ name: "confirm", label: "Confirm password", type: "password", error: e
 </form>`;
 }
 
-const expired = (context: Context) => page("Invite", html`<h1>This invite has expired</h1><p class="lead">It was already used or is more than ${INVITE_DAYS} days old. Ask an admin for a new link.</p><p><a href="/login">Sign in</a></p>`, { status: 410, ...siteTitle(context) });
+const expired = (context: Context) => page("Invite", html`<h1>This invite has expired</h1><p class="lead">It was already used or is more than ${INVITE_DAYS} days old. Ask an admin for a new link.</p><p><a href="/login">Sign in</a></p>`, { status: 410, ...chrome(context) });
 
 /** GET /invite?token=… */
 export async function showInvite(context: Context): Promise<Response> {
   const token = context.url.searchParams.get("token") ?? "";
   const invite = await findInvite(context.db, token);
-  return invite ? page("Invite", inviteView(invite.name, token), siteTitle(context)) : expired(context);
+  return invite ? page("Invite", inviteView(invite.name, token), chrome(context)) : expired(context);
 }
 
 /** POST /invite: sets the password, spends the invite and signs the member in. */
 export async function acceptInvite(context: Context): Promise<Response> {
   const { db, request } = context;
   const buckets = [`invite:${clientIp(request)}`];
-  if (await isRateLimited(db, buckets)) return page("Invite", html`<h1>Too many attempts</h1><p>Wait 15 minutes and try again.</p>`, { status: 429, ...siteTitle(context) });
+  if (await isRateLimited(db, buckets)) return page("Invite", html`<h1>Too many attempts</h1><p>Wait 15 minutes and try again.</p>`, { status: 429, ...chrome(context) });
   const form = await request.formData();
   const token = String(form.get("token") ?? "");
   const invite = await findInvite(db, token);
@@ -168,12 +167,12 @@ export async function acceptInvite(context: Context): Promise<Response> {
   const errors: Record<string, string> = {};
   if (problem) errors.password = problem;
   else if (password !== String(form.get("confirm") ?? "")) errors.confirm = "The passwords don't match.";
-  if (Object.keys(errors).length > 0) return page("Invite", inviteView(invite.name, token, errors), { status: 400, ...siteTitle(context) });
+  if (Object.keys(errors).length > 0) return page("Invite", inviteView(invite.name, token, errors), { status: 400, ...chrome(context) });
 
   const now = new Date().toISOString();
   const spent = await db.prepare("UPDATE invites SET used_at = ? WHERE token_hash = ? AND used_at IS NULL").bind(now, invite.token_hash).run();
   if (spent.meta.changes !== 1) return expired(context);
   await db.prepare("UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?").bind(await hashPassword(password), now, invite.user_id).run();
   await endAllSessions(db, invite.user_id);
-  return redirect("/research", sessionCookie(await createSession(db, invite.user_id)));
+  return redirect("/", sessionCookie(await createSession(db, invite.user_id)));
 }

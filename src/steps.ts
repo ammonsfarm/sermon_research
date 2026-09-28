@@ -1,4 +1,4 @@
-import { type Context, redirect, requireAdmin, siteTitle } from "./context.ts";
+import { type Context, redirect, requireAdmin, chrome } from "./context.ts";
 import { FeedError, fetchFeed, type Feed } from "./feed.ts";
 import { field, html, page, type Html } from "./html.ts";
 import { getKey, keyInfo, putKey, type KeySlot } from "./keys.ts";
@@ -52,7 +52,7 @@ interface StepState {
 
 function stepHeader(state: StepState): Html {
   const index = SETUP_STEPS.indexOf(state.step) + 1;
-  return state.wizard ? html`<p class="steps">Setup · step ${index + 1} of ${SETUP_STEPS.length}</p>` : html`<p class="steps"><a href="/admin">Admin</a></p>`;
+  return state.wizard ? html`<p class="steps">Setup · step ${index + 1} of ${SETUP_STEPS.length}</p>` : html``;
 }
 
 function action(state: StepState): string {
@@ -65,7 +65,7 @@ function keyHint(state: StepState, slot: KeySlot, base: string): string {
 }
 
 function render(state: StepState, body: Html, status = 200): Response {
-  return page(TITLES[state.step], html`${stepHeader(state)}${body}`, { status, ...siteTitle(state.context) });
+  return page(TITLES[state.step], html`${stepHeader(state)}${body}`, { status, ...chrome(state.context) });
 }
 
 function podcastForm(state: StepState, errors: Errors = {}, values: Values = {}): Html {

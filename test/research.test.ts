@@ -5,7 +5,9 @@ import { signedAudioUrl } from "../src/audio.ts";
 import { runEpisode, type PipelineStep } from "../src/pipeline.ts";
 import { fileName, splitTitle } from "../src/documents.ts";
 import { renderMarkdown } from "../src/markdown.ts";
-import { formatTime, renderAnswer, segmentsByChunk } from "../src/research.ts";
+import { formatTime, renderAnswer } from "../src/research.ts";
+import { describeScope, parseScope, scopeIds, seriesOf, titleWithoutSeries } from "../src/scope.ts";
+import { segmentsByChunk } from "../src/sermons.ts";
 import { AUDIO_BYTES, DOCUMENT_REPLY, completeSetup, cookieFrom, createApp, fakeProviders, ORIGIN, SECRET, type TestApp } from "./helpers.ts";
 
 const inlineStep: PipelineStep = { do: (_name, _config, callback) => callback() };
@@ -36,11 +38,21 @@ async function makePublic(app: TestApp, cookie: string, dailyQuestions = 200) {
 test("research is members-only by default", async () => {
   const site = await indexedSite();
   try {
-    for (const path of ["/research", "/episodes", `/episodes/${site.ids[0]}`]) {
+    for (const path of ["/episodes", `/episodes/${site.ids[0]}`, "/library"]) {
       assert.equal((await site.app.request(path)).headers.get("Location"), "/login", path);
     }
-    assert.match(await (await site.app.request("/")).text(), /Sign in to ask questions/);
-    assert.equal((await site.app.request("/research", { cookie: site.cookie })).status, 200);
+    const signedOut = await (await site.app.request("/")).text();
+    assert.match(signedOut, /Sign in to ask questions/);
+    assert.doesNotMatch(signedOut, /aria-label="Main"/, "no navigation to pages visitors can't open");
+    const home = await (await site.app.request("/", { cookie: site.cookie })).text();
+    assert.match(home, /<h1>Ask the sermons<\/h1>/, "the home page is Ask once signed in");
+    assert.match(home, /<nav class="tabs-main" aria-label="Main"><a href="\/" aria-current="page">Ask<\/a><a href="\/episodes">Sermons<\/a><a href="\/library">Library<\/a><a href="\/admin">Admin<\/a><\/nav>/);
+    assert.match(home, /<span class="who">Jane Admin<\/span>/);
+    assert.equal((await site.app.request("/research", { cookie: site.cookie })).headers.get("Location"), "/", "the old address still works");
+    const admin = await (await site.app.request("/admin/episodes", { cookie: site.cookie })).text();
+    assert.match(admin, /<nav class="side" aria-label="Admin">/);
+    assert.match(admin, /<li><a href="\/admin\/episodes" aria-current="page">Episodes<\/a><\/li>/);
+    assert.match(admin, /<a href="\/admin" aria-current="page">Admin<\/a>/);
   } finally {
     site.restore();
   }
@@ -49,13 +61,37 @@ test("research is members-only by default", async () => {
 test("a question gets a cited answer with linked sources", async () => {
   const site = await indexedSite();
   try {
-    const response = await site.app.request("/research", { form: { question: "What is grace?" }, cookie: site.cookie });
+    const asked = await site.app.request("/research", { form: { question: "What is grace?" }, cookie: site.cookie });
+    const location = asked.headers.get("Location") ?? "";
+    assert.match(location, /^\/ask\/[0-9a-f-]{36}#turn-[0-9a-f-]{36}$/u, "signed-in answers are kept as a conversation");
+    const response = await site.app.request(location.split("#")[0]!, { cookie: site.cookie });
     const body = await response.text();
     assert.equal(response.status, 200);
-    assert.match(body, /Salvation is by grace <sup><a href="#source-1">1<\/a><\/sup>/);
+    assert.match(body, /<p class="question">What is grace\?<\/p>/);
+    assert.match(body, /Salvation is by grace <sup><a href="#t1-source-1">1<\/a><\/sup>/);
     assert.match(body, /&lt;b&gt;\[9\]&lt;\/b&gt;/, "unknown citations and markup stay as escaped text");
-    assert.match(body, new RegExp(`<li id="source-1"><a href="/episodes/${site.ids[0]}#t-0">Faith &amp; Works</a>`));
+    assert.match(body, new RegExp(`<li id="t1-source-1"><span class="n">1</span> <a href="/episodes/${site.ids[0]}#t-0">Faith &amp; Works</a>`));
     assert.match(body, /· 0:00/, "transcript sources show their timestamp");
+    assert.match(body, /Scope: <strong>All sermons<\/strong>/);
+
+    // A follow-up joins the same conversation and sends the earlier exchange to the AI.
+    const thread = location.split("#")[0]!.slice("/ask/".length);
+    const followUp = await site.app.request("/research", { form: { question: "And faith?", thread }, cookie: site.cookie });
+    assert.match(followUp.headers.get("Location") ?? "", new RegExp(`^/ask/${thread}#turn-`));
+    const prompt = JSON.stringify(site.providers.calls.findLast((call) => call.url.endsWith("/chat/completions"))?.body);
+    assert.match(prompt, /Earlier in this conversation:.*Q: What is grace\?/);
+    const both = await (await site.app.request(`/ask/${thread}`, { cookie: site.cookie })).text();
+    assert.match(both, /What is grace\?[\s\S]*And faith\?/);
+    assert.match(both, /href="#t2-source-1"/, "each answer links to its own sources");
+
+    const library = await (await site.app.request("/library", { cookie: site.cookie })).text();
+    assert.match(library, new RegExp(`<a href="/ask/${thread}">What is grace\\?</a><br>\\s*<span class="hint">2 questions`));
+    const member = await inviteMember(site.app, site.cookie);
+    assert.equal((await site.app.request(`/ask/${thread}`, { cookie: member })).status, 404, "conversations are private");
+    assert.equal((await site.app.request("/research", { form: { question: "Sneaky follow-up", thread }, cookie: member })).headers.get("Location"), "/");
+
+    assert.equal((await site.app.request(`/ask/${thread}/delete`, { form: {}, cookie: site.cookie })).headers.get("Location"), "/library");
+    assert.equal((await site.app.request(`/ask/${thread}`, { cookie: site.cookie })).status, 404);
   } finally {
     site.restore();
   }
@@ -65,18 +101,24 @@ test("episode search matches keywords, then related meaning", async () => {
   const site = await indexedSite();
   try {
     const all = await (await site.app.request("/episodes", { cookie: site.cookie })).text();
+    assert.match(all, /<h1>Sermons<\/h1>/);
     assert.match(all, /Faith &amp; Works/);
     assert.match(all, /Grace Alone/);
+    assert.match(all, /<li class="chip">grace<\/li><li class="chip">Ephesians 2:8<\/li>/, "cards show topics and scripture");
+    assert.match(all, /<a href="\/episodes" aria-current="page">Sermons<\/a>/);
 
     const byTitle = await (await site.app.request("/episodes?q=Alone", { cookie: site.cookie })).text();
     assert.match(byTitle, /Grace Alone/);
-    assert.match(byTitle, /<h2>Related<\/h2>[\s\S]*Faith &amp; Works/, "semantic matches the keywords missed");
+    assert.match(byTitle, /<h2>Related in meaning<\/h2>[\s\S]*Faith &amp; Works/, "semantic matches the keywords missed");
 
     const byScripture = await (await site.app.request("/episodes?q=Ephesians%202", { cookie: site.cookie })).text();
-    assert.doesNotMatch(byScripture, /No episodes match/);
+    assert.doesNotMatch(byScripture, /No sermons match/);
 
     const wildcard = await (await site.app.request("/episodes?q=%25", { cookie: site.cookie })).text();
-    assert.doesNotMatch(wildcard.split("<h2>Related</h2>")[0]!, /episode-list/, "% is a literal, not a wildcard");
+    assert.doesNotMatch(wildcard.split("Related in meaning")[0]!, /class="card"/, "% is a literal, not a wildcard");
+
+    const oldest = await (await site.app.request("/episodes?sort=oldest", { cookie: site.cookie })).text();
+    assert.ok(oldest.indexOf("Grace Alone") < oldest.indexOf("Faith &amp; Works"), "oldest first");
   } finally {
     site.restore();
   }
@@ -89,14 +131,17 @@ test("episode pages show the summary, audio and timestamped transcript", async (
     const body = await response.text();
     assert.equal(response.status, 200);
     assert.match(body, new RegExp(`<audio id="player" controls preload="metadata" src="/audio/${site.ids[0]}">`), "plays our own copy");
-    assert.match(body, /<script src="\/assets\/reader.js" defer><\/script>/);
+    assert.match(body, /<script src="\/assets\/app.js" defer><\/script>/);
     assert.match(body, /<input type="checkbox" id="follow" checked> Follow along as it plays/);
     assert.match(body, /<span class="seg" data-start="0" data-end="4.5">Welcome, church.<\/span> <span class="seg" data-start="4.5" data-end="11">Today we read Ephesians 2:8.<\/span>/, "each timed sentence can be highlighted and clicked");
     assert.match(body, /Grace is a gift\./);
-    assert.match(body, /<strong>Scripture:<\/strong> Ephesians 2:8/);
+    assert.match(body, /<h3>Scripture<\/h3><ul class="chips"><li class="chip">Ephesians 2:8<\/li><\/ul>/);
+    assert.match(body, /<button type="button" role="tab" id="tab-ask" aria-controls="panel-ask">Ask<\/button>/);
+    assert.match(body, new RegExp(`<input type="hidden" name="scope_episode" value="${site.ids[0]}">`), "the Ask panel is limited to this sermon");
+    assert.match(body, /<input type="hidden" name="kind" value="outline">/);
     assert.match(body, /<div class="passage" id="t-1">/);
     assert.match(body, new RegExp(`href="/audio/${site.ids[0]}#t=0" data-seek="0">Listen from 0:00`));
-    const script = await site.app.request("/assets/reader.js");
+    const script = await site.app.request("/assets/app.js");
     assert.equal(script.headers.get("Content-Type"), "text/javascript; charset=utf-8");
     assert.match(await script.text(), /word-active/);
     assert.equal((await site.app.request("/episodes/00000000-0000-0000-0000-000000000000", { cookie: site.cookie })).status, 404);
@@ -110,14 +155,19 @@ test("public mode lets visitors in, with per-visitor and daily limits", async ()
   try {
     await makePublic(site.app, site.cookie, 3);
     assert.equal((await site.app.request("/episodes")).status, 200);
-    assert.match(await (await site.app.request("/")).text(), /Ask a question/);
+    const home = await (await site.app.request("/")).text();
+    assert.match(home, /<h1>Ask the sermons<\/h1>/);
+    assert.match(home, /<a href="\/" aria-current="page">Ask<\/a><a href="\/episodes">Sermons<\/a><\/nav>/, "visitors see Ask and Sermons, not Library");
+    const visitor = await site.app.request("/research", { form: { question: "What is grace?" }, headers: { "CF-Connecting-IP": "192.0.2.1" } });
+    assert.equal(visitor.status, 200, "visitors get the answer on the page");
+    assert.match(await visitor.text(), /Salvation is by grace/);
 
     const ask = (ip: string) => site.app.request("/research", { form: { question: "What is grace?" }, headers: { "CF-Connecting-IP": ip } });
-    for (let i = 0; i < 3; i += 1) assert.equal((await ask(`203.0.113.${i}`)).status, 200);
+    for (let i = 0; i < 2; i += 1) assert.equal((await ask(`203.0.113.${i}`)).status, 200);
     const capped = await ask("203.0.113.9");
     assert.equal(capped.status, 429);
     assert.match(await capped.text(), /limit of questions for today/);
-    assert.equal((await site.app.request("/research", { form: { question: "Admins aren't capped" }, cookie: site.cookie })).status, 200);
+    assert.equal((await site.app.request("/research", { form: { question: "Admins aren't capped" }, cookie: site.cookie })).status, 303);
 
     await makePublic(site.app, site.cookie, 1000);
     let status = 0;
@@ -146,9 +196,9 @@ test("admins invite members, who set a password and can then research", async ()
     assert.equal(weak.status, 400);
 
     const accepted = await site.app.request("/invite", { form: { token, password: "a long enough password", confirm: "a long enough password" } });
-    assert.equal(accepted.headers.get("Location"), "/research");
+    assert.equal(accepted.headers.get("Location"), "/");
     const member = cookieFrom(accepted);
-    assert.equal((await site.app.request("/research", { cookie: member })).status, 200);
+    assert.match(await (await site.app.request("/", { cookie: member })).text(), /<h1>Ask the sermons<\/h1>/);
     assert.equal((await site.app.request("/admin", { cookie: member })).status, 403, "members aren't admins");
     assert.equal((await site.app.request("/invite", { form: { token, password: "a long enough password", confirm: "a long enough password" } })).status, 410, "invites work once");
 
@@ -157,7 +207,7 @@ test("admins invite members, who set a password and can then research", async ()
 
     const { id } = (await site.app.env.DB.prepare("SELECT id FROM users WHERE email = 'sam@example.org'").first<{ id: string }>())!;
     await site.app.request("/admin/members/remove", { form: { id }, cookie: site.cookie });
-    assert.equal((await site.app.request("/research", { cookie: member })).headers.get("Location"), "/login", "removing a member signs them out");
+    assert.equal((await site.app.request("/library", { cookie: member })).headers.get("Location"), "/login", "removing a member signs them out");
   } finally {
     site.restore();
   }
@@ -178,7 +228,8 @@ test("invites are emailed when email is set up", async () => {
 });
 
 test("answers render safely and times format", () => {
-  assert.equal(renderAnswer("A [1]. B [3].", 2).value, "<p>A <sup><a href=\"#source-1\">1</a></sup>. B [3].</p>");
+  assert.equal(renderAnswer("A [1]. B [3].", 2).value, "<p>A <sup><a href=\"#source-1\">1</a></sup>. B [3].</p>\n");
+  assert.equal(renderAnswer("- one [2]", 2, "t3-source").value, "<ul><li>one <sup><a href=\"#t3-source-2\">2</a></sup></li></ul>\n", "answers may use simple lists");
   assert.equal(formatTime(3725), "1:02:05");
   assert.equal(formatTime(65.9), "1:05");
   assert.equal(formatTime(null), "");
@@ -225,7 +276,7 @@ test("transcript sentences are grouped under the passage they were indexed in", 
 test("members create Markdown documents from the sermons, then view, download and delete them", async () => {
   const site = await indexedSite();
   try {
-    const ask = await site.app.request("/research", { cookie: site.cookie });
+    const ask = await site.app.request("/", { cookie: site.cookie });
     assert.match(await ask.text(), /<option value="outline">Sermon outline<\/option>/);
 
     const created = await site.app.request("/research", { form: { question: "An outline on grace", kind: "outline" }, cookie: site.cookie });
@@ -255,20 +306,22 @@ test("members create Markdown documents from the sermons, then view, download an
     assert.match(markdown, /^# Saved by Grace\n\n\*\*Big idea:\*\* grace is a gift \[1\]\./u);
     assert.match(markdown, new RegExp(`\\n## Sources\\n\\n1\\. \\[[^\\]]+\\]\\(https://sermons\\.example\\.org/episodes/(${site.ids.join("|")})#t-\\d+\\), 2026-09-\\d\\d`));
 
-    const list = await (await site.app.request("/documents", { cookie: site.cookie })).text();
-    assert.match(list, new RegExp(`<a href="${location}">Saved by Grace</a>`));
+    assert.equal((await site.app.request("/documents", { cookie: site.cookie })).headers.get("Location"), "/library");
+    const list = await (await site.app.request("/library", { cookie: site.cookie })).text();
+    assert.match(list, new RegExp(`<a href="${location}">Saved by Grace</a> <a class="hint" href="${location}.md" download>.md</a>`));
     assert.match(list, /Sermon outline ·/);
+    assert.match(await (await site.app.request("/", { cookie: site.cookie })).text(), /<h2>Recent documents<\/h2><ul class="list-plain"><li><a href="\/documents\/[0-9a-f-]+">Saved by Grace<\/a>/);
 
     // Another member can't see it; signed-out visitors are sent to sign in.
     const member = await inviteMember(site.app, site.cookie);
     assert.equal((await site.app.request(location, { cookie: member })).status, 404);
     assert.equal((await site.app.request(`${location}.md`, { cookie: member })).status, 404);
-    assert.doesNotMatch(await (await site.app.request("/documents", { cookie: member })).text(), /Saved by Grace/);
+    assert.doesNotMatch(await (await site.app.request("/library", { cookie: member })).text(), /Saved by Grace/);
     assert.equal((await site.app.request(`${location}/delete`, { form: {}, cookie: member })).status, 404, "members can't delete others' documents");
     assert.equal((await site.app.request(location)).headers.get("Location"), "/login");
 
     const deleted = await site.app.request(`${location}/delete`, { form: {}, cookie: site.cookie });
-    assert.equal(deleted.headers.get("Location"), "/documents");
+    assert.equal(deleted.headers.get("Location"), "/library");
     assert.equal((await site.app.request(location, { cookie: site.cookie })).status, 404);
   } finally {
     site.restore();
@@ -279,9 +332,9 @@ test("signed-out visitors in public mode can ask but not create documents", asyn
   const site = await indexedSite();
   try {
     await makePublic(site.app, site.cookie);
-    const page = await (await site.app.request("/research")).text();
+    const page = await (await site.app.request("/")).text();
     assert.match(page, /<option value="outline" disabled>/);
-    assert.match(page, /Sign in<\/a> to create outlines/);
+    assert.match(page, /Sign in<\/a> to keep conversations and create outlines/);
     const refused = await site.app.request("/research", { form: { question: "Study questions on grace", kind: "questions" } });
     assert.equal(refused.status, 403);
     assert.match(await refused.text(), /Sign in to create documents/);
@@ -308,4 +361,55 @@ test("Markdown renders the document subset and escapes everything else", () => {
   assert.deepEqual(splitTitle("No title here", "fallback"), { title: "fallback", body: "No title here" });
   assert.equal(fileName("Grace & Peace: Week 1!"), "grace-peace-week-1.md");
   assert.equal(fileName("!!!"), "document.md");
+});
+
+test("questions and documents can be limited to a series, dates or chosen sermons", async () => {
+  const site = await indexedSite();
+  try {
+    const [newer, older] = site.ids as [string, string];
+    const home = await (await site.app.request("/", { cookie: site.cookie })).text();
+    assert.match(home, /<details class="scope">\s*<summary>Scope: All sermons<\/summary>/);
+    assert.match(home, new RegExp(`<option value="${older}">2026-09-07 · Grace Alone</option>`));
+
+    const asked = await site.app.request("/research", { form: { question: "What is grace?", scope_episode: older }, cookie: site.cookie });
+    const thread = await (await site.app.request((asked.headers.get("Location") ?? "").split("#")[0]!, { cookie: site.cookie })).text();
+    assert.match(thread, /Scope: <strong>“Grace Alone”<\/strong>/);
+    assert.deepEqual((site.app.vectors.queries.at(-1) as { filter?: unknown }).filter, { episodeId: { $in: [older] } });
+    assert.doesNotMatch(thread, new RegExp(`/episodes/${newer}#`), "only the chosen sermon is cited");
+
+    // Dates are inclusive and combine with other limits.
+    await site.app.request("/research", { form: { question: "What is grace?", scope_from: "2026-09-10", scope_to: "2026-09-30" }, cookie: site.cookie });
+    assert.deepEqual((site.app.vectors.queries.at(-1) as { filter?: unknown }).filter, { episodeId: { $in: [newer] } });
+
+    const none = await site.app.request("/research", { form: { question: "What is grace?", scope_from: "2030-01-01" }, cookie: site.cookie });
+    assert.equal(none.status, 400);
+    assert.match(await none.text(), /No sermons match that scope/);
+
+    // A sermon page's Create buttons write from that sermon only.
+    const outline = await site.app.request("/research", { form: { question: "Sermon outline for “Grace Alone”", kind: "outline", scope_episode: older }, cookie: site.cookie });
+    const doc = await (await site.app.request(outline.headers.get("Location")!, { cookie: site.cookie })).text();
+    assert.match(doc, /Scope: <strong>“Grace Alone”<\/strong>/);
+    assert.deepEqual((site.app.vectors.queries.at(-1) as { filter?: unknown }).filter, { episodeId: { $in: [older] } });
+  } finally {
+    site.restore();
+  }
+});
+
+test("series come from the part of a title after the last dash", () => {
+  assert.equal(seriesOf("Turn to Me - Haggai: Build What Matters"), "Haggai: Build What Matters");
+  assert.equal(seriesOf("Faith - Hope - Love - 1 Corinthians"), "1 Corinthians");
+  assert.equal(seriesOf("Grace Alone"), null);
+  assert.equal(titleWithoutSeries("Turn to Me - Haggai: Build What Matters"), "Turn to Me");
+  const entries = [
+    { id: "a", title: "One - Matthew", publishedAt: "2026-01-04T00:00:00Z", series: "Matthew" },
+    { id: "b", title: "Two - Haggai", publishedAt: "2026-02-01T00:00:00Z", series: "Haggai" },
+    { id: "c", title: "Three - Matthew", publishedAt: "2026-03-01T00:00:00Z", series: "Matthew" },
+  ];
+  assert.equal(scopeIds({}, entries), null);
+  assert.deepEqual(scopeIds({ series: "Matthew" }, entries), ["a", "c"]);
+  assert.deepEqual(scopeIds({ series: "Matthew", from: "2026-02-01" }, entries), ["c"]);
+  assert.deepEqual(scopeIds({ to: "2026-02-01" }, entries), ["a", "b"]);
+  assert.equal(describeScope({ series: "Matthew", from: "2026-02-01" }, entries), "Series: Matthew, from 2026-02-01");
+  assert.equal(describeScope({ episodes: ["a", "b"] }, entries), "2 chosen sermons");
+  assert.deepEqual(parseScope(new URLSearchParams("scope_series=Matthew&scope_from=nope&scope_episode=x&scope_to=2026-03-01")), { series: "Matthew", to: "2026-03-01" });
 });
