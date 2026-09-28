@@ -17,12 +17,13 @@ export interface Context {
 }
 
 /** The page chrome for this request: site title, main navigation and, on admin pages, the admin menu. */
-export function chrome(context: Context): { siteTitle?: string; header?: Html; aside?: Html } {
+export function chrome(context: Context): { siteTitle?: string; logoUrl?: string; header?: Html; aside?: Html } {
   if (!context.ministry) return {};
   const path = context.url.pathname;
   const isAdmin = context.session?.user.role === "admin";
   return {
     siteTitle: context.ministry.siteTitle,
+    ...(context.ministry.logoUrl ? { logoUrl: context.ministry.logoUrl } : {}),
     header: siteHeader(context.session, path, context.researchOpen),
     ...(isAdmin && path.startsWith("/admin") ? { aside: adminMenu(path) } : {}),
   };

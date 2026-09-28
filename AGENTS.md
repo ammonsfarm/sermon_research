@@ -35,6 +35,7 @@ before anything in the "Ask first" list below.
 | `src/context.ts` | Request context and shared redirects |
 | `src/views.ts`, `src/html.ts`, `src/layout.ts` | Server-rendered pages; `html` escapes every value. `layout.ts` holds the header tabs and the admin side menu (add admin pages to `ADMIN_MENU`) |
 | `src/assets.ts` | The only CSS (`/assets/app.css`) and JavaScript (`/assets/app.js`): busy state on forms, tabs, the read-along. Pages work without the script |
+| `public/fonts/` | Self-hosted Inter and Source Serif 4 (SIL Open Font License), served as static assets before the Worker runs |
 | `test/` | `node:test` suites; `test/d1-sqlite.ts` stands in for D1 |
 | `wrangler.jsonc` | Worker name, D1, Vectorize, Workflow and the hourly cron |
 

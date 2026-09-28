@@ -30,13 +30,15 @@ function render(value: unknown): string {
 }
 
 export const SECURITY_HEADERS: Readonly<Record<string, string>> = {
-  "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' https:; media-src 'self' https: http:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+  "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' https:; media-src 'self' https: http:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
   "X-Content-Type-Options": "nosniff",
   "Referrer-Policy": "same-origin",
 };
 
 export interface PageOptions {
   readonly siteTitle?: string;
+  /** The ministry's logo, shown beside the site title. */
+  readonly logoUrl?: string;
   readonly status?: number;
   readonly headers?: HeadersInit;
   readonly refreshSeconds?: number;
@@ -57,11 +59,12 @@ export function page(title: string, body: Html, options: PageOptions = {}): Resp
 <meta name="viewport" content="width=device-width, initial-scale=1">
 ${options.refreshSeconds ? html`<meta http-equiv="refresh" content="${options.refreshSeconds}">
 ` : ""}<title>${title} · ${heading}</title>
+<link rel="preload" href="/fonts/inter.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="/assets/app.css">
 <script src="/assets/app.js" defer></script>
 </head>
 <body>
-<header class="site"><div class="bar"><a class="brand" href="/">${heading}</a>${options.header ?? ""}</div></header>
+<header class="site"><div class="bar"><a class="brand" href="/">${options.logoUrl ? html`<img class="logo" src="${options.logoUrl}" alt="" referrerpolicy="no-referrer">` : ""}<span>${heading}</span></a>${options.header ?? ""}</div></header>
 <main class="${options.wide || options.aside ? "wide" : "narrow"}">
 ${options.aside ? html`<div class="with-side">${options.aside}<div class="content">${body}</div></div>` : body}
 </main>
