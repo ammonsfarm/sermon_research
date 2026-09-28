@@ -20,6 +20,7 @@ import { timingSafeEqual } from "./crypto.ts";
 import { clientIp, type Context, redirect, requireAdmin, siteTitle } from "./context.ts";
 import type { AppEnv } from "./env.ts";
 import { page, SECURITY_HEADERS, STYLESHEET } from "./html.ts";
+import { checkNow, episodesDashboard, hourlyTick, importStep, queueFromDashboard, scheduleSettings } from "./imports.ts";
 import { keyInfo } from "./keys.ts";
 import { confirmLink, emailSignInEnabled, requestLink, showLink } from "./links.ts";
 import { ensureSchema } from "./schema.ts";
@@ -70,7 +71,15 @@ export default {
     }
     return response;
   },
+
+  /** The hourly cron in wrangler.jsonc. The schedule itself lives in D1, so churches never edit the cron. */
+  async scheduled(controller: ScheduledController, env: AppEnv): Promise<void> {
+    await ensureSchema(env.DB);
+    await hourlyTick(env, new Date(controller.scheduledTime));
+  },
 } satisfies ExportedHandler<AppEnv>;
+
+export { EpisodeWorkflow } from "./workflow.ts";
 
 async function route(context: Context): Promise<Response> {
   const { request, url } = context;
@@ -91,6 +100,13 @@ async function route(context: Context): Promise<Response> {
     case "GET /admin": return admin(context);
     case "GET /admin/ministry": return ministryForm(context, false);
     case "POST /admin/ministry": return ministrySubmit(context, false);
+    case "GET /setup/import":
+    case "POST /setup/import": return importStep(context);
+    case "GET /admin/episodes": return episodesDashboard(context);
+    case "POST /admin/episodes/check": return checkNow(context);
+    case "POST /admin/episodes/queue": return queueFromDashboard(context);
+    case "GET /admin/schedule":
+    case "POST /admin/schedule": return scheduleSettings(context);
     default: {
       const match = /^\/(setup|admin)\/([a-z]+)$/u.exec(url.pathname);
       if (match && isProviderStep(match[2]!) && (request.method === "GET" || request.method === "POST")) {

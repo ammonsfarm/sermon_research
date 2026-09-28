@@ -13,6 +13,28 @@
       "binding": "DB",
       "database_name": "sermon-research"
     }
-  ]
+  ],
+  // Create once before the first deploy (see AGENTS.md):
+  //   npx wrangler vectorize create sermon-research --dimensions=1536 --metric=cosine
+  //   npx wrangler vectorize create-metadata-index sermon-research --property-name=episodeId --type=string
+  "vectorize": [
+    {
+      "binding": "VECTORS",
+      "index_name": "sermon-research"
+    }
+  ],
+  // One run per episode: transcribe, summarize, index. Each step retries on its own.
+  "workflows": [
+    {
+      "name": "sermon-research-episode",
+      "binding": "EPISODE_WORKFLOW",
+      "class_name": "EpisodeWorkflow"
+    }
+  ],
+  // Hourly tick. The Worker reads the church's schedule from the database and
+  // only checks the feed when it is due, so the schedule never needs editing here.
+  "triggers": {
+    "crons": ["0 * * * *"]
+  }
   // APP_SECRET is a secret, not a var: `npx wrangler secret put APP_SECRET`.
 }

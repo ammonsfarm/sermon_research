@@ -54,6 +54,52 @@ export const MIGRATIONS: readonly { readonly version: number; readonly statement
       )`,
     ],
   },
+  {
+    version: 3,
+    statements: [
+      `CREATE TABLE IF NOT EXISTS episodes (
+        id TEXT PRIMARY KEY,
+        guid TEXT NOT NULL UNIQUE,
+        title TEXT NOT NULL,
+        published_at TEXT,
+        audio_url TEXT,
+        duration_seconds INTEGER,
+        status TEXT NOT NULL CHECK (status IN ('not_imported', 'queued', 'running', 'done', 'failed')),
+        stage TEXT CHECK (stage IS NULL OR stage IN ('transcribe', 'summarize', 'index')),
+        attempts INTEGER NOT NULL DEFAULT 0,
+        error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        completed_at TEXT
+      )`,
+      `CREATE INDEX IF NOT EXISTS episodes_by_status ON episodes(status, published_at)`,
+      `CREATE TABLE IF NOT EXISTS transcripts (
+        episode_id TEXT PRIMARY KEY REFERENCES episodes(id) ON DELETE CASCADE,
+        text TEXT NOT NULL,
+        segments_json TEXT NOT NULL CHECK (json_valid(segments_json)),
+        model TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      )`,
+      `CREATE TABLE IF NOT EXISTS summaries (
+        episode_id TEXT PRIMARY KEY REFERENCES episodes(id) ON DELETE CASCADE,
+        summary TEXT NOT NULL,
+        topics_json TEXT NOT NULL CHECK (json_valid(topics_json)),
+        scriptures_json TEXT NOT NULL CHECK (json_valid(scriptures_json)),
+        model TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      )`,
+      `CREATE TABLE IF NOT EXISTS chunks (
+        id TEXT PRIMARY KEY,
+        episode_id TEXT NOT NULL REFERENCES episodes(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL CHECK (kind IN ('summary', 'transcript')),
+        seq INTEGER NOT NULL,
+        text TEXT NOT NULL,
+        start_seconds REAL,
+        end_seconds REAL
+      )`,
+      `CREATE INDEX IF NOT EXISTS chunks_by_episode ON chunks(episode_id, seq)`,
+    ],
+  },
 ];
 
 let applied: Promise<void> | undefined;

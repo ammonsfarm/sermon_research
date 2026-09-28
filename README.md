@@ -3,8 +3,8 @@
 Turn a church's sermon podcast into a searchable, citable research archive,
 running entirely in your own Cloudflare account.
 
-> **Status:** early. Sign-in and the full setup wizard work. Episode import
-> and the research page are coming next; see [Roadmap](#roadmap).
+> **Status:** early. Sign-in, the setup wizard and episode processing work.
+> The research page is next; see [Roadmap](#roadmap).
 
 ## Deploy
 
@@ -15,6 +15,8 @@ git clone https://github.com/ammonsfarm/sermon_research
 cd sermon_research
 npm install
 npx wrangler login
+npx wrangler vectorize create sermon-research --dimensions=1536 --metric=cosine
+npx wrangler vectorize create-metadata-index sermon-research --property-name=episodeId --type=string
 npx wrangler deploy
 openssl rand -base64 32          # copy the output
 npx wrangler secret put APP_SECRET   # paste it; keep a copy somewhere safe
@@ -31,6 +33,9 @@ create the admin account. Then it walks through:
 4. **Search embeddings**: an OpenAI key for `text-embedding-3-small`. If step 3 was OpenAI, you can reuse that key.
 5. **Transcription**: a Mistral key (Voxtral handles full-length sermon audio)
 6. **Email** (optional): a Resend key and sender address, so people can sign in with an emailed link
+7. **Import**: how many past episodes to process now (none, 10, 50 or all),
+   each with an estimate of audio minutes and cost, and a daily or weekly
+   schedule for checking the feed
 
 Each step makes a small live request to confirm the address and key work
 before saving. Keys are stored encrypted with a key derived from `APP_SECRET`.
@@ -49,13 +54,20 @@ assistant at this repo. [AGENTS.md](AGENTS.md) tells it how to help.
 - API keys encrypted at rest (AES-GCM); only the last 4 characters are ever shown
 - Optional emailed sign-in links through Resend. They work once and expire after 15 minutes, and they need a button press so email scanners can't use them up.
 - A database schema that installs and upgrades itself, so there's no migration step
+- Episode processing: Mistral transcribes each episode from the feed's audio
+  link, the answers AI writes a summary with topics and scripture references,
+  and the transcript is split into timestamped passages and indexed for search
+- An episodes dashboard with progress, errors, retry, "check now" and
+  importing older episodes later
+- A schedule set in Admin (daily or weekly, at a local hour); there's no cron
+  to edit
 
 ## Roadmap
 
 1. **Base** (done): sign-in, sessions, setup wizard, deploy docs.
 2. **Providers** (done): podcast feed, answers AI, embeddings, transcription,
    and emailed sign-in links, all configured in the wizard.
-3. **Pipeline:** import the last N episodes with a cost estimate, a schedule
+3. **Pipeline** (done): import the last N episodes with a cost estimate, a schedule
    set in the admin screen, and a progress dashboard with retries.
 4. **Research:** cited answers across all sermons, episode search and episode
    pages. It's members-only by default, with a switch to make it public.

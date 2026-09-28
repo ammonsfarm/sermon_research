@@ -6,16 +6,50 @@ import { createTestD1 } from "./d1-sqlite.ts";
 export const ORIGIN = "https://sermons.example.org";
 export const SECRET = "test-secret-0123456789-abcdefghijklmnop";
 
+export interface FakeVectors {
+  readonly stored: Map<string, VectorizeVector>;
+  readonly deleted: string[];
+}
+
+export interface FakeWorkflow {
+  readonly created: { id: string; params: { episodeId: string } }[];
+  /** Set to make create() throw, as when Workflows is unavailable. */
+  failing: boolean;
+}
+
 export interface TestApp {
   readonly env: AppEnv;
+  readonly vectors: FakeVectors;
+  readonly workflow: FakeWorkflow;
   request(path: string, init?: { method?: string; form?: Record<string, string>; cookie?: string; headers?: Record<string, string> }): Promise<Response>;
 }
 
 export function createApp(overrides: Partial<AppEnv> = {}): TestApp {
   resetSchemaCache();
-  const env = { DB: createTestD1(), APP_SECRET: SECRET, ...overrides } as AppEnv;
+  const vectors: FakeVectors = { stored: new Map(), deleted: [] };
+  const workflow: FakeWorkflow = { created: [], failing: false };
+  const VECTORS = {
+    async upsert(items: VectorizeVector[]) {
+      for (const item of items) vectors.stored.set(item.id, item);
+      return { mutationId: "m" };
+    },
+    async deleteByIds(ids: string[]) {
+      for (const id of ids) { vectors.deleted.push(id); vectors.stored.delete(id); }
+      return { mutationId: "m" };
+    },
+  };
+  const EPISODE_WORKFLOW = {
+    async create(options: { id: string; params: { episodeId: string } }) {
+      if (workflow.failing) throw new Error("Workflows unavailable");
+      workflow.created.push(options);
+      return { id: options.id };
+    },
+  };
+  const env = { DB: createTestD1(), APP_SECRET: SECRET, VECTORS, EPISODE_WORKFLOW, ...overrides } as unknown as AppEnv;
   return {
     env,
+    vectors,
+    workflow,
     request(path, init = {}) {
       const headers = new Headers(init.headers);
       if (init.cookie) headers.set("Cookie", init.cookie);
@@ -46,6 +80,12 @@ export const FEED_XML = `<?xml version="1.0"?>
 <enclosure url="https://cdn.example.org/ep1.mp3" length="1" type="audio/mpeg"/><itunes:duration>2700</itunes:duration></item>
 </channel></rss>`;
 
+export const TRANSCRIPT_SEGMENTS = [
+  { text: "Welcome, church.", start: 0, end: 4.5 },
+  { text: "Today we read Ephesians 2:8.", start: 4.5, end: 11 },
+];
+export const SUMMARY_REPLY = "```json\n{\"summary\": \"Grace is a gift.\", \"topics\": [\"grace\"], \"scriptures\": [\"Ephesians 2:8\"]}\n```";
+
 export interface FakeCall { readonly url: string; readonly method: string; readonly authorization: string | null; readonly body: unknown }
 
 /**
@@ -63,8 +103,17 @@ export function fakeProviders(fail: Record<string, number> = {}): { calls: FakeC
     const failure = Object.entries(fail).find(([prefix]) => url.startsWith(prefix));
     if (failure) return new Response("{\"error\":\"nope\"}", { status: failure[1] });
     if (url === FEED_URL) return new Response(FEED_XML, { headers: { "Content-Type": "application/rss+xml" } });
-    if (url.endsWith("/chat/completions")) return Response.json({ choices: [{ message: { content: "OK" } }] });
-    if (url === "https://api.openai.com/v1/embeddings") return Response.json({ data: [{ embedding: Array(1536).fill(0.01) }] });
+    if (url.endsWith("/chat/completions")) {
+      const messages = (body as { messages?: { role: string }[] } | null)?.messages ?? [];
+      const summarizing = messages.some((message) => message.role === "system");
+      return Response.json({ choices: [{ message: { content: summarizing ? SUMMARY_REPLY : "OK" } }] });
+    }
+    if (url === "https://api.openai.com/v1/embeddings") {
+      const input = (body as { input?: unknown } | null)?.input;
+      const count = Array.isArray(input) ? input.length : 1;
+      return Response.json({ data: Array.from({ length: count }, (_unused, index) => ({ index, embedding: Array(1536).fill(0.01) })) });
+    }
+    if (url === "https://api.mistral.ai/v1/audio/transcriptions") return Response.json({ text: "full", segments: TRANSCRIPT_SEGMENTS });
     if (url === "https://api.mistral.ai/v1/models") return Response.json({ data: [] });
     if (url === "https://api.resend.com/emails") return Response.json({ id: "email-1" });
     return new Response("not found", { status: 404 });
@@ -79,8 +128,10 @@ export const PROVIDERS = {
   email: { intent: "save", from: "Grace Church <sermons@grace.example>", apiKey: "re_key_9999" },
 };
 
-/** Runs the whole setup wizard and returns the admin's session cookie. */
-export async function completeSetup(app: TestApp, options: { email?: boolean } = {}): Promise<string> {
+export const SCHEDULE_FORM = { frequency: "weekly", weekday: "0", hour: "9", timeZone: "America/Chicago" };
+
+/** Runs the whole setup wizard (importing `count` episodes) and returns the admin's session cookie. */
+export async function completeSetup(app: TestApp, options: { email?: boolean; count?: number; stopBefore?: string } = {}): Promise<string> {
   const providers = fakeProviders();
   try {
     const created = await app.request("/setup", { form: ADMIN });
@@ -91,9 +142,11 @@ export async function completeSetup(app: TestApp, options: { email?: boolean } =
       ["/setup/llm", PROVIDERS.llm, "/setup/embeddings"],
       ["/setup/embeddings", PROVIDERS.embeddings, "/setup/transcription"],
       ["/setup/transcription", PROVIDERS.transcription, "/setup/email"],
-      ["/setup/email", options.email ? PROVIDERS.email : { intent: "skip" }, "/admin"],
+      ["/setup/email", options.email ? PROVIDERS.email : { intent: "skip" }, "/setup/import"],
+      ["/setup/import", { count: String(options.count ?? 0), ...SCHEDULE_FORM }, "/admin/episodes"],
     ];
     for (const [path, form, next] of steps) {
+      if (path === options.stopBefore) break;
       const response = await app.request(path, { form, cookie });
       if (response.headers.get("Location") !== next) throw new Error(`${path} went to ${response.status} ${response.headers.get("Location")}, expected ${next}`);
     }

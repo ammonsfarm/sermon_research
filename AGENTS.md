@@ -19,10 +19,15 @@ before anything in the "Ask first" list below.
 | `src/providers.ts` | Live checks and calls to OpenAI-compatible APIs, OpenAI embeddings, Mistral and Resend |
 | `src/keys.ts` | API keys stored AES-GCM encrypted in `provider_keys` |
 | `src/links.ts` | Emailed sign-in links |
+| `src/imports.ts` | Import step with cost estimate, episodes dashboard, schedule page, hourly cron logic |
+| `src/episodes.ts` | Episode rows from the feed, the queue, and starting workflow runs (at most `MAX_RUNNING` at once) |
+| `src/pipeline.ts` | The per-episode steps: transcribe (Mistral), summarize (answers AI), chunk, embed and write to Vectorize |
+| `src/workflow.ts` | The Cloudflare Workflow class that runs `pipeline.ts` for one episode |
+| `src/schedule.ts` | Daily/weekly schedule in the church's time zone |
 | `src/context.ts` | Request context and shared redirects |
 | `src/views.ts`, `src/html.ts` | Server-rendered pages; `html` escapes every value |
 | `test/` | `node:test` suites; `test/d1-sqlite.ts` stands in for D1 |
-| `wrangler.jsonc` | Worker name, D1 binding |
+| `wrangler.jsonc` | Worker name, D1, Vectorize, Workflow and the hourly cron |
 
 Commands: `npm run verify` (typecheck and tests), `npm run dev` (local),
 `npx wrangler deploy` (production), `npm run cf-typegen` (after config changes).
@@ -30,15 +35,19 @@ Commands: `npm run verify` (typecheck and tests), `npm run dev` (local),
 ## First deploy
 
 1. `npm install`, then `npx wrangler login`.
-2. `npx wrangler deploy`. Current Wrangler creates the `sermon-research` D1
+2. Create the search index (Wrangler doesn't create Vectorize on deploy):
+   `npx wrangler vectorize create sermon-research --dimensions=1536 --metric=cosine`, then
+   `npx wrangler vectorize create-metadata-index sermon-research --property-name=episodeId --type=string`.
+   The dimensions must be 1536 to match `text-embedding-3-small`.
+3. `npx wrangler deploy`. Current Wrangler creates the `sermon-research` D1
    database automatically when `database_id` is missing. If yours refuses:
    run `npx wrangler d1 create sermon-research` and paste the printed
    `database_id` into `wrangler.jsonc`.
-3. Set the secret: `openssl rand -base64 32`, then
+4. Set the secret: `openssl rand -base64 32`, then
    `npx wrangler secret put APP_SECRET`, and paste the value. Tell the person
-   to save it in a password manager: it's their setup code, and in a later
-   release it encrypts their stored API keys.
-4. Open the printed `https://sermon-research.<subdomain>.workers.dev` URL and
+   to save it in a password manager: it's their setup code, and it encrypts
+   their stored API keys.
+5. Open the printed `https://sermon-research.<subdomain>.workers.dev` URL and
    let the person complete the wizard themselves.
 
 There's no migration command. `src/schema.ts` runs pending migrations on the
@@ -69,6 +78,22 @@ first request after each deploy.
 - **A provider check fails with "didn't respond":** the Worker runs with
   `global_fetch_strictly_public`, so it can't reach private or local network
   addresses. A self-hosted AI gateway needs a public HTTPS address.
+- **Change the schedule:** Admin → Episodes → Change. The cron in
+  `wrangler.jsonc` stays hourly; don't edit it for schedule changes.
+- **An episode failed:** the dashboard shows the provider's error. Common
+  causes: the audio link in the feed doesn't play publicly (Mistral downloads
+  it itself), a key was revoked or ran out of credit, or the answers AI model
+  doesn't return JSON (pick a stronger model). Fix the cause, then press Retry.
+  Workflow runs are listed under Workers & Pages → Workflows →
+  `sermon-research-episode`.
+- **An episode is stuck on "Working":** runs that report nothing for 6 hours
+  are marked failed by the next hourly tick, and can then be retried.
+- **Process more episodes at once:** raise `MAX_RUNNING` in `src/episodes.ts`
+  (default 3) and redeploy. Higher values hit provider rate limits sooner.
+- **Vectorize "dimension mismatch":** the index wasn't created with 1536
+  dimensions. With permission, `npx wrangler vectorize delete sermon-research`,
+  recreate it as in First deploy, then retry the episodes (retrying
+  re-indexes; transcripts and summaries are kept).
 - **Read logs:** `npx wrangler tail`, or the dashboard's Workers Logs.
 - **Back up the database:** `npx wrangler d1 export sermon-research --remote --output backup.sql`.
 
@@ -78,11 +103,14 @@ first request after each deploy.
   beyond the recipes above. Take a backup first.
 - Changing `APP_SECRET` after setup. Once provider keys exist, changing it
   makes them unreadable and they must be re-entered.
-- Anything that costs money: paid plans, or large podcast imports once that
-  feature exists.
+- Anything that costs money: paid plans, or importing many episodes. The
+  import page's estimate uses list prices from when it was written; have the
+  person check current Mistral and AI provider pricing for large imports.
+- Deleting the Vectorize index.
 
 ## Never
 
 - Commit secrets, `.dev.vars` or database exports.
+- Delete D1 or Vectorize data without a backup.
 - Print `APP_SECRET` or API keys back into chat logs unless the person asks.
 - Skip or delete tests to get a deploy through.

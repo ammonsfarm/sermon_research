@@ -17,7 +17,7 @@ npx wrangler secret put APP_SECRET</pre>
 }
 
 export function setupAdminView(errors: Errors = {}, values: Values = {}): Html {
-  return html`<p class="steps">Setup · step 1 of 7</p>
+  return html`<p class="steps">Setup · step 1 of 8</p>
 <h1>Create the admin account</h1>
 <p class="lead">You'll use this account to manage the podcast, AI settings and members.</p>
 ${errors.form ? html`<p class="alert">${errors.form}</p>` : ""}
@@ -34,7 +34,7 @@ ${field({ name: "confirm", label: "Confirm password", type: "password", error: e
 export function ministryView(options: { action: string; step: boolean; errors?: Errors; values?: Values }): Html {
   const errors = options.errors ?? {};
   const values = options.values ?? {};
-  return html`${options.step ? html`<p class="steps">Setup · step 2 of 7</p>` : ""}
+  return html`${options.step ? html`<p class="steps">Setup · step 2 of 8</p>` : ""}
 <h1>About your ministry</h1>
 <p class="lead">These names appear on the site and help the AI describe sermons accurately.</p>
 <form method="post" action="${options.action}">
@@ -120,8 +120,9 @@ ${overview.saved ? html`<p>Saved.</p>` : ""}
 <dt><a href="/admin/transcription">Transcription</a></dt><dd>${transcription ? `Mistral ${transcription.model}${keyLabel(keys.transcription)}` : "Not set"}</dd>
 <dt><a href="/admin/email">Email</a></dt><dd>${email && "from" in email ? `Resend from ${email.from}${keyLabel(keys.email)}` : "Off (password sign-in only)"}</dd>
 </dl>
-<h2>Next steps</h2>
-<p>Episode import, scheduling and the research page arrive in the next releases.</p>
+<h2>Episodes</h2>
+<p><a href="/admin/episodes">Import progress and episodes</a> · <a href="/admin/schedule">Schedule</a></p>
+<p>The research page arrives in the next release.</p>
 <h2>Sessions</h2>
 <div class="row">
 <form class="inline" method="post" action="/logout"><button class="quiet" type="submit">Sign out</button></form>

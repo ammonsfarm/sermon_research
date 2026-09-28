@@ -105,5 +105,13 @@ dt { color: var(--muted); }
 dd { margin: 0; overflow-wrap: anywhere; }
 .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 form.inline { display: inline; }
+select { padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: inherit; font: inherit; }
+fieldset.choices { border: 0; padding: 0; margin: 0 0 16px; }
+fieldset.choices legend { font-weight: 600; margin-bottom: 8px; }
+label.choice { display: flex; gap: 10px; align-items: flex-start; font-weight: 400; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; margin-bottom: 8px; }
+label.choice input { width: auto; margin-top: 4px; }
+table { width: 100%; border-collapse: collapse; margin-top: 16px; }
+th, td { text-align: left; vertical-align: top; padding: 8px 6px; border-bottom: 1px solid var(--line); }
+th { color: var(--muted); font-weight: 600; font-size: .9rem; }
 pre { background: color-mix(in srgb, var(--line) 40%, transparent); padding: 8px 12px; border-radius: 6px; overflow-x: auto; }
 `;

@@ -7,7 +7,7 @@ export interface Ministry {
 }
 
 /** Wizard order. Admins land on the first step not yet finished. */
-export const SETUP_STEPS = ["ministry", "podcast", "llm", "embeddings", "transcription", "email", "complete"] as const;
+export const SETUP_STEPS = ["ministry", "podcast", "llm", "embeddings", "transcription", "email", "import", "complete"] as const;
 export type SetupStep = (typeof SETUP_STEPS)[number];
 
 export function nextStep(step: SetupStep): SetupStep {

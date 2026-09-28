@@ -13,7 +13,7 @@
     "deploy": "wrangler deploy",
     "cf-typegen": "wrangler types worker-configuration.d.ts",
     "typecheck": "tsc --noEmit",
-    "test": "node --test --no-warnings=ExperimentalWarning test/*.test.ts",
+    "test": "node --import ./test/hooks.ts --test --no-warnings=ExperimentalWarning test/*.test.ts",
     "verify": "npm run typecheck && npm test"
   },
   "devDependencies": {
