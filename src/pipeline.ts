@@ -1,6 +1,6 @@
 import type { AppEnv } from "./env.ts";
 import { getKey } from "./keys.ts";
-import { EMBEDDING_MODEL, MISTRAL_TRANSCRIPTION_MODEL, ProviderError } from "./providers.ts";
+import { EMBEDDING_MODEL, MISTRAL_TRANSCRIPTION_MODEL, ProviderError, withUserAgent } from "./providers.ts";
 import { getSetting, type LlmSettingsRecord, type Ministry } from "./settings.ts";
 
 export interface Segment {
@@ -136,7 +136,7 @@ export async function requireKey(env: AppEnv, slot: "llm" | "embeddings" | "tran
 }
 
 async function post(url: string, init: RequestInit, what: string, timeoutMs: number): Promise<unknown> {
-  const response = await fetch(url, { ...init, method: "POST", signal: AbortSignal.timeout(timeoutMs) });
+  const response = await fetch(url, { ...init, headers: withUserAgent(init.headers), method: "POST", signal: AbortSignal.timeout(timeoutMs) });
   if (!response.ok) {
     const detail = (await response.text().catch(() => "")).replace(/\s+/gu, " ").slice(0, 200);
     // Throwing lets the workflow step retry; the final message is what admins see.

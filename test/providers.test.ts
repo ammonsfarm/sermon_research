@@ -137,3 +137,21 @@ test("provider errors pass on the provider's own message, such as an unverified 
   assert.equal(providerMessage("plain  text\nerror"), "plain text error");
   assert.equal(providerMessage(""), "");
 });
+
+test("every provider call identifies itself, and a password in the Resend key field is caught", async () => {
+  const { app, cookie } = await atStep("email");
+  const providers = fakeProviders();
+  try {
+    const autofilled = await app.request("/setup/email", { form: { ...PROVIDERS.email, apiKey: "correct horse battery" }, cookie });
+    assert.equal(autofilled.status, 400);
+    assert.match(await autofilled.text(), /Resend keys start with re_/);
+    assert.equal(providers.calls.filter((call) => call.url.includes("resend")).length, 0, "nothing is sent with a non-Resend key");
+
+    const saved = await app.request("/setup/email", { form: PROVIDERS.email, cookie });
+    assert.equal(saved.headers.get("Location"), "/setup/import");
+    const resend = providers.calls.find((call) => call.url === "https://api.resend.com/emails");
+    assert.match(resend?.userAgent ?? "", /^sermon-research\//);
+  } finally {
+    providers.restore();
+  }
+});

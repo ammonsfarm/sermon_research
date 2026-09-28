@@ -104,7 +104,7 @@ ${errors.form ? html`<p class="alert">${errors.form}</p>` : ""}
 <form method="post" action="${action(state)}">
 ${field({ name: "baseUrl", label: "API base address", type: "url", value: values.baseUrl ?? OPENAI_BASE_URL, error: errors.baseUrl, hint: "For OpenAI keep the default. Gemini: https://generativelanguage.googleapis.com/v1beta/openai", required: true })}
 ${field({ name: "model", label: "Model", value: values.model ?? "", error: errors.model, hint: "For example gpt-5-mini or gemini-2.5-flash.", required: true })}
-${field({ name: "apiKey", label: "API key", type: "password", error: errors.apiKey, hint: keyHint(state, "llm", "Stored encrypted."), autocomplete: "off" })}
+${field({ name: "apiKey", label: "API key", type: "password", error: errors.apiKey, hint: keyHint(state, "llm", "Stored encrypted."), autocomplete: "new-password" })}
 <button type="submit">Test and save</button>
 </form>`;
 }
@@ -114,7 +114,7 @@ function embeddingsForm(state: StepState, errors: Errors = {}, reuse = false): H
 <p class="lead">Search uses OpenAI's ${EMBEDDING_MODEL} model to find passages by meaning. This needs an OpenAI API key.</p>
 ${errors.form ? html`<p class="alert">${errors.form}</p>` : ""}
 <form method="post" action="${action(state)}">
-${field({ name: "apiKey", label: "OpenAI API key", type: "password", error: errors.apiKey, hint: keyHint(state, "embeddings", reuse ? "Leave blank to reuse the key from the Answers AI step." : "Stored encrypted."), autocomplete: "off" })}
+${field({ name: "apiKey", label: "OpenAI API key", type: "password", error: errors.apiKey, hint: keyHint(state, "embeddings", reuse ? "Leave blank to reuse the key from the Answers AI step." : "Stored encrypted."), autocomplete: "new-password" })}
 <button type="submit">Test and save</button>
 </form>`;
 }
@@ -124,7 +124,7 @@ function transcriptionForm(state: StepState, errors: Errors = {}): Html {
 <p class="lead">Sermon audio is transcribed with Mistral's ${MISTRAL_TRANSCRIPTION_MODEL} model, which handles full-length recordings. Create a key at console.mistral.ai.</p>
 ${errors.form ? html`<p class="alert">${errors.form}</p>` : ""}
 <form method="post" action="${action(state)}">
-${field({ name: "apiKey", label: "Mistral API key", type: "password", error: errors.apiKey, hint: keyHint(state, "transcription", "Stored encrypted."), autocomplete: "off" })}
+${field({ name: "apiKey", label: "Mistral API key", type: "password", error: errors.apiKey, hint: keyHint(state, "transcription", "Stored encrypted."), autocomplete: "new-password" })}
 <button type="submit">Test and save</button>
 </form>`;
 }
@@ -136,7 +136,7 @@ ${errors.form ? html`<p class="alert">${errors.form}</p>` : ""}
 <form method="post" action="${action(state)}">
 <input type="hidden" name="intent" value="save">
 ${field({ name: "from", label: "Send from", value: values.from ?? "", error: errors.from, hint: "For example: Grace Church <sermons@gracechurch.org>" })}
-${field({ name: "apiKey", label: "Resend API key", type: "password", error: errors.apiKey, hint: keyHint(state, "email", "Stored encrypted."), autocomplete: "off" })}
+${field({ name: "apiKey", label: "Resend API key", type: "password", error: errors.apiKey, hint: keyHint(state, "email", "Stored encrypted."), autocomplete: "new-password" })}
 <div class="row"><button type="submit">Send a test email and save</button></div>
 </form>
 ${state.wizard ? html`<form method="post" action="${action(state)}"><input type="hidden" name="intent" value="skip"><p><button class="quiet" type="submit">Skip for now</button></p></form>` : ""}`;
@@ -266,6 +266,8 @@ export async function stepSubmit(context: Context, step: ProviderStep, wizard: b
         if (!/^(?:[^<>]{1,100}<)?[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+>?$/u.test(values.from)) errors.from = "Enter an address like sermons@yourchurch.org or Name <sermons@yourchurch.org>.";
         const apiKey = await keyOrStored("email");
         if (!apiKey) errors.apiKey = "Enter a Resend API key.";
+        // Password managers like to fill the site password into this field.
+        else if (!apiKey.startsWith("re_")) errors.apiKey = "Resend keys start with re_. If your browser filled this in, clear it and paste the key from Resend.";
         if (Object.keys(errors).length > 0 || !apiKey) return render(state, emailForm(state, errors, values), 400);
         try {
           await sendEmail({

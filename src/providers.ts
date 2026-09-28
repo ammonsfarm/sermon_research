@@ -4,6 +4,20 @@ export const EMBEDDING_DIMENSIONS = 1536;
 export const OPENAI_BASE_URL = "https://api.openai.com/v1";
 export const MISTRAL_TRANSCRIPTION_MODEL = "voxtral-mini-latest";
 
+/**
+ * Sent on every outbound request. Workers' fetch sends no User-Agent by default,
+ * and APIs behind Cloudflare's bot checks (Resend among them) can refuse such
+ * requests with a 403 that looks like a bad key.
+ */
+export const USER_AGENT = "sermon-research/1.0 (+https://github.com/ammonsfarm/sermon_research)";
+
+/** Adds the User-Agent to a request's headers. */
+export function withUserAgent(headers: HeadersInit = {}): Headers {
+  const merged = new Headers(headers);
+  merged.set("User-Agent", USER_AGENT);
+  return merged;
+}
+
 export class ProviderError extends Error {}
 
 export interface LlmSettings {
@@ -29,7 +43,7 @@ export function providerMessage(body: string): string {
 async function call(url: string, init: RequestInit, fetcher: typeof fetch, what: string): Promise<Response> {
   let response: Response;
   try {
-    response = await fetcher(url, { ...init, signal: AbortSignal.timeout(30_000) });
+    response = await fetcher(url, { ...init, headers: withUserAgent(init.headers), signal: AbortSignal.timeout(30_000) });
   } catch {
     throw new ProviderError(`${what} didn't respond. Check the address and try again.`);
   }

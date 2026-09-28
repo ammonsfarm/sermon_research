@@ -1,6 +1,6 @@
 import { type Context, clientIp, redirect, requireAdmin, siteTitle } from "./context.ts";
 import { html, type Html, page } from "./html.ts";
-import { ProviderError } from "./providers.ts";
+import { ProviderError, withUserAgent } from "./providers.ts";
 import { embed, requireKey } from "./pipeline.ts";
 import { getSetting, getSetupStep, type LlmSettingsRecord, type Ministry, putSetting } from "./settings.ts";
 import { HOUR_MS, recordUse, startOfUtcDay, usedSince } from "./usage.ts";
@@ -105,7 +105,7 @@ export async function answer(env: AppEnv, ministry: Ministry | null, question: s
     `[${passage.n}] "${passage.title}" (${passage.publishedAt?.slice(0, 10) ?? "undated"})${passage.kind === "summary" ? ", summary" : passage.start !== null ? `, at ${formatTime(passage.start)}` : ""}:\n${passage.text}`).join("\n\n");
   const response = await fetch(`${llm.baseUrl}/chat/completions`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+    headers: withUserAgent({ Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" }),
     body: JSON.stringify({
       model: llm.model,
       messages: [{ role: "system", content: system }, { role: "user", content: `Sources:\n\n${sources}\n\nQuestion: ${question}` }],
