@@ -3,9 +3,8 @@
 Turn a church's sermon podcast into a searchable, citable research archive,
 running entirely in your own Cloudflare account.
 
-> **Status:** early. This release has the base site: sign-in, sessions and the
-> first two setup steps. Podcast import, AI settings and the research page are
-> coming next; see [Roadmap](#roadmap).
+> **Status:** early. Sign-in and the full setup wizard work. Episode import
+> and the research page are coming next; see [Roadmap](#roadmap).
 
 ## Deploy
 
@@ -23,7 +22,18 @@ npx wrangler secret put APP_SECRET   # paste it; keep a copy somewhere safe
 
 Open the `workers.dev` address Wrangler printed. The setup wizard asks for
 the `APP_SECRET` value as a setup code, so only whoever deployed the site can
-create the admin account. Then it asks for your ministry's name and speakers.
+create the admin account. Then it walks through:
+
+1. Your ministry's name and speakers
+2. Your podcast's RSS feed. It shows the podcast title and episode count so you can confirm it's the right one.
+3. The **answers AI**: any OpenAI-compatible API (OpenAI, Gemini, OpenRouter,
+   Anthropic and others). Enter the base address, model and key.
+4. **Search embeddings**: an OpenAI key for `text-embedding-3-small`. If step 3 was OpenAI, you can reuse that key.
+5. **Transcription**: a Mistral key (Voxtral handles full-length sermon audio)
+6. **Email** (optional): a Resend key and sender address, so people can sign in with an emailed link
+
+Each step makes a small live request to confirm the address and key work
+before saving. Keys are stored encrypted with a key derived from `APP_SECRET`.
 
 Stuck on a step, or want a custom domain? Point Claude or another AI coding
 assistant at this repo. [AGENTS.md](AGENTS.md) tells it how to help.
@@ -34,16 +44,17 @@ assistant at this repo. [AGENTS.md](AGENTS.md) tells it how to help.
 - Sessions that last 30 days and extend while in use, plus "sign out on all devices"
 - Rate limits on sign-in and setup attempts
 - A setup wizard that can only be completed by the person who holds `APP_SECRET`
-- Ministry details (site title, church name, speakers), editable later in Admin
+- Ministry details, podcast feed and AI connections, each editable later in Admin
+- Live checks for the feed and every provider before anything is saved
+- API keys encrypted at rest (AES-GCM); only the last 4 characters are ever shown
+- Optional emailed sign-in links through Resend. They work once and expire after 15 minutes, and they need a button press so email scanners can't use them up.
 - A database schema that installs and upgrades itself, so there's no migration step
 
 ## Roadmap
 
-1. **Base** (this release): sign-in, sessions, setup wizard, deploy docs.
-2. **Providers:** podcast RSS feed, an answers LLM (any OpenAI-compatible
-   endpoint), OpenAI embeddings, Mistral transcription, and optional emailed
-   sign-in links through Resend. Keys are entered in the wizard and stored
-   encrypted.
+1. **Base** (done): sign-in, sessions, setup wizard, deploy docs.
+2. **Providers** (done): podcast feed, answers AI, embeddings, transcription,
+   and emailed sign-in links, all configured in the wizard.
 3. **Pipeline:** import the last N episodes with a cost estimate, a schedule
    set in the admin screen, and a progress dashboard with retries.
 4. **Research:** cited answers across all sermons, episode search and episode

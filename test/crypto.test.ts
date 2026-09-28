@@ -29,3 +29,14 @@ test("generates unguessable URL-safe tokens", () => {
   assert.match(token, /^[\w-]{43}$/u);
   assert.notEqual(token, randomToken());
 });
+
+test("sealed keys decrypt only with the same secret and slot", async () => {
+  const { seal, unseal } = await import("../src/crypto.ts");
+  const sealed = await seal("secret-one-0123456789-0123456789ab", "llm", "sk-live-abc");
+  assert.match(sealed, /^v1\.[\w-]{16}\.[\w-]+$/u);
+  assert.doesNotMatch(sealed, /sk-live/u);
+  assert.equal(await unseal("secret-one-0123456789-0123456789ab", "llm", sealed), "sk-live-abc");
+  assert.equal(await unseal("secret-two-0123456789-0123456789ab", "llm", sealed), null);
+  assert.equal(await unseal("secret-one-0123456789-0123456789ab", "email", sealed), null);
+  assert.equal(await unseal("secret-one-0123456789-0123456789ab", "llm", "garbage"), null);
+});

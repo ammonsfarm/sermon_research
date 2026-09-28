@@ -6,7 +6,35 @@ export interface Ministry {
   readonly logoUrl: string;
 }
 
-export type SetupStep = "ministry" | "complete";
+/** Wizard order. Admins land on the first step not yet finished. */
+export const SETUP_STEPS = ["ministry", "podcast", "llm", "embeddings", "transcription", "email", "complete"] as const;
+export type SetupStep = (typeof SETUP_STEPS)[number];
+
+export function nextStep(step: SetupStep): SetupStep {
+  return SETUP_STEPS[Math.min(SETUP_STEPS.indexOf(step) + 1, SETUP_STEPS.length - 1)]!;
+}
+
+export interface PodcastSettings {
+  readonly feedUrl: string;
+  readonly title: string;
+  readonly episodeCount: number;
+  readonly newestTitle: string | null;
+  readonly newestAt: string | null;
+  readonly checkedAt: string;
+}
+
+export interface LlmSettingsRecord {
+  readonly baseUrl: string;
+  readonly model: string;
+  readonly checkedAt: string;
+}
+
+export interface CheckedSettings {
+  readonly model: string;
+  readonly checkedAt: string;
+}
+
+export type EmailSettings = { readonly from: string; readonly checkedAt: string } | { readonly skipped: true };
 
 export async function getSetting<T>(db: D1Database, key: string): Promise<T | null> {
   const row = await db.prepare("SELECT value_json FROM settings WHERE key = ?").bind(key).first<{ value_json: string }>();

@@ -13,7 +13,13 @@ before anything in the "Ask first" list below.
 | `src/auth.ts` | Users, password sign-in, 30-day sessions, rate limits |
 | `src/crypto.ts` | PBKDF2 password hashing, tokens, constant-time compare |
 | `src/schema.ts` | Database migrations; the Worker applies them itself on first request |
-| `src/settings.ts` | Key-value settings stored in D1 (ministry details, setup progress) |
+| `src/settings.ts` | Key-value settings stored in D1 (ministry details, provider choices, wizard progress) |
+| `src/steps.ts` | Wizard and admin pages for the podcast feed, answers AI, embeddings, transcription and email |
+| `src/feed.ts` | Podcast RSS fetch and parse |
+| `src/providers.ts` | Live checks and calls to OpenAI-compatible APIs, OpenAI embeddings, Mistral and Resend |
+| `src/keys.ts` | API keys stored AES-GCM encrypted in `provider_keys` |
+| `src/links.ts` | Emailed sign-in links |
+| `src/context.ts` | Request context and shared redirects |
 | `src/views.ts`, `src/html.ts` | Server-rendered pages; `html` escapes every value |
 | `test/` | `node:test` suites; `test/d1-sqlite.ts` stands in for D1 |
 | `wrangler.jsonc` | Worker name, D1 binding |
@@ -53,6 +59,16 @@ first request after each deploy.
 - **Too many sign-in attempts:** the limit is 10 failures per 15 minutes per IP
   and per email, and it clears on its own. To clear it now:
   `npx wrangler d1 execute sermon-research --remote --command "DELETE FROM login_attempts"`.
+- **Change a provider or rotate a key:** have the person use Admin →
+  Connections. A blank key field keeps the saved key. Keys can't be read back
+  out of the database in plain text by design.
+- **Sign-in link emails don't arrive:** the sender address must be on a domain
+  verified in Resend (resend.com → Domains, which needs DNS records). Check
+  the Resend dashboard's logs, then `npx wrangler tail` for
+  `sign-in link email failed`.
+- **A provider check fails with "didn't respond":** the Worker runs with
+  `global_fetch_strictly_public`, so it can't reach private or local network
+  addresses. A self-hosted AI gateway needs a public HTTPS address.
 - **Read logs:** `npx wrangler tail`, or the dashboard's Workers Logs.
 - **Back up the database:** `npx wrangler d1 export sermon-research --remote --output backup.sql`.
 

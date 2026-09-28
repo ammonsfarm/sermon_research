@@ -15,13 +15,27 @@ import {
   recordFailure,
   SESSION_COOKIE,
   sessionCookie,
-  type Session,
 } from "./auth.ts";
 import { timingSafeEqual } from "./crypto.ts";
+import { clientIp, type Context, redirect, requireAdmin, siteTitle } from "./context.ts";
 import type { AppEnv } from "./env.ts";
 import { page, SECURITY_HEADERS, STYLESHEET } from "./html.ts";
+import { keyInfo } from "./keys.ts";
+import { confirmLink, emailSignInEnabled, requestLink, showLink } from "./links.ts";
 import { ensureSchema } from "./schema.ts";
-import { getSetting, getSetupStep, parseMinistry, putSetting, type Ministry } from "./settings.ts";
+import {
+  type CheckedSettings,
+  type EmailSettings,
+  getSetting,
+  getSetupStep,
+  type LlmSettingsRecord,
+  type Ministry,
+  nextStep,
+  parseMinistry,
+  type PodcastSettings,
+  putSetting,
+} from "./settings.ts";
+import { isProviderStep, stepForm, stepSubmit } from "./steps.ts";
 import {
   adminView,
   homeView,
@@ -35,15 +49,6 @@ import {
 
 /** APP_SECRET must be long enough to resist guessing, since it gates setup. */
 const MIN_SECRET_LENGTH = 32;
-
-interface Context {
-  readonly request: Request;
-  readonly env: AppEnv;
-  readonly db: D1Database;
-  readonly url: URL;
-  readonly session: Session | null;
-  readonly ministry: Ministry | null;
-}
 
 export default {
   async fetch(request: Request, env: AppEnv): Promise<Response> {
@@ -78,25 +83,26 @@ async function route(context: Context): Promise<Response> {
     case "POST /setup/ministry": return ministrySubmit(context, true);
     case "GET /login": return loginForm(context);
     case "POST /login": return loginSubmit(context);
+    case "POST /login/link": return requestLink(context);
+    case "GET /login/link": return showLink(context);
+    case "POST /login/link/confirm": return confirmLink(context);
     case "POST /logout": return logout(context, false);
     case "POST /logout-all": return logout(context, true);
     case "GET /admin": return admin(context);
     case "GET /admin/ministry": return ministryForm(context, false);
     case "POST /admin/ministry": return ministrySubmit(context, false);
-    default:
+    default: {
+      const match = /^\/(setup|admin)\/([a-z]+)$/u.exec(url.pathname);
+      if (match && isProviderStep(match[2]!) && (request.method === "GET" || request.method === "POST")) {
+        const wizard = match[1] === "setup";
+        return request.method === "GET" ? stepForm(context, match[2], wizard) : stepSubmit(context, match[2], wizard);
+      }
       return page("Not found", notFoundView(), { status: 404, ...siteTitle(context) });
+    }
   }
 }
 
-function siteTitle(context: Context): { siteTitle?: string } {
-  return context.ministry ? { siteTitle: context.ministry.siteTitle } : {};
-}
 
-function redirect(location: string, cookie?: string): Response {
-  const headers = new Headers({ Location: location, "Cache-Control": "no-store" });
-  if (cookie) headers.append("Set-Cookie", cookie);
-  return new Response(null, { status: 303, headers });
-}
 
 function isSameOrigin(request: Request, url: URL): boolean {
   const origin = request.headers.get("Origin");
@@ -104,9 +110,6 @@ function isSameOrigin(request: Request, url: URL): boolean {
   return request.headers.get("Sec-Fetch-Site") === "same-origin";
 }
 
-function clientIp(request: Request): string {
-  return request.headers.get("CF-Connecting-IP") ?? "unknown";
-}
 
 async function home(context: Context): Promise<Response> {
   if (!(await hasAdmin(context.db))) return redirect("/setup");
@@ -147,22 +150,18 @@ async function setupSubmit(context: Context): Promise<Response> {
   return redirect("/setup/ministry", sessionCookie(await createSession(db, user.id)));
 }
 
-async function requireAdmin(context: Context): Promise<Response | null> {
-  if (!context.session) return redirect("/login");
-  if (context.session.user.role !== "admin") return page("Not allowed", notFoundView(), { status: 403, ...siteTitle(context) });
-  return null;
-}
 
 async function ministryForm(context: Context, step: boolean): Promise<Response> {
-  const denied = await requireAdmin(context);
+  const denied = requireAdmin(context);
   if (denied) return denied;
-  if (step && (await getSetupStep(context.db)) === "complete") return redirect("/admin");
+  const current = await getSetupStep(context.db);
+  if (step && current !== "ministry") return redirect(current === "complete" ? "/admin" : `/setup/${current}`);
   const values = context.ministry ? ministryValues(context.ministry) : {};
   return page("Ministry", ministryView({ action: step ? "/setup/ministry" : "/admin/ministry", step, values }), siteTitle(context));
 }
 
 async function ministrySubmit(context: Context, step: boolean): Promise<Response> {
-  const denied = await requireAdmin(context);
+  const denied = requireAdmin(context);
   if (denied) return denied;
   const parsed = parseMinistry(await context.request.formData());
   if ("errors" in parsed) {
@@ -170,21 +169,37 @@ async function ministrySubmit(context: Context, step: boolean): Promise<Response
     return page("Ministry", ministryView({ action, step, errors: parsed.errors, values: parsed.values }), { status: 400, ...siteTitle(context) });
   }
   await putSetting(context.db, "ministry", parsed.ministry);
-  if (step) await putSetting(context.db, "setup_step", "complete");
+  if (step && (await getSetupStep(context.db)) === "ministry") {
+    await putSetting(context.db, "setup_step", nextStep("ministry"));
+    return redirect(`/setup/${nextStep("ministry")}`);
+  }
   return redirect(step ? "/admin" : "/admin?saved=1");
 }
 
 async function admin(context: Context): Promise<Response> {
-  const denied = await requireAdmin(context);
+  const denied = requireAdmin(context);
   if (denied) return denied;
-  if (!context.ministry || (await getSetupStep(context.db)) !== "complete") return redirect("/setup/ministry");
-  return page("Admin", adminView(context.session!.user, context.ministry, context.url.searchParams.has("saved")), siteTitle(context));
+  const current = await getSetupStep(context.db);
+  if (!context.ministry || current !== "complete") return redirect(`/setup/${current}`);
+  const { db } = context;
+  const [podcast, llm, embeddings, transcription, email, keys] = await Promise.all([
+    getSetting<PodcastSettings>(db, "podcast"),
+    getSetting<LlmSettingsRecord>(db, "llm"),
+    getSetting<CheckedSettings>(db, "embeddings"),
+    getSetting<CheckedSettings>(db, "transcription"),
+    getSetting<EmailSettings>(db, "email"),
+    keyInfo(db),
+  ]);
+  return page("Admin", adminView({
+    user: context.session!.user, ministry: context.ministry, saved: context.url.searchParams.has("saved"),
+    podcast, llm, embeddings, transcription, email, keys,
+  }), siteTitle(context));
 }
 
 async function loginForm(context: Context): Promise<Response> {
   if (!(await hasAdmin(context.db))) return redirect("/setup");
   if (context.session) return redirect(context.session.user.role === "admin" ? "/admin" : "/");
-  return page("Sign in", loginView(), siteTitle(context));
+  return page("Sign in", loginView({}, {}, await emailSignInEnabled(context.db)), siteTitle(context));
 }
 
 async function loginSubmit(context: Context): Promise<Response> {
@@ -193,12 +208,12 @@ async function loginSubmit(context: Context): Promise<Response> {
   const email = normalizeEmail(String(form.get("email") ?? ""));
   const buckets = [`login-ip:${clientIp(request)}`, `login-email:${email}`];
   if (await isRateLimited(db, buckets)) {
-    return page("Sign in", loginView({ form: "Too many attempts. Wait 15 minutes and try again." }, { email }), { status: 429, ...siteTitle(context) });
+    return page("Sign in", loginView({ form: "Too many attempts. Wait 15 minutes and try again." }, { email }, await emailSignInEnabled(db)), { status: 429, ...siteTitle(context) });
   }
   const user = await authenticate(db, email, String(form.get("password") ?? ""));
   if (!user) {
     await recordFailure(db, buckets);
-    return page("Sign in", loginView({ form: "That email and password don't match." }, { email }), { status: 401, ...siteTitle(context) });
+    return page("Sign in", loginView({ form: "That email and password don't match." }, { email }, await emailSignInEnabled(db)), { status: 401, ...siteTitle(context) });
   }
   if (context.session) await endSession(db, context.session.tokenHash);
   return redirect(user.role === "admin" ? "/admin" : "/", sessionCookie(await createSession(db, user.id)));

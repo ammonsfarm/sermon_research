@@ -36,6 +36,24 @@ export const MIGRATIONS: readonly { readonly version: number; readonly statement
       `CREATE INDEX IF NOT EXISTS login_attempts_by_bucket ON login_attempts(bucket, attempted_at)`,
     ],
   },
+  {
+    version: 2,
+    statements: [
+      `CREATE TABLE IF NOT EXISTS provider_keys (
+        slot TEXT PRIMARY KEY,
+        ciphertext TEXT NOT NULL,
+        last4 TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )`,
+      `CREATE TABLE IF NOT EXISTS login_links (
+        token_hash TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        used_at TEXT
+      )`,
+    ],
+  },
 ];
 
 let applied: Promise<void> | undefined;

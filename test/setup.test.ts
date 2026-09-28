@@ -68,13 +68,23 @@ test("setup creates the admin, signs them in, then collects ministry details", a
   assert.match(invalidBody, /Use an https:\/\/ address/);
 
   const finished = await app.request("/setup/ministry", { form: MINISTRY, cookie });
-  assert.equal(finished.headers.get("Location"), "/admin");
+  assert.equal(finished.headers.get("Location"), "/setup/podcast");
+  assert.equal((await app.request("/admin", { cookie })).headers.get("Location"), "/setup/podcast");
+  assert.equal((await app.request("/setup/ministry", { cookie })).headers.get("Location"), "/setup/podcast");
+});
+
+test("after the whole wizard, the admin overview shows every connection", async () => {
+  const app = createApp();
+  const cookie = await completeSetup(app);
   const admin = await app.request("/admin", { cookie });
   assert.equal(admin.status, 200);
   const body = await admin.text();
   assert.match(body, /<title>Admin · Grace Sermons<\/title>/);
   assert.match(body, /jane@example\.org/);
   assert.match(body, /Pastor Jane Doe, John Smith/);
+  assert.match(body, /Grace Church Sermons · 2 episodes/);
+  assert.match(body, /gpt-test at api\.openai\.com · key ending 1234/);
+  assert.match(body, /Off \(password sign-in only\)/);
   assert.equal((await app.request("/setup/ministry", { cookie })).headers.get("Location"), "/admin");
 });
 

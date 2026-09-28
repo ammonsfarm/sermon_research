@@ -1,6 +1,7 @@
 import type { User } from "./auth.ts";
+import type { keyInfo } from "./keys.ts";
 import { field, html, type Html } from "./html.ts";
-import type { Ministry } from "./settings.ts";
+import type { CheckedSettings, EmailSettings, LlmSettingsRecord, Ministry, PodcastSettings } from "./settings.ts";
 
 type Errors = Readonly<Record<string, string>>;
 type Values = Readonly<Record<string, string>>;
@@ -16,7 +17,7 @@ npx wrangler secret put APP_SECRET</pre>
 }
 
 export function setupAdminView(errors: Errors = {}, values: Values = {}): Html {
-  return html`<p class="steps">Setup · step 1 of 2</p>
+  return html`<p class="steps">Setup · step 1 of 7</p>
 <h1>Create the admin account</h1>
 <p class="lead">You'll use this account to manage the podcast, AI settings and members.</p>
 ${errors.form ? html`<p class="alert">${errors.form}</p>` : ""}
@@ -33,7 +34,7 @@ ${field({ name: "confirm", label: "Confirm password", type: "password", error: e
 export function ministryView(options: { action: string; step: boolean; errors?: Errors; values?: Values }): Html {
   const errors = options.errors ?? {};
   const values = options.values ?? {};
-  return html`${options.step ? html`<p class="steps">Setup · step 2 of 2</p>` : ""}
+  return html`${options.step ? html`<p class="steps">Setup · step 2 of 7</p>` : ""}
 <h1>About your ministry</h1>
 <p class="lead">These names appear on the site and help the AI describe sermons accurately.</p>
 <form method="post" action="${options.action}">
@@ -42,7 +43,7 @@ ${field({ name: "churchName", label: "Church or ministry name", value: values.ch
 ${field({ name: "speakerNames", label: "Speaker names", value: values.speakerNames ?? "", error: errors.speakerNames, hint: "Separate names with commas, for example “Pastor Jane Doe, John Smith”." })}
 ${field({ name: "description", label: "Short description", type: "textarea", value: values.description ?? "", error: errors.description })}
 ${field({ name: "logoUrl", label: "Logo address", type: "url", value: values.logoUrl ?? "", error: errors.logoUrl, hint: "Optional. An https:// link to an image." })}
-<button type="submit">${options.step ? "Finish setup" : "Save"}</button>
+<button type="submit">${options.step ? "Continue" : "Save"}</button>
 </form>`;
 }
 
@@ -56,14 +57,19 @@ export function ministryValues(ministry: Ministry): Values {
   };
 }
 
-export function loginView(errors: Errors = {}, values: Values = {}): Html {
+export function loginView(errors: Errors = {}, values: Values = {}, emailLinks = false): Html {
   return html`<h1>Sign in</h1>
 ${errors.form ? html`<p class="alert">${errors.form}</p>` : ""}
 <form method="post" action="/login">
 ${field({ name: "email", label: "Email", type: "email", value: values.email ?? "", required: true, autocomplete: "email" })}
 ${field({ name: "password", label: "Password", type: "password", required: true, autocomplete: "current-password" })}
 <button type="submit">Sign in</button>
-</form>`;
+</form>
+${emailLinks ? html`<h2>Or get a sign-in link</h2>
+<form method="post" action="/login/link">
+${field({ name: "email", label: "Email", type: "email", value: values.email ?? "", required: true, autocomplete: "email" })}
+<button class="quiet" type="submit">Email me a link</button>
+</form>` : ""}`;
 }
 
 export function homeView(ministry: Ministry | null, user: User | null): Html {
@@ -78,10 +84,27 @@ ${user
 </div>`;
 }
 
-export function adminView(user: User, ministry: Ministry, saved: boolean): Html {
+export interface AdminOverview {
+  readonly user: User;
+  readonly ministry: Ministry;
+  readonly saved: boolean;
+  readonly podcast: PodcastSettings | null;
+  readonly llm: LlmSettingsRecord | null;
+  readonly embeddings: CheckedSettings | null;
+  readonly transcription: CheckedSettings | null;
+  readonly email: EmailSettings | null;
+  readonly keys: Awaited<ReturnType<typeof keyInfo>>;
+}
+
+function keyLabel(info: { last4: string } | undefined): string {
+  return info ? ` · key ending ${info.last4}` : "";
+}
+
+export function adminView(overview: AdminOverview): Html {
+  const { user, ministry, podcast, llm, embeddings, transcription, email, keys } = overview;
   return html`<h1>Admin</h1>
 <p class="lead">Signed in as ${user.name} (${user.email}).</p>
-${saved ? html`<p>Saved.</p>` : ""}
+${overview.saved ? html`<p>Saved.</p>` : ""}
 <h2>Ministry</h2>
 <dl>
 <dt>Site title</dt><dd>${ministry.siteTitle}</dd>
@@ -89,8 +112,16 @@ ${saved ? html`<p>Saved.</p>` : ""}
 <dt>Speakers</dt><dd>${ministry.speakerNames.join(", ") || "None yet"}</dd>
 </dl>
 <p><a href="/admin/ministry">Edit ministry details</a></p>
+<h2>Connections</h2>
+<dl>
+<dt><a href="/admin/podcast">Podcast</a></dt><dd>${podcast ? `${podcast.title} · ${podcast.episodeCount} episodes` : "Not set"}</dd>
+<dt><a href="/admin/llm">Answers AI</a></dt><dd>${llm ? `${llm.model} at ${new URL(llm.baseUrl).host}${keyLabel(keys.llm)}` : "Not set"}</dd>
+<dt><a href="/admin/embeddings">Embeddings</a></dt><dd>${embeddings ? `${embeddings.model}${keyLabel(keys.embeddings)}` : "Not set"}</dd>
+<dt><a href="/admin/transcription">Transcription</a></dt><dd>${transcription ? `Mistral ${transcription.model}${keyLabel(keys.transcription)}` : "Not set"}</dd>
+<dt><a href="/admin/email">Email</a></dt><dd>${email && "from" in email ? `Resend from ${email.from}${keyLabel(keys.email)}` : "Off (password sign-in only)"}</dd>
+</dl>
 <h2>Next steps</h2>
-<p>Podcast feed, AI providers and the episode import arrive in the next release.</p>
+<p>Episode import, scheduling and the research page arrive in the next releases.</p>
 <h2>Sessions</h2>
 <div class="row">
 <form class="inline" method="post" action="/logout"><button class="quiet" type="submit">Sign out</button></form>

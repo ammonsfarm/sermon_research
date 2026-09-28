@@ -52,3 +52,48 @@ export async function verifyPassword(password: string, stored: string): Promise<
   const actual = await derive(password, fromBase64url(saltText), iterations);
   return timingSafeEqual(base64url(actual), hashText);
 }
+
+const keyCache = new Map<string, Promise<CryptoKey>>();
+
+/** Derives the AES-GCM key for stored API keys from APP_SECRET with HKDF. */
+function sealingKey(appSecret: string): Promise<CryptoKey> {
+  let key = keyCache.get(appSecret);
+  if (!key) {
+    key = crypto.subtle.importKey("raw", encoder.encode(appSecret), "HKDF", false, ["deriveKey"]).then((material) =>
+      crypto.subtle.deriveKey(
+        { name: "HKDF", hash: "SHA-256", salt: new Uint8Array(0), info: encoder.encode("sermon-research/provider-keys/v1") },
+        material,
+        { name: "AES-GCM", length: 256 },
+        false,
+        ["encrypt", "decrypt"],
+      ));
+    keyCache.set(appSecret, key);
+  }
+  return key;
+}
+
+/**
+ * Encrypts a value for storage. `slot` is bound as associated data, so a
+ * ciphertext copied into another slot will not decrypt.
+ */
+export async function seal(appSecret: string, slot: string, plaintext: string): Promise<string> {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ciphertext = await crypto.subtle.encrypt({ name: "AES-GCM", iv, additionalData: encoder.encode(slot) }, await sealingKey(appSecret), encoder.encode(plaintext));
+  return `v1.${base64url(iv)}.${base64url(new Uint8Array(ciphertext))}`;
+}
+
+/** Returns null when the value cannot be decrypted, for example after APP_SECRET changed. */
+export async function unseal(appSecret: string, slot: string, sealed: string): Promise<string | null> {
+  const [version, ivText, ciphertextText] = sealed.split(".");
+  if (version !== "v1" || !ivText || !ciphertextText) return null;
+  try {
+    const plaintext = await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv: fromBase64url(ivText), additionalData: encoder.encode(slot) },
+      await sealingKey(appSecret),
+      fromBase64url(ciphertextText),
+    );
+    return new TextDecoder().decode(plaintext);
+  } catch {
+    return null;
+  }
+}
