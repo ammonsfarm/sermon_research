@@ -23,6 +23,12 @@ openssl rand -base64 32          # copy the output
 npx wrangler secret put APP_SECRET   # paste it; keep a copy somewhere safe
 ```
 
+**Or deploy from GitHub:** fork this repo, add the `CLOUDFLARE_API_TOKEN`,
+`CLOUDFLARE_ACCOUNT_ID` and `APP_SECRET` repository secrets, then run the
+**Deploy** workflow from the Actions tab. It creates the search index if
+needed, deploys, and sets `APP_SECRET`. The token needs edit rights for
+Workers Scripts, D1 and Vectorize.
+
 Open the `workers.dev` address Wrangler printed. The setup wizard asks for
 the `APP_SECRET` value as a setup code, so only whoever deployed the site can
 create the admin account. Then it walks through:

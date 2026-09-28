@@ -53,6 +53,13 @@ Commands: `npm run verify` (typecheck and tests), `npm run dev` (local),
 5. Open the printed `https://sermon-research.<subdomain>.workers.dev` URL and
    let the person complete the wizard themselves.
 
+**Deploying from GitHub instead:** `.github/workflows/deploy.yml` does steps
+2 to 4 when run from the Actions tab. It needs the repository secrets
+`CLOUDFLARE_API_TOKEN` (an API token from the "Edit Cloudflare Workers"
+template, plus D1 Edit and Vectorize Edit), `CLOUDFLARE_ACCOUNT_ID` and
+`APP_SECRET`. Have the person create these themselves, and never ask them to
+paste the values into chat.
+
 There's no migration command. `src/schema.ts` runs pending migrations on the
 first request after each deploy.
 
