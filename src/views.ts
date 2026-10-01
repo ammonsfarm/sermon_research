@@ -42,7 +42,7 @@ export function ministryView(options: { action: string; step: boolean; errors?: 
 <form method="post" action="${options.action}">
 ${field({ name: "siteTitle", label: "Site title", value: values.siteTitle ?? "", error: errors.siteTitle, hint: "Shown at the top of every page, for example “Grace Church Sermon Archive”.", required: true })}
 ${field({ name: "churchName", label: "Church or ministry name", value: values.churchName ?? "", error: errors.churchName, required: true })}
-${field({ name: "speakerNames", label: "Speaker names", value: values.speakerNames ?? "", error: errors.speakerNames, hint: "Separate names with commas, for example “Pastor Jane Doe, John Smith”." })}
+${field({ name: "speakerNames", label: "Speaker names", value: values.speakerNames ?? "", error: errors.speakerNames, hint: "Separate names with commas, for example “Pastor Jane Doe, John Smith”. The AI uses these spellings when it works out who preached each sermon." })}
 ${field({ name: "description", label: "Short description", type: "textarea", value: values.description ?? "", error: errors.description })}
 ${field({ name: "logoUrl", label: "Logo address", type: "url", value: values.logoUrl ?? "", error: errors.logoUrl, hint: "Optional. An https:// link to an image. It sits on the dark header, so a white or light logo works best." })}
 <label class="check"><input type="checkbox" name="logoTile"${values.logoTile === "on" ? html` checked` : ""}> Put the logo on a white tile (for dark logos)</label>

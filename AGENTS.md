@@ -15,7 +15,7 @@ before anything in the "Ask first" list below.
 | `src/schema.ts` | Database migrations; the Worker applies them itself on first request |
 | `src/settings.ts` | Key-value settings stored in D1 (ministry details, provider choices, wizard progress) |
 | `src/steps.ts` | Wizard and admin pages for the podcast feed, answers AI, embeddings, transcription and email |
-| `src/feed.ts` | Podcast RSS fetch and parse |
+| `src/feed.ts` | Podcast RSS fetch and parse, including each episode's description and author |
 | `src/providers.ts` | Live checks and calls to OpenAI-compatible APIs, OpenAI embeddings, Mistral and Resend |
 | `src/keys.ts` | API keys stored AES-GCM encrypted in `provider_keys` |
 | `src/links.ts` | Emailed sign-in links |
@@ -26,7 +26,8 @@ before anything in the "Ask first" list below.
 | `src/workflow.ts` | The Cloudflare Workflow classes: one runs `pipeline.ts` for an episode, the other runs `writing.ts` for a document |
 | `src/schedule.ts` | Daily/weekly schedule in the church's time zone |
 | `src/ask.ts` | Ask home page, the ask box, conversations (the `turns` table, with follow-ups) and the Library |
-| `src/scope.ts` | Question scope: series (taken from the " - Series" end of a title), date range and specific sermons |
+| `src/scope.ts` | Question scope: series (taken from the " - Series" end of a title), speaker, date range and specific sermons |
+| `src/speakers.ts` | Who preached each sermon: the answers AI reads the feed's description and author and the start of the transcript (pipeline step for new sermons, hourly for older ones); name cleanup; spotting a speaker named in a question |
 | `src/sermons.ts` | Sermons grid with search and filters, and the sermon page (player, read-along, Summary / Ask / Create panel) |
 | `src/research.ts` | Retrieval (Vectorize, filtered to a scope), cited answers, sources, question limits and research access settings |
 | `src/documents.ts`, `src/markdown.ts` | Markdown documents written from the sermons (outline, study questions, custom): starting one, its page (live progress while it's written, Try again if it failed) and `.md` download; a small Markdown renderer that escapes everything it doesn't handle |
@@ -110,6 +111,18 @@ first request after each deploy.
 - **Add or change a document type:** edit `OUTPUTS` in `src/ask.ts` (the
   menu) and `INSTRUCTIONS` in `src/writing.ts` (what the AI is told).
   Documents count against the same question limits and need a signed-in person.
+- **Speakers:** each sermon's `episodes.speaker` is set by the answers AI
+  (`speaker_source = 'ai'`) from the feed's description and author and the
+  first 1,500 characters of the transcript, using the spellings in Admin →
+  Ministry → Speaker names. New sermons get it as a pipeline step; older ones
+  are done by the hourly tick or Admin → Episodes → "Identify now". An admin
+  can set or clear one on its sermon page (`speaker_source = 'admin'`), and
+  the AI never changes those. To have the AI look again at everything it
+  named: `npx wrangler d1 execute sermon-research --remote --command
+  "UPDATE episodes SET speaker_source = NULL WHERE speaker_source = 'ai'"`.
+  A question that names exactly one speaker ("Pastor Phil's sermons",
+  "Friesen") is scoped to their sermons automatically; first names count
+  only after a title or as a possessive, and Bible book names never do.
 - **Scoped questions:** a scope of 40 sermons or fewer is filtered inside
   Vectorize (`episodeId` metadata index); larger scopes fetch more matches and
   filter afterwards. Follow-ups keep the conversation's scope and send the last

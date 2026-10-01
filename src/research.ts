@@ -87,6 +87,8 @@ export interface Passage {
   readonly episodeId: string;
   readonly title: string;
   readonly publishedAt: string | null;
+  /** Who preached it; missing from sources saved before speakers were kept. */
+  readonly speaker?: string | null;
   readonly kind: "summary" | "transcript";
   readonly seq: number;
   readonly start: number | null;
@@ -131,13 +133,13 @@ export async function retrieve(env: AppEnv, question: string, topK = SOURCES, ep
   const matches = await nearest(env, question, topK, episodeIds);
   if (matches.length === 0) return [];
   const { results } = await env.DB.prepare(
-    `SELECT c.id, c.episode_id, c.kind, c.seq, c.text, c.start_seconds, e.title, e.published_at
+    `SELECT c.id, c.episode_id, c.kind, c.seq, c.text, c.start_seconds, e.title, e.published_at, e.speaker
      FROM chunks c JOIN episodes e ON e.id = c.episode_id
      WHERE e.status = 'done' AND c.id IN (${matches.map(() => "?").join(", ")})`,
-  ).bind(...matches.map((match) => match.id)).all<{ id: string; episode_id: string; kind: "summary" | "transcript"; seq: number; text: string; start_seconds: number | null; title: string; published_at: string | null }>();
+  ).bind(...matches.map((match) => match.id)).all<{ id: string; episode_id: string; kind: "summary" | "transcript"; seq: number; text: string; start_seconds: number | null; title: string; published_at: string | null; speaker: string | null }>();
   const byId = new Map(results.map((row) => [row.id, row]));
   return matches.flatMap((match) => byId.get(match.id) ?? []).map((row, index) => ({
-    n: index + 1, chunkId: row.id, episodeId: row.episode_id, title: row.title, publishedAt: row.published_at,
+    n: index + 1, chunkId: row.id, episodeId: row.episode_id, title: row.title, publishedAt: row.published_at, speaker: row.speaker,
     kind: row.kind, seq: row.seq, start: row.start_seconds, text: row.text,
   }));
 }
@@ -152,7 +154,7 @@ export function preamble(ministry: Ministry | null): string {
 /** The numbered sources block every prompt shares. */
 export function sourcesPrompt(passages: readonly Passage[]): string {
   return passages.map((passage) =>
-    `[${passage.n}] "${passage.title}" (${passage.publishedAt?.slice(0, 10) ?? "undated"})${passage.kind === "summary" ? ", summary" : passage.start !== null ? `, at ${formatTime(passage.start)}` : ""}:\n${passage.text}`).join("\n\n");
+    `[${passage.n}] "${passage.title}" (${[passage.publishedAt?.slice(0, 10) ?? "undated", passage.speaker].filter(Boolean).join(", ")})${passage.kind === "summary" ? ", summary" : passage.start !== null ? `, at ${formatTime(passage.start)}` : ""}:\n${passage.text}`).join("\n\n");
 }
 
 /** One chat completion from the configured answers AI. */
@@ -192,7 +194,7 @@ export function sourcesList(passages: readonly Omit<Passage, "chunkId">[], optio
   const prefix = options.prefix ?? "source";
   const list = html`<ol class="sources">
 ${passages.map((passage) => html`<li id="${prefix}-${passage.n}"><span class="n">${passage.n}</span> <a href="/episodes/${passage.episodeId}#t-${passage.seq}">${passage.title}</a>
-<span class="hint">${passage.publishedAt?.slice(0, 10) ?? ""}${passage.kind === "summary" ? " · summary" : passage.start !== null ? ` · ${formatTime(passage.start)}` : ""}</span>
+<span class="hint">${passage.publishedAt?.slice(0, 10) ?? ""}${passage.speaker ? ` · ${passage.speaker}` : ""}${passage.kind === "summary" ? " · summary" : passage.start !== null ? ` · ${formatTime(passage.start)}` : ""}</span>
 <p class="quote">${passage.text.length > 400 ? `${passage.text.slice(0, 400)}…` : passage.text}</p></li>`)}
 </ol>`;
   return options.collapsed

@@ -172,6 +172,17 @@ export const MIGRATIONS: readonly { readonly version: number; readonly statement
       `ALTER TABLE documents ADD COLUMN updated_at TEXT`,
     ],
   },
+  {
+    version: 9,
+    statements: [
+      // The feed's own description and author for each episode, kept current by every feed check.
+      `ALTER TABLE episodes ADD COLUMN description TEXT`,
+      `ALTER TABLE episodes ADD COLUMN author TEXT`,
+      // Who preached: null when unknown. speaker_source is 'ai' or 'admin', and null until identified.
+      `ALTER TABLE episodes ADD COLUMN speaker TEXT`,
+      `ALTER TABLE episodes ADD COLUMN speaker_source TEXT`,
+    ],
+  },
 ];
 
 let applied: Promise<void> | undefined;

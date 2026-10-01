@@ -21,12 +21,12 @@ test("long documents are planned, then written part by part from full transcript
     assert.match(chats[0]!, /split it into parts in reading order/);
 
     // Each part reads its own sermon in full, knows the whole plan, and sees how the part before it ended.
-    assert.match(chats[1]!, /\[2\] \\"Grace Alone\\" \(2026-09-07\), at 0:00:\\nWelcome, church\. Today we read Ephesians 2:8\./);
+    assert.match(chats[1]!, /\[2\] \\"Grace Alone\\" \(2026-09-07, Jane Doe\), at 0:00:\\nWelcome, church\. Today we read Ephesians 2:8\./);
     assert.doesNotMatch(chats[1]!, /\\"Faith & Works\\"/);
     assert.match(chats[1]!, /1\. Chapter 1: Grace Alone: Grace is a gift\.\\n2\. Chapter 2: Faith and Works: Faith receives it\./);
     assert.match(chats[1]!, /Write part 1 only: \\"Chapter 1: Grace Alone\\"\. It covers: Grace is a gift\. Aim for about 2,300 words\./);
     assert.doesNotMatch(chats[1]!, /ended like this/);
-    assert.match(chats[2]!, /\\"Faith & Works\\" \(2026-09-14\)/);
+    assert.match(chats[2]!, /\\"Faith & Works\\" \(2026-09-14, John Smith\)/);
     assert.doesNotMatch(chats[2]!, /\\"Grace Alone\\" \(/);
     assert.match(chats[2]!, /Part 1 ended like this\. Carry on from it without repeating it:\\n\\n….*What is grace\?/);
     assert.doesNotMatch(chats[2]!, /\{\{cite/, "the next part sees plain text, not citation placeholders");

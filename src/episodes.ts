@@ -19,6 +19,7 @@ export interface EpisodeRow {
   readonly detail: string | null;
   readonly last_error: string | null;
   readonly audio_bytes: number | null;
+  readonly speaker: string | null;
   readonly updated_at: string;
 }
 
@@ -44,6 +45,7 @@ function newestFirst(episodes: readonly FeedEpisode[]): FeedEpisode[] {
 /**
  * Records feed episodes we haven't seen. On the first import only the newest
  * `backfill` episodes are queued; later, every new episode is queued.
+ * Episodes already recorded get the feed's current description and author.
  * Returns how many episodes were queued.
  */
 export async function recordFeed(db: D1Database, feed: Feed, options: { backfill?: number } = {}): Promise<number> {
@@ -57,11 +59,15 @@ export async function recordFeed(db: D1Database, feed: Feed, options: { backfill
   let queued = 0;
   for (let start = 0; start < rows.length; start += 50) {
     const batch = rows.slice(start, start + 50);
-    const results = await db.batch(batch.map(({ episode, status }) => db.prepare(
-      `INSERT INTO episodes (id, guid, title, published_at, audio_url, duration_seconds, status, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(guid) DO NOTHING`,
-    ).bind(crypto.randomUUID(), episode.guid, episode.title, episode.publishedAt, episode.audioUrl, episode.durationSeconds, status, now, now)));
-    results.forEach((result, offset) => {
+    const results = await db.batch([
+      ...batch.map(({ episode, status }) => db.prepare(
+        `INSERT INTO episodes (id, guid, title, published_at, audio_url, duration_seconds, status, created_at, updated_at, description, author)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(guid) DO NOTHING`,
+      ).bind(crypto.randomUUID(), episode.guid, episode.title, episode.publishedAt, episode.audioUrl, episode.durationSeconds, status, now, now, episode.description, episode.author)),
+      ...batch.map(({ episode }) => db.prepare("UPDATE episodes SET description = ?1, author = ?2 WHERE guid = ?3 AND (description IS NOT ?1 OR author IS NOT ?2)")
+        .bind(episode.description, episode.author, episode.guid)),
+    ]);
+    results.slice(0, batch.length).forEach((result, offset) => {
       if (result.meta.changes === 1 && batch[offset]?.status === "queued") queued += 1;
     });
   }
@@ -131,7 +137,7 @@ export async function statusCounts(db: D1Database): Promise<Record<EpisodeStatus
 
 export async function listEpisodes(db: D1Database, limit = 200): Promise<EpisodeRow[]> {
   const { results } = await db.prepare(
-    `SELECT id, guid, title, published_at, audio_url, duration_seconds, status, stage, attempts, error, detail, last_error, audio_bytes, updated_at
+    `SELECT id, guid, title, published_at, audio_url, duration_seconds, status, stage, attempts, error, detail, last_error, audio_bytes, speaker, updated_at
      FROM episodes ORDER BY published_at DESC, created_at DESC LIMIT ?`,
   ).bind(limit).all<EpisodeRow>();
   return results;

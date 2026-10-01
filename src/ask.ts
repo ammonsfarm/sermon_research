@@ -7,6 +7,7 @@ import {
 } from "./research.ts";
 import { type CatalogEntry, catalog, describeScope, isAll, parseScope, type Scope, scopeControls, scopeFields, scopeIds, titleWithoutSeries } from "./scope.ts";
 import { getSetupStep } from "./settings.ts";
+import { mentionedSpeaker, speakerList } from "./speakers.ts";
 import { homeView } from "./views.ts";
 
 export const OUTPUTS = {
@@ -156,6 +157,10 @@ export async function ask(context: Context): Promise<Response> {
     if (!thread) return redirect("/");
     history = thread;
     scope = JSON.parse(thread[0]!.scope_json) as Scope;
+  } else if (!scope.speaker && !scope.episodes?.length) {
+    // "What has Pastor Phil said about prayer?" searches only that speaker's sermons, and the scope says so.
+    const speaker = mentionedSpeaker(question, speakerList(entries));
+    if (speaker) scope = { ...scope, speaker };
   }
   const fail = (message: Html | string, status: number) => threadId
     ? conversationPage(context, threadId, { question, alert: message, status })

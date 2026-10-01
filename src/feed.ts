@@ -7,7 +7,13 @@ export interface FeedEpisode {
   readonly publishedAt: string | null;
   readonly audioUrl: string | null;
   readonly durationSeconds: number | null;
+  /** The episode's description as plain text, often naming the speaker. */
+  readonly description: string | null;
+  /** The episode's author (itunes:author), which some feeds set to the speaker and others to the church. */
+  readonly author: string | null;
 }
+
+const MAX_DESCRIPTION_CHARS = 2_000;
 
 export interface Feed {
   readonly title: string;
@@ -63,7 +69,14 @@ function parseItem(item: string): FeedEpisode | null {
     publishedAt: Number.isNaN(parsed) ? null : new Date(parsed).toISOString(),
     audioUrl: audioUrl || null,
     durationSeconds: parseDuration(tagText(item, "itunes:duration")),
+    description: plainText(tagText(item, "description") || tagText(item, "itunes:summary") || tagText(item, "itunes:subtitle")).slice(0, MAX_DESCRIPTION_CHARS) || null,
+    author: plainText(tagText(item, "itunes:author") || tagText(item, "dc:creator") || tagText(item, "author")).slice(0, 200) || null,
   };
+}
+
+/** Descriptions are often HTML; keep the words. */
+function plainText(value: string): string {
+  return decodeEntities(value.replace(/<[^>]*>/gu, " ")).replace(/\s+/gu, " ").trim();
 }
 
 function tagText(xml: string, tag: string): string {

@@ -128,6 +128,7 @@ export const FEED_XML = `<?xml version="1.0"?>
 <rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"><channel>
 <title><![CDATA[Grace Church Sermons]]></title>
 <item><title>Faith &amp; Works</title><guid isPermaLink="false">ep-2</guid><pubDate>Sun, 14 Sep 2026 15:00:00 GMT</pubDate>
+<description><![CDATA[<p>Sermon from <b>John  Smith</b> on September 14, 2026</p>]]></description><itunes:author>Grace Church</itunes:author>
 <enclosure url="https://cdn.example.org/ep2.mp3?a=1&amp;b=2" length="1" type="audio/mpeg"/><itunes:duration>45:30</itunes:duration></item>
 <item><title>Grace Alone</title><guid>ep-1</guid><pubDate>Sun, 07 Sep 2026 15:00:00 GMT</pubDate>
 <enclosure url="https://cdn.example.org/ep1.mp3" length="1" type="audio/mpeg"/><itunes:duration>2700</itunes:duration></item>
@@ -150,6 +151,11 @@ export const ANSWER_REPLY = "Salvation is by grace [1].\n\nSee also [1, 2] and <
 export const PLAN_REPLY = "```json\n{\"title\": \"Grace, Chapter by Chapter\", \"parts\": [{\"heading\": \"Chapter 1: Grace Alone\", \"brief\": \"Grace is a gift.\", \"sermons\": [1], \"words\": 2300}, {\"heading\": \"Chapter 2: Faith and Works\", \"brief\": \"Faith receives it.\", \"sermons\": [2, 7], \"words\": 99999}]}\n```";
 /** The planner's reply for an outline or study guide: one part from both sermons. */
 export const PLAN_SINGLE_REPLY = "{\"title\": \"Saved by Grace\", \"parts\": [{\"heading\": \"Outline\", \"brief\": \"\", \"sermons\": [1, 2], \"words\": 900}]}";
+/** Names whoever preached each numbered episode, untidily, as models do: Faith & Works is John Smith's, the rest Jane Doe's. */
+function speakerReply(episodes: string): string {
+  return JSON.stringify(Object.fromEntries([...episodes.matchAll(/^(\d+)\. "([^"]*)"/gmu)].map(([, n, title]) => [n, title!.includes("Faith") ? "Rev. John  Smith" : "Pastor Jane Doe"])));
+}
+
 /** Each part of a long document. In a part, [1] is its sermon's summary and [2] its transcript. */
 export const PART_REPLY = "## Chapter from the model\n\nThe preacher told a story about a gift [2]. Faith receives it [1, 2]. Not a source [9].\n\n### Questions\n\n1. What is grace? [1-2]";
 
@@ -172,8 +178,10 @@ export function fakeProviders(fail: Record<string, number> = {}): { calls: FakeC
     if (url.startsWith("https://cdn.example.org/")) return new Response(AUDIO_BYTES, { headers: { "Content-Type": "audio/mpeg", "Content-Length": String(AUDIO_BYTES.byteLength) } });
     if (url === FEED_URL) return new Response(FEED_XML, { headers: { "Content-Type": "application/rss+xml" } });
     if (url.endsWith("/chat/completions")) {
-      const system = ((body as { messages?: { role: string; content: string }[] } | null)?.messages ?? []).find((message) => message.role === "system")?.content ?? "";
-      const content = system.includes("You plan documents") ? (system.includes("so plan a single part") ? PLAN_SINGLE_REPLY : PLAN_REPLY)
+      const messages = (body as { messages?: { role: string; content: string }[] } | null)?.messages ?? [];
+      const system = messages.find((message) => message.role === "system")?.content ?? "";
+      const content = system.includes("who preached each sermon") ? speakerReply(messages.find((message) => message.role === "user")?.content ?? "")
+        : system.includes("You plan documents") ? (system.includes("so plan a single part") ? PLAN_SINGLE_REPLY : PLAN_REPLY)
         : system.includes("one part of a longer document") ? PART_REPLY
           : system.includes("Markdown document") ? DOCUMENT_REPLY
             : system.includes("numbered sources") ? ANSWER_REPLY : system ? SUMMARY_REPLY : "OK";
