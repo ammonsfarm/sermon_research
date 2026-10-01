@@ -161,6 +161,17 @@ export const MIGRATIONS: readonly { readonly version: number; readonly statement
       `ALTER TABLE documents ADD COLUMN scope_json TEXT`,
     ],
   },
+  {
+    version: 8,
+    statements: [
+      // Documents are written in the background: 'writing', then 'done' or 'failed'.
+      `ALTER TABLE documents ADD COLUMN status TEXT NOT NULL DEFAULT 'done'`,
+      // What a writing document is doing right now, and why a failed one stopped.
+      `ALTER TABLE documents ADD COLUMN detail TEXT`,
+      `ALTER TABLE documents ADD COLUMN error TEXT`,
+      `ALTER TABLE documents ADD COLUMN updated_at TEXT`,
+    ],
+  },
 ];
 
 let applied: Promise<void> | undefined;

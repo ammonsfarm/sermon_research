@@ -88,9 +88,12 @@ assistant at this repo. [AGENTS.md](AGENTS.md) tells it how to help.
   it, tabs for the summary, asking about just that sermon, and creating an
   outline, study questions or anything else from it
 - Documents: signed-in people can have the answers AI write a sermon outline,
-  a small-group study guide or any custom document, with citations. Each is
-  saved to the Library and downloads as a Markdown (.md) file with its
-  sources linked
+  a small-group study guide or any custom document, with citations. The AI
+  reads the full transcripts of the sermons a request needs, picked from
+  their scripture and topics. Long requests, like a book with a chapter per
+  sermon, are planned and then written one part at a time in the
+  background, with the page showing progress. Each is saved to the Library
+  and downloads as a Markdown (.md) file with its sources linked
 - Members-only by default: admins invite members by link (emailed too when
   email is set up). A switch in Admin makes it public, with per-visitor hourly
   limits and a daily cap on questions to control AI spending

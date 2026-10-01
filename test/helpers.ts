@@ -1,6 +1,8 @@
 import worker from "../src/index.ts";
 import type { AppEnv } from "../src/env.ts";
+import { type PipelineStep, runEpisode } from "../src/pipeline.ts";
 import { resetSchemaCache } from "../src/schema.ts";
+import { writeDocument } from "../src/writing.ts";
 import { createTestD1 } from "./d1-sqlite.ts";
 
 export const ORIGIN = "https://sermons.example.org";
@@ -19,10 +21,17 @@ export interface FakeWorkflow {
   failing: boolean;
 }
 
+export interface FakeDocumentWorkflow {
+  readonly created: { id: string; params: { documentId: string } }[];
+  failing: boolean;
+}
+
 export interface TestApp {
   readonly env: AppEnv;
   readonly vectors: FakeVectors;
   readonly workflow: FakeWorkflow;
+  /** Document runs started and not yet run by runDocuments(). */
+  readonly documentRuns: FakeDocumentWorkflow;
   /** Objects in the fake AUDIO bucket, by key. */
   readonly audio: Map<string, { bytes: Uint8Array; contentType: string | undefined }>;
   request(path: string, init?: { method?: string; form?: Record<string, string>; cookie?: string; headers?: Record<string, string> }): Promise<Response>;
@@ -32,6 +41,7 @@ export function createApp(overrides: Partial<AppEnv> = {}): TestApp {
   resetSchemaCache();
   const vectors: FakeVectors = { stored: new Map(), deleted: [], queries: [] };
   const workflow: FakeWorkflow = { created: [], failing: false };
+  const documentRuns: FakeDocumentWorkflow = { created: [], failing: false };
   const VECTORS = {
     async upsert(items: VectorizeVector[]) {
       for (const item of items) vectors.stored.set(item.id, item);
@@ -52,6 +62,13 @@ export function createApp(overrides: Partial<AppEnv> = {}): TestApp {
     async create(options: { id: string; params: { episodeId: string } }) {
       if (workflow.failing) throw new Error("Workflows unavailable");
       workflow.created.push(options);
+      return { id: options.id };
+    },
+  };
+  const DOCUMENT_WORKFLOW = {
+    async create(options: { id: string; params: { documentId: string } }) {
+      if (documentRuns.failing) throw new Error("Workflows unavailable");
+      documentRuns.created.push(options);
       return { id: options.id };
     },
   };
@@ -79,11 +96,12 @@ export function createApp(overrides: Partial<AppEnv> = {}): TestApp {
       };
     },
   };
-  const env = { DB: createTestD1(), APP_SECRET: SECRET, VECTORS, EPISODE_WORKFLOW, AUDIO, ...overrides } as unknown as AppEnv;
+  const env = { DB: createTestD1(), APP_SECRET: SECRET, VECTORS, EPISODE_WORKFLOW, DOCUMENT_WORKFLOW, AUDIO, ...overrides } as unknown as AppEnv;
   return {
     env,
     vectors,
     workflow,
+    documentRuns,
     audio,
     request(path, init = {}) {
       const headers = new Headers(init.headers);
@@ -128,6 +146,13 @@ export const DOCUMENT_REPLY = "```markdown\n# Saved by Grace\n\n**Big idea:** gr
 
 export const ANSWER_REPLY = "Salvation is by grace [1].\n\nSee also [1, 2] and <b>[9]</b>.";
 
+/** The planner's reply for a long custom document. Sermons are numbered oldest first: 1 is Grace Alone. */
+export const PLAN_REPLY = "```json\n{\"title\": \"Grace, Chapter by Chapter\", \"parts\": [{\"heading\": \"Chapter 1: Grace Alone\", \"brief\": \"Grace is a gift.\", \"sermons\": [1], \"words\": 2300}, {\"heading\": \"Chapter 2: Faith and Works\", \"brief\": \"Faith receives it.\", \"sermons\": [2, 7], \"words\": 99999}]}\n```";
+/** The planner's reply for an outline or study guide: one part from both sermons. */
+export const PLAN_SINGLE_REPLY = "{\"title\": \"Saved by Grace\", \"parts\": [{\"heading\": \"Outline\", \"brief\": \"\", \"sermons\": [1, 2], \"words\": 900}]}";
+/** Each part of a long document. In a part, [1] is its sermon's summary and [2] its transcript. */
+export const PART_REPLY = "## Chapter from the model\n\nThe preacher told a story about a gift [2]. Faith receives it [1, 2]. Not a source [9].\n\n### Questions\n\n1. What is grace? [1-2]";
+
 export interface FakeCall { readonly url: string; readonly method: string; readonly authorization: string | null; readonly userAgent: string | null; readonly body: unknown }
 
 /**
@@ -148,7 +173,10 @@ export function fakeProviders(fail: Record<string, number> = {}): { calls: FakeC
     if (url === FEED_URL) return new Response(FEED_XML, { headers: { "Content-Type": "application/rss+xml" } });
     if (url.endsWith("/chat/completions")) {
       const system = ((body as { messages?: { role: string; content: string }[] } | null)?.messages ?? []).find((message) => message.role === "system")?.content ?? "";
-      const content = system.includes("Markdown document") ? DOCUMENT_REPLY : system.includes("numbered sources") ? ANSWER_REPLY : system ? SUMMARY_REPLY : "OK";
+      const content = system.includes("You plan documents") ? (system.includes("so plan a single part") ? PLAN_SINGLE_REPLY : PLAN_REPLY)
+        : system.includes("one part of a longer document") ? PART_REPLY
+          : system.includes("Markdown document") ? DOCUMENT_REPLY
+            : system.includes("numbered sources") ? ANSWER_REPLY : system ? SUMMARY_REPLY : "OK";
       return Response.json({ choices: [{ message: { content } }] });
     }
     if (url === "https://api.openai.com/v1/embeddings") {
@@ -197,4 +225,23 @@ export async function completeSetup(app: TestApp, options: { email?: boolean; co
   } finally {
     providers.restore();
   }
+}
+
+/** Runs workflow steps inline, like a Workflow run with no retries. */
+export const inlineStep: PipelineStep = { do: (_name, _config, callback) => callback() };
+
+/** Runs every document workflow started so far, as Workflows would in the background. */
+export async function runDocuments(app: TestApp): Promise<void> {
+  for (const run of app.documentRuns.created.splice(0)) await writeDocument(app.env, inlineStep, run.params.documentId);
+}
+
+/** A finished site with both feed episodes processed. Leaves fake providers installed. */
+export async function indexedSite(): Promise<{ app: TestApp; cookie: string; ids: string[]; providers: ReturnType<typeof fakeProviders>; restore(): void }> {
+  const app = createApp();
+  const providers = fakeProviders();
+  const cookie = await completeSetup(app, { count: 2 });
+  const { results } = await app.env.DB.prepare("SELECT id FROM episodes ORDER BY published_at DESC").all<{ id: string }>();
+  const ids = results.map((row) => row.id);
+  for (const id of ids) await runEpisode(app.env, inlineStep, id);
+  return { app, cookie, ids, providers, restore: providers.restore };
 }

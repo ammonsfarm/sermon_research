@@ -2,26 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { signedAudioUrl } from "../src/audio.ts";
-import { runEpisode, type PipelineStep } from "../src/pipeline.ts";
 import { fileName, splitTitle } from "../src/documents.ts";
 import { renderMarkdown } from "../src/markdown.ts";
 import { formatTime, renderAnswer } from "../src/research.ts";
 import { describeScope, parseScope, scopeIds, seriesOf, titleWithoutSeries } from "../src/scope.ts";
 import { segmentsByChunk } from "../src/sermons.ts";
-import { AUDIO_BYTES, DOCUMENT_REPLY, completeSetup, cookieFrom, createApp, fakeProviders, ORIGIN, SECRET, type TestApp } from "./helpers.ts";
-
-const inlineStep: PipelineStep = { do: (_name, _config, callback) => callback() };
-
-/** A finished site with both feed episodes processed. Leaves fake providers installed. */
-async function indexedSite(): Promise<{ app: TestApp; cookie: string; ids: string[]; providers: ReturnType<typeof fakeProviders>; restore(): void }> {
-  const app = createApp();
-  const providers = fakeProviders();
-  const cookie = await completeSetup(app, { count: 2 });
-  const { results } = await app.env.DB.prepare("SELECT id FROM episodes ORDER BY published_at DESC").all<{ id: string }>();
-  const ids = results.map((row) => row.id);
-  for (const id of ids) await runEpisode(app.env, inlineStep, id);
-  return { app, cookie, ids, providers, restore: providers.restore };
-}
+import { AUDIO_BYTES, DOCUMENT_REPLY, completeSetup, cookieFrom, createApp, fakeProviders, indexedSite, ORIGIN, runDocuments, SECRET, type TestApp } from "./helpers.ts";
 
 /** Invites a member and returns their session cookie. */
 async function inviteMember(app: TestApp, adminCookie: string): Promise<string> {
@@ -282,10 +268,25 @@ test("members create Markdown documents from the sermons, then view, download an
     const created = await site.app.request("/research", { form: { question: "An outline on grace", kind: "outline" }, cookie: site.cookie });
     const location = created.headers.get("Location") ?? "";
     assert.match(location, /^\/documents\/[0-9a-f-]{36}$/u);
-    const prompt = site.providers.calls.findLast((call) => call.url.endsWith("/chat/completions"));
-    const system = JSON.stringify(prompt?.body);
-    assert.match(system, /sermon outline/);
-    assert.match(system, /Grace Church/);
+    const id = location.split("/").at(-1)!;
+    assert.deepEqual(site.app.documentRuns.created, [{ id, params: { documentId: id } }], "writing happens in a background run");
+
+    // While it's written, the page follows the progress and there's nothing to download yet.
+    const writing = await (await site.app.request(location, { cookie: site.cookie })).text();
+    assert.match(writing, /<meta http-equiv="refresh" content="10">/);
+    assert.match(writing, /<p class="live">Starting · updated just now<\/p>/);
+    assert.doesNotMatch(writing, /Download \.md/);
+    assert.equal((await site.app.request(`${location}.md`, { cookie: site.cookie })).headers.get("Location"), location);
+    assert.match(await (await site.app.request("/library", { cookie: site.cookie })).text(), /Sermon outline · \d{4}-\d\d-\d\d · Writing…/);
+
+    await runDocuments(site.app);
+    const chats = site.providers.calls.filter((call) => call.url.endsWith("/chat/completions")).slice(-2).map((call) => JSON.stringify(call.body));
+    assert.match(chats[0]!, /You plan documents/);
+    assert.match(chats[0]!, /1\. \\"Grace Alone\\" \(2026-09-07\)\. Scripture: Ephesians 2:8\. Topics: grace/, "the planner sees every sermon's scripture and topics");
+    assert.match(chats[1]!, /sermon outline/);
+    assert.match(chats[1]!, /Grace Church/);
+    assert.equal(chats[1]!.match(/Today we read Ephesians 2:8\./gu)?.length, 2, "the outline is written from both sermons' full transcripts");
+    assert.match(chats[1]!, /Aim for about 900 words\./);
 
     const view = await site.app.request(location, { cookie: site.cookie });
     const body = await view.text();
@@ -385,11 +386,19 @@ test("questions and documents can be limited to a series, dates or chosen sermon
     assert.equal(none.status, 400);
     assert.match(await none.text(), /No sermons match that scope/);
 
-    // A sermon page's Create buttons write from that sermon only.
+    // A sermon page's Create buttons write from that sermon only, without a planning step.
     const outline = await site.app.request("/research", { form: { question: "Sermon outline for “Grace Alone”", kind: "outline", scope_episode: older }, cookie: site.cookie });
+    const before = site.providers.calls.length;
+    await runDocuments(site.app);
+    const chats = site.providers.calls.slice(before).filter((call) => call.url.endsWith("/chat/completions"));
+    assert.equal(chats.length, 1);
+    assert.match(JSON.stringify(chats[0]!.body), /sermon outline/);
+    assert.doesNotMatch(JSON.stringify(chats[0]!.body), /Faith & Works/);
     const doc = await (await site.app.request(outline.headers.get("Location")!, { cookie: site.cookie })).text();
+    assert.match(doc, /<h1>Saved by Grace<\/h1>/);
     assert.match(doc, /Scope: <strong>“Grace Alone”<\/strong>/);
-    assert.deepEqual((site.app.vectors.queries.at(-1) as { filter?: unknown }).filter, { episodeId: { $in: [older] } });
+    assert.match(doc, new RegExp(`/episodes/${older}#`));
+    assert.doesNotMatch(doc, new RegExp(`/episodes/${newer}#`), "only the chosen sermon is cited");
   } finally {
     site.restore();
   }
