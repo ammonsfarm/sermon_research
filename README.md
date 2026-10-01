@@ -94,6 +94,11 @@ assistant at this repo. [AGENTS.md](AGENTS.md) tells it how to help.
   sermon, are planned and then written one part at a time in the
   background, with the page showing progress. Each is saved to the Library
   and downloads as a Markdown (.md) file with its sources linked
+- Speakers: the answers AI works out who preached each sermon from the
+  feed's description and the start of the transcript. Sermons show their
+  speaker and can be filtered by it, scopes can be limited to one, and a
+  question like "what has Pastor Phil said about prayer?" searches only
+  that speaker's sermons. Admins can correct a speaker on its sermon page
 - Members-only by default: admins invite members by link (emailed too when
   email is set up). A switch in Admin makes it public, with per-visitor hourly
   limits and a daily cap on questions to control AI spending

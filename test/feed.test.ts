@@ -13,8 +13,11 @@ test("parses podcast title, episodes, CDATA and entities", () => {
     publishedAt: "2026-09-14T15:00:00.000Z",
     audioUrl: "https://cdn.example.org/ep2.mp3?a=1&b=2",
     durationSeconds: 2730,
+    description: "Sermon from John Smith on September 14, 2026",
+    author: "Grace Church",
   });
   assert.equal(feed.episodes[1]?.durationSeconds, 2700);
+  assert.equal(feed.episodes[1]?.description, null);
 });
 
 test("falls back to the audio URL when an item has no guid", () => {

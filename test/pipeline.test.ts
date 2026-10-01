@@ -24,7 +24,7 @@ function feedOf(count: number) {
     title: "Big feed",
     episodes: Array.from({ length: count }, (_unused, index) => ({
       guid: `g-${index}`, title: `Episode ${index}`, publishedAt: new Date(Date.UTC(2026, 0, 1 + index)).toISOString(),
-      audioUrl: `https://cdn.example.org/${index}.mp3`, durationSeconds: 1800,
+      audioUrl: `https://cdn.example.org/${index}.mp3`, durationSeconds: 1800, description: null, author: null,
     })),
   };
 }

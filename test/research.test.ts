@@ -282,7 +282,7 @@ test("members create Markdown documents from the sermons, then view, download an
     await runDocuments(site.app);
     const chats = site.providers.calls.filter((call) => call.url.endsWith("/chat/completions")).slice(-2).map((call) => JSON.stringify(call.body));
     assert.match(chats[0]!, /You plan documents/);
-    assert.match(chats[0]!, /1\. \\"Grace Alone\\" \(2026-09-07\)\. Scripture: Ephesians 2:8\. Topics: grace/, "the planner sees every sermon's scripture and topics");
+    assert.match(chats[0]!, /1\. \\"Grace Alone\\" \(2026-09-07\)\. Speaker: Jane Doe\. Scripture: Ephesians 2:8\. Topics: grace/, "the planner sees every sermon's speaker, scripture and topics");
     assert.match(chats[1]!, /sermon outline/);
     assert.match(chats[1]!, /Grace Church/);
     assert.equal(chats[1]!.match(/Today we read Ephesians 2:8\./gu)?.length, 2, "the outline is written from both sermons' full transcripts");
@@ -370,7 +370,7 @@ test("questions and documents can be limited to a series, dates or chosen sermon
     const [newer, older] = site.ids as [string, string];
     const home = await (await site.app.request("/", { cookie: site.cookie })).text();
     assert.match(home, /<details class="scope">\s*<summary>Scope: All sermons<\/summary>/);
-    assert.match(home, new RegExp(`<option value="${older}">2026-09-07 · Grace Alone</option>`));
+    assert.match(home, new RegExp(`<option value="${older}">2026-09-07 · Grace Alone · Jane Doe</option>`));
 
     const asked = await site.app.request("/research", { form: { question: "What is grace?", scope_episode: older }, cookie: site.cookie });
     const thread = await (await site.app.request((asked.headers.get("Location") ?? "").split("#")[0]!, { cookie: site.cookie })).text();
@@ -410,17 +410,19 @@ test("series come from the part of a title after the last dash", () => {
   assert.equal(seriesOf("Grace Alone"), null);
   assert.equal(titleWithoutSeries("Turn to Me - Haggai: Build What Matters"), "Turn to Me");
   const entries = [
-    { id: "a", title: "One - Matthew", publishedAt: "2026-01-04T00:00:00Z", series: "Matthew" },
-    { id: "b", title: "Two - Haggai", publishedAt: "2026-02-01T00:00:00Z", series: "Haggai" },
-    { id: "c", title: "Three - Matthew", publishedAt: "2026-03-01T00:00:00Z", series: "Matthew" },
+    { id: "a", title: "One - Matthew", publishedAt: "2026-01-04T00:00:00Z", series: "Matthew", speaker: "Jane Doe" },
+    { id: "b", title: "Two - Haggai", publishedAt: "2026-02-01T00:00:00Z", series: "Haggai", speaker: "John Smith" },
+    { id: "c", title: "Three - Matthew", publishedAt: "2026-03-01T00:00:00Z", series: "Matthew", speaker: null },
   ];
   assert.equal(scopeIds({}, entries), null);
   assert.deepEqual(scopeIds({ series: "Matthew" }, entries), ["a", "c"]);
   assert.deepEqual(scopeIds({ series: "Matthew", from: "2026-02-01" }, entries), ["c"]);
   assert.deepEqual(scopeIds({ to: "2026-02-01" }, entries), ["a", "b"]);
+  assert.deepEqual(scopeIds({ speaker: "jane doe" }, entries), ["a"], "speakers match regardless of case");
+  assert.equal(describeScope({ series: "Matthew", speaker: "Jane Doe" }, entries), "Series: Matthew, Speaker: Jane Doe");
   assert.equal(describeScope({ series: "Matthew", from: "2026-02-01" }, entries), "Series: Matthew, from 2026-02-01");
   assert.equal(describeScope({ episodes: ["a", "b"] }, entries), "2 chosen sermons");
-  assert.deepEqual(parseScope(new URLSearchParams("scope_series=Matthew&scope_from=nope&scope_episode=x&scope_to=2026-03-01")), { series: "Matthew", to: "2026-03-01" });
+  assert.deepEqual(parseScope(new URLSearchParams("scope_series=Matthew&scope_speaker=Jane+Doe&scope_from=nope&scope_episode=x&scope_to=2026-03-01")), { series: "Matthew", speaker: "Jane Doe", to: "2026-03-01" });
 });
 
 test("full transcripts download as Markdown or plain text, for people who can view the sermons", async () => {
@@ -434,10 +436,10 @@ test("full transcripts download as Markdown or plain text, for people who can vi
     assert.equal(md.headers.get("Content-Type"), "text/markdown; charset=utf-8");
     assert.match(md.headers.get("Content-Disposition") ?? "", /attachment; filename="2026-09-14-faith-works-transcript\.md"/);
     const markdown = await md.text();
-    assert.match(markdown, /^# Faith & Works\n\n2026-09-14 · Grace Church\n\n## Summary\n\nGrace is a gift\./u);
+    assert.match(markdown, /^# Faith & Works\n\n2026-09-14 · John Smith · Grace Church\n\n## Summary\n\nGrace is a gift\./u);
     assert.match(markdown, /## Transcript\n\n\*\*0:00\*\* Welcome, church\./u);
     const txt = await (await site.app.request(`/episodes/${id}/transcript.txt`, { cookie: site.cookie })).text();
-    assert.match(txt, /^Faith & Works\n2026-09-14 · Grace Church\n\n\[0:00\] Welcome, church\./u);
+    assert.match(txt, /^Faith & Works\n2026-09-14 · John Smith · Grace Church\n\n\[0:00\] Welcome, church\./u);
     assert.equal((await site.app.request("/episodes/00000000-0000-0000-0000-000000000000/transcript.txt", { cookie: site.cookie })).status, 404);
   } finally {
     site.restore();

@@ -7,6 +7,7 @@ import { DEFAULT_SCHEDULE, describeSchedule, isDue, isValidTimeZone, localSlot, 
 import { getSetting, getSetupStep, type PodcastSettings, putSetting } from "./settings.ts";
 import type { AppEnv } from "./env.ts";
 import { failStaleDocuments } from "./writing.ts";
+import { HOURLY_SPEAKERS, identifyMissingSpeakers } from "./speakers.ts";
 
 /** Mistral's list price for Voxtral Mini transcription when this was written; check mistral.ai/pricing. */
 const TRANSCRIPTION_USD_PER_MINUTE = 0.001;
@@ -157,14 +158,16 @@ export async function episodesDashboard(context: Context): Promise<Response> {
   const current = await getSetupStep(context.db);
   if (current !== "complete") return redirect(`/setup/${current}`);
   await rememberOrigin(context);
-  const [counts, episodes, schedule, lastCheck, lastTick, atOnce] = await Promise.all([
+  const [counts, episodes, schedule, lastCheck, lastTick, atOnce, speakers] = await Promise.all([
     statusCounts(context.db),
     listEpisodes(context.db),
     getSetting<Schedule>(context.db, "schedule"),
     getSetting<{ at: string; queued: number; error?: string }>(context.db, "last_check"),
     getSetting<string>(context.db, "last_tick"),
     concurrency(context.db),
+    context.db.prepare("SELECT count(speaker) AS named, sum(speaker_source IS NULL) AS waiting FROM episodes WHERE status = 'done'").first<{ named: number; waiting: number | null }>(),
   ]);
+  const waitingSpeakers = speakers?.waiting ?? 0;
   const notice = context.url.searchParams.get("notice");
   const live = counts.running + counts.queued > 0;
   return page("Episodes", html`<h1>Episodes</h1>
@@ -180,6 +183,7 @@ ${notice ? html`<p class="alert-ok">${notice}</p>` : ""}
 <dt>Not imported</dt><dd>${counts.not_imported}</dd>
 <dt>Schedule</dt><dd>${schedule ? describeSchedule(schedule) : "Not set"} · <a href="/admin/schedule">Change</a></dd>
 <dt>Last feed check</dt><dd>${lastCheck ? `${ago(lastCheck.at)} · ${lastCheck.error ?? `${lastCheck.queued} new`}` : "Not yet"}</dd>
+<dt>Speakers</dt><dd>${speakers?.named ?? 0} named${waitingSpeakers ? html` · ${waitingSpeakers} waiting for the AI, which checks hourly <form class="inline" method="post" action="/admin/episodes/speakers" data-busy="Identifying speakers… this can take a minute."><button class="link" type="submit">Identify now</button></form>` : ""} · fix one on its sermon page</dd>
 <dt>Background worker</dt><dd>${lastTick ? `last ran ${ago(lastTick)}` : "hasn't run yet"} · runs hourly and restarts stalled work</dd>
 </dl>
 <form class="row" method="post" action="/admin/episodes/concurrency">
@@ -197,7 +201,7 @@ ${counts.not_imported > 0 ? html`<form class="inline" method="post" action="/adm
 <thead><tr><th>Episode</th><th>Status</th><th></th></tr></thead>
 <tbody>
 ${episodes.map((episode) => html`<tr>
-<td>${episode.status === "done" ? html`<a href="/episodes/${episode.id}">${episode.title}</a>` : episode.title}<br><span class="hint">${episode.published_at?.slice(0, 10) ?? ""}</span></td>
+<td>${episode.status === "done" ? html`<a href="/episodes/${episode.id}">${episode.title}</a>` : episode.title}<br><span class="hint">${episode.published_at?.slice(0, 10) ?? ""}${episode.speaker ? ` · ${episode.speaker}` : ""}</span></td>
 <td>${episodeStatus(episode)}</td>
 <td>${episode.status === "failed" || episode.status === "not_imported"
     ? html`<form method="post" action="/admin/episodes/queue"><input type="hidden" name="id" value="${episode.id}"><button class="quiet" type="submit">${episode.status === "failed" ? "Retry" : "Import"}</button></form>`
@@ -243,6 +247,21 @@ export async function checkNow(context: Context): Promise<Response> {
   return redirect(`/admin/episodes?notice=${encodeURIComponent(notice)}`);
 }
 
+/** POST /admin/episodes/speakers : identifies speakers now rather than waiting for the hourly tick. */
+export async function identifySpeakersNow(context: Context): Promise<Response> {
+  const denied = requireAdmin(context);
+  if (denied) return denied;
+  let notice: string;
+  try {
+    const checked = await identifyMissingSpeakers(context.env, HOURLY_SPEAKERS);
+    notice = `Checked ${checked} sermon${checked === 1 ? "" : "s"} for their speaker.`;
+  } catch (error) {
+    console.error("speaker identification failed", error);
+    notice = `Speakers couldn't be identified right now: ${error instanceof Error ? error.message : "unknown error"}`;
+  }
+  return redirect(`/admin/episodes?notice=${encodeURIComponent(notice)}`);
+}
+
 /** POST /admin/episodes/queue */
 export async function queueFromDashboard(context: Context): Promise<Response> {
   const denied = requireAdmin(context);
@@ -283,6 +302,7 @@ export async function hourlyTick(env: AppEnv, at: Date): Promise<void> {
   if ((await getSetupStep(env.DB)) !== "complete") return;
   await putSetting(env.DB, "last_tick", at.toISOString());
   await failStaleDocuments(env.DB, at.getTime());
+  await identifyMissingSpeakers(env, HOURLY_SPEAKERS).catch((error: unknown) => console.error("speaker identification failed", error));
   const schedule = await getSetting<Schedule>(env.DB, "schedule");
   const lastSlot = await getSetting<string>(env.DB, "last_scheduled_slot");
   if (schedule && isDue(schedule, at, lastSlot)) {

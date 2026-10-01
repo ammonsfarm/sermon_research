@@ -1,8 +1,10 @@
 import { html, type Html } from "./html.ts";
+import { speakerList } from "./speakers.ts";
 
 /** Which sermons a question or document draws on. An empty scope means all of them. */
 export interface Scope {
   readonly series?: string;
+  readonly speaker?: string;
   /** Inclusive dates, YYYY-MM-DD. */
   readonly from?: string;
   readonly to?: string;
@@ -14,6 +16,7 @@ export interface CatalogEntry {
   readonly title: string;
   readonly publishedAt: string | null;
   readonly series: string | null;
+  readonly speaker: string | null;
 }
 
 const MAX_PICKED = 50;
@@ -38,9 +41,9 @@ export function titleWithoutSeries(title: string): string {
 }
 
 export async function catalog(db: D1Database): Promise<CatalogEntry[]> {
-  const { results } = await db.prepare("SELECT id, title, published_at FROM episodes WHERE status = 'done' ORDER BY published_at DESC")
-    .all<{ id: string; title: string; published_at: string | null }>();
-  return results.map((row) => ({ id: row.id, title: row.title, publishedAt: row.published_at, series: seriesOf(row.title) }));
+  const { results } = await db.prepare("SELECT id, title, published_at, speaker FROM episodes WHERE status = 'done' ORDER BY published_at DESC")
+    .all<{ id: string; title: string; published_at: string | null; speaker: string | null }>();
+  return results.map((row) => ({ id: row.id, title: row.title, publishedAt: row.published_at, series: seriesOf(row.title), speaker: row.speaker }));
 }
 
 /** Series names, most recently preached first. */
@@ -52,11 +55,13 @@ export function seriesList(entries: readonly CatalogEntry[]): string[] {
 export function parseScope(values: FormData | URLSearchParams): Scope {
   const text = (name: string) => String(values.get(name) ?? "").trim();
   const series = text("scope_series").slice(0, 120);
+  const speaker = text("scope_speaker").slice(0, 120);
   const from = text("scope_from");
   const to = text("scope_to");
   const episodes = [...new Set(values.getAll("scope_episode").map(String).filter((id) => ID.test(id)))].slice(0, MAX_PICKED);
   return {
     ...(series ? { series } : {}),
+    ...(speaker ? { speaker } : {}),
     ...(DATE.test(from) ? { from } : {}),
     ...(DATE.test(to) ? { to } : {}),
     ...(episodes.length ? { episodes } : {}),
@@ -64,7 +69,7 @@ export function parseScope(values: FormData | URLSearchParams): Scope {
 }
 
 export function isAll(scope: Scope): boolean {
-  return !scope.series && !scope.from && !scope.to && !scope.episodes?.length;
+  return !scope.series && !scope.speaker && !scope.from && !scope.to && !scope.episodes?.length;
 }
 
 /** The episode ids a scope allows, or null for all sermons. */
@@ -74,6 +79,7 @@ export function scopeIds(scope: Scope, entries: readonly CatalogEntry[]): string
   return entries.filter((entry) => {
     if (picked && !picked.has(entry.id)) return false;
     if (scope.series && entry.series !== scope.series) return false;
+    if (scope.speaker && entry.speaker?.toLowerCase() !== scope.speaker.toLowerCase()) return false;
     const day = entry.publishedAt?.slice(0, 10);
     if (scope.from && (!day || day < scope.from)) return false;
     if (scope.to && (!day || day > scope.to)) return false;
@@ -81,7 +87,7 @@ export function scopeIds(scope: Scope, entries: readonly CatalogEntry[]): string
   }).map((entry) => entry.id);
 }
 
-/** A short description, like "Series: Matthew, from 2026-01-01" or "“Grace Alone”". */
+/** A short description, like "Series: Matthew, Speaker: Jane Doe, from 2026-01-01" or "“Grace Alone”". */
 export function describeScope(scope: Scope, entries: readonly CatalogEntry[]): string {
   if (isAll(scope)) return "All sermons";
   const parts: string[] = [];
@@ -90,6 +96,7 @@ export function describeScope(scope: Scope, entries: readonly CatalogEntry[]): s
     parts.push(scope.episodes.length === 1 ? `“${titles.get(scope.episodes[0]!) ?? "One sermon"}”` : `${scope.episodes.length} chosen sermons`);
   }
   if (scope.series) parts.push(`Series: ${scope.series}`);
+  if (scope.speaker) parts.push(`Speaker: ${scope.speaker}`);
   if (scope.from && scope.to) parts.push(`${scope.from} to ${scope.to}`);
   else if (scope.from) parts.push(`from ${scope.from}`);
   else if (scope.to) parts.push(`up to ${scope.to}`);
@@ -98,23 +105,26 @@ export function describeScope(scope: Scope, entries: readonly CatalogEntry[]): s
 
 /** Hidden fields that carry a scope into a follow-up question. */
 export function scopeFields(scope: Scope): Html {
-  return html`${scope.series ? html`<input type="hidden" name="scope_series" value="${scope.series}">` : ""}${scope.from ? html`<input type="hidden" name="scope_from" value="${scope.from}">` : ""}${scope.to ? html`<input type="hidden" name="scope_to" value="${scope.to}">` : ""}${(scope.episodes ?? []).map((id) => html`<input type="hidden" name="scope_episode" value="${id}">`)}`;
+  return html`${scope.series ? html`<input type="hidden" name="scope_series" value="${scope.series}">` : ""}${scope.speaker ? html`<input type="hidden" name="scope_speaker" value="${scope.speaker}">` : ""}${scope.from ? html`<input type="hidden" name="scope_from" value="${scope.from}">` : ""}${scope.to ? html`<input type="hidden" name="scope_to" value="${scope.to}">` : ""}${(scope.episodes ?? []).map((id) => html`<input type="hidden" name="scope_episode" value="${id}">`)}`;
 }
 
 /** The "Scope" disclosure in the ask box: series, dates and specific sermons. */
 export function scopeControls(scope: Scope, entries: readonly CatalogEntry[]): Html {
   const series = seriesList(entries);
+  const speakers = speakerList(entries);
   const picked = new Set(scope.episodes ?? []);
   return html`<details class="scope"${isAll(scope) ? "" : html` open`}>
 <summary>Scope: ${describeScope(scope, entries)}</summary>
 <div class="scope-body">
 <div><label for="f-scope-series">Series</label>
 <select id="f-scope-series" name="scope_series"><option value="">Any series</option>${series.map((name) => html`<option value="${name}"${name === scope.series ? html` selected` : ""}>${name}</option>`)}</select></div>
+${speakers.length ? html`<div><label for="f-scope-speaker">Speaker</label>
+<select id="f-scope-speaker" name="scope_speaker"><option value="">Any speaker</option>${speakers.map((name) => html`<option value="${name}"${name === scope.speaker ? html` selected` : ""}>${name}</option>`)}</select></div>` : ""}
 <div class="row"><div><label for="f-scope-from">From</label><input id="f-scope-from" name="scope_from" type="date" value="${scope.from ?? ""}"></div>
 <div><label for="f-scope-to">To</label><input id="f-scope-to" name="scope_to" type="date" value="${scope.to ?? ""}"></div></div>
 <div class="span"><label for="f-scope-episode">Only these sermons</label>
 <p class="hint">Optional. Hold Ctrl or ⌘ to pick several.</p>
-<select id="f-scope-episode" name="scope_episode" multiple>${entries.map((entry) => html`<option value="${entry.id}"${picked.has(entry.id) ? html` selected` : ""}>${entry.publishedAt?.slice(0, 10) ?? ""} · ${entry.title}</option>`)}</select></div>
+<select id="f-scope-episode" name="scope_episode" multiple>${entries.map((entry) => html`<option value="${entry.id}"${picked.has(entry.id) ? html` selected` : ""}>${entry.publishedAt?.slice(0, 10) ?? ""} · ${entry.title}${entry.speaker ? ` · ${entry.speaker}` : ""}</option>`)}</select></div>
 </div>
 </details>`;
 }

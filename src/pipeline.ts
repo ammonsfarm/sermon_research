@@ -3,6 +3,7 @@ import type { AppEnv } from "./env.ts";
 import { getKey } from "./keys.ts";
 import { EMBEDDING_MODEL, MISTRAL_TRANSCRIPTION_MODEL, ProviderError, withUserAgent } from "./providers.ts";
 import { getSetting, type LlmSettingsRecord, type Ministry } from "./settings.ts";
+import { identifySpeakers } from "./speakers.ts";
 
 export interface Segment {
   readonly text: string;
@@ -89,6 +90,15 @@ export async function runEpisode(env: AppEnv, step: PipelineStep, episodeId: str
       const result = await summarize({ llm, apiKey, ministry, title: row.title, publishedAt: row.published_at, transcript: row.text });
       await db.prepare("INSERT OR REPLACE INTO summaries (episode_id, summary, topics_json, scriptures_json, model, created_at) VALUES (?, ?, ?, ?, ?, ?)")
         .bind(episodeId, result.summary, JSON.stringify(result.topics), JSON.stringify(result.scriptures), llm.model, new Date().toISOString()).run();
+    }));
+
+    await step.do("identify speaker", SUMMARIZE, tracked(db, episodeId, "summarize", "Identifying the speaker", async () => {
+      try {
+        await identifySpeakers(env, [episodeId]);
+      } catch (error) {
+        // A missing speaker shouldn't hold up the sermon; the hourly tick tries again.
+        console.error("speaker identification failed", episodeId, error);
+      }
     }));
 
     await step.do("index", INDEX, tracked(db, episodeId, "index", "Indexing for search", async () => {
