@@ -1,23 +1,14 @@
 import { type Context, redirect, chrome } from "./context.ts";
-import { html, type Html, page } from "./html.ts";
+import { html, page } from "./html.ts";
+import { ago } from "./imports.ts";
 import { renderMarkdown } from "./markdown.ts";
-import { type OutputKind, OUTPUTS } from "./ask.ts";
-import { chat, formatTime, gate, type Passage, preamble, retrieve, sourcesList, sourcesPrompt, type StoredSource, toStored } from "./research.ts";
+import { OUTPUTS } from "./ask.ts";
+import { formatTime, gate, sourcesList, type StoredSource, useQuota } from "./research.ts";
 import { catalog, describeScope, isAll, type Scope } from "./scope.ts";
+import { type DocumentKind, startWriting } from "./writing.ts";
 
-/** Documents draw on more of the sermons than a short answer does. */
-const DOCUMENT_SOURCES = 16;
-/** Room for a long outline, plus whatever a thinking model spends first. */
-const DOCUMENT_MAX_TOKENS = 8_000;
-const DOCUMENT_TIMEOUT_MS = 120_000;
-
-type DocumentKind = Exclude<OutputKind, "answer">;
-
-const INSTRUCTIONS: Record<DocumentKind, string> = {
-  outline: "Write a sermon outline for the request: a title, the big idea in one sentence, the main scripture passage, three or four main points each with sub-points and supporting scripture, illustrations taken from the sources, and a closing application section.",
-  questions: "Write a small-group study guide for the request: a short introduction, the scripture to read first, then 8 to 12 discussion questions grouped under the headings Observation, Interpretation and Application, and a closing prayer prompt.",
-  custom: "Write the document the request asks for.",
-};
+/** How often a document's page reloads while it's being written. */
+const WRITING_REFRESH_SECONDS = 10;
 
 
 interface DocumentRow {
@@ -30,40 +21,45 @@ interface DocumentRow {
   readonly sources_json: string;
   readonly scope_json: string | null;
   readonly created_at: string;
+  readonly status: "writing" | "done" | "failed";
+  readonly detail: string | null;
+  readonly error: string | null;
+  readonly updated_at: string | null;
 }
 
-export function documentPrompt(kind: DocumentKind, ministry: Context["ministry"]): string {
-  return `${preamble(ministry)} ${INSTRUCTIONS[kind]} Use only the numbered sources, which are passages from sermon transcripts and summaries, and cite them with the source number in square brackets, like [2]. Where the sources don't cover something, say so rather than inventing it. Reply with a Markdown document only: start with a "# " title line, use "##" headings and "-" or numbered lists, and don't add a list of sources at the end, because one is added automatically.`;
+/** Removes the code fence some models wrap Markdown in. */
+export function unfence(markdown: string): string {
+  return markdown.replace(/^```(?:markdown|md)?\s*\n([\s\S]*?)\n```\s*$/u, "$1").trim();
 }
 
 /** Splits off the leading "# Title" line, which becomes the page title. */
 export function splitTitle(markdown: string, fallback: string): { title: string; body: string } {
-  const text = markdown.replace(/^```(?:markdown|md)?\s*\n([\s\S]*?)\n```\s*$/u, "$1").trim();
+  const text = unfence(markdown);
   const match = /^#\s+(.+?)\s*#*\s*(?:\n|$)/u.exec(text);
   if (!match) return { title: fallback, body: text };
   return { title: match[1]!.replace(/[*_`]/gu, "").slice(0, 200), body: text.slice(match[0].length).trim() };
 }
 
-/** Called from POST /research once the request has passed the gate and the limits. */
+/**
+ * Called from POST /research once the request has passed the gate and the
+ * limits. Saves the document as "writing" and starts the background run
+ * (see writing.ts), then shows its page, which follows the progress.
+ */
 export async function createDocument(
-  context: Context, kind: DocumentKind, request: string, scope: Scope, episodeIds: readonly string[] | null,
+  context: Context, kind: DocumentKind, request: string, scope: Scope,
   fail: (message: string, status: number) => Promise<Response>,
 ): Promise<Response> {
-  let passages: Passage[];
-  let markdown: string;
-  try {
-    passages = await retrieve(context.env, request, DOCUMENT_SOURCES, episodeIds);
-    if (passages.length === 0) return fail("No sermons have been indexed yet, so there's nothing to write from.", 200);
-    markdown = await chat(context.env, documentPrompt(kind, context.ministry), `Sources:\n\n${sourcesPrompt(passages)}\n\nRequest: ${request}`, { maxTokens: DOCUMENT_MAX_TOKENS, timeoutMs: DOCUMENT_TIMEOUT_MS });
-  } catch (error) {
-    console.error("document generation failed", error);
-    return fail("The document couldn't be written right now. Try again in a minute.", 502);
+  if (!(await context.db.prepare("SELECT 1 FROM episodes WHERE status = 'done' LIMIT 1").first())) {
+    return fail("No sermons have been indexed yet, so there's nothing to write from.", 200);
   }
-  const { title, body } = splitTitle(markdown, `${OUTPUTS[kind]}: ${request.slice(0, 80)}`);
-  const sources = toStored(passages);
   const id = crypto.randomUUID();
-  await context.db.prepare("INSERT INTO documents (id, user_id, kind, request, title, markdown, sources_json, scope_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
-    .bind(id, context.session!.user.id, kind, request, title, body, JSON.stringify(sources), JSON.stringify(scope), new Date().toISOString()).run();
+  const now = new Date().toISOString();
+  await context.db.prepare("INSERT INTO documents (id, user_id, kind, request, title, markdown, sources_json, scope_json, created_at, status, detail, updated_at) VALUES (?, ?, ?, ?, ?, '', '[]', ?, ?, 'writing', 'Starting', ?)")
+    .bind(id, context.session!.user.id, kind, request, `${OUTPUTS[kind]}: ${request.slice(0, 80)}`, JSON.stringify(scope), now, now).run();
+  if (!(await startWriting(context.env, id))) {
+    await context.db.prepare("DELETE FROM documents WHERE id = ?").bind(id).run();
+    return fail("Writing couldn't start right now. Try again in a minute.", 503);
+  }
   return redirect(`/documents/${id}`);
 }
 
@@ -83,7 +79,7 @@ function notFound(context: Context): Response {
   return page("Not found", html`<h1>Document not found</h1><p><a href="/library">Your library</a></p>`, { status: 404, ...chrome(context) });
 }
 
-export interface DocumentSummary { readonly id: string; readonly user_id: string | null; readonly kind: string; readonly title: string; readonly created_at: string; readonly author: string | null }
+export interface DocumentSummary { readonly id: string; readonly user_id: string | null; readonly kind: string; readonly title: string; readonly created_at: string; readonly status: DocumentRow["status"]; readonly author: string | null }
 
 /** The signed-in person's documents, newest first; with `everyone`, all documents (for admins). */
 export async function recentDocuments(context: Context, limit: number, everyone = false): Promise<DocumentSummary[]> {
@@ -91,7 +87,7 @@ export async function recentDocuments(context: Context, limit: number, everyone 
   if (!user) return [];
   const all = everyone && user.role === "admin";
   const { results } = await context.db.prepare(
-    `SELECT d.id, d.user_id, d.kind, d.title, d.created_at, u.name AS author FROM documents d LEFT JOIN users u ON u.id = d.user_id
+    `SELECT d.id, d.user_id, d.kind, d.title, d.created_at, d.status, u.name AS author FROM documents d LEFT JOIN users u ON u.id = d.user_id
      ${all ? "" : "WHERE d.user_id = ?"} ORDER BY d.created_at DESC LIMIT ?`,
   ).bind(...(all ? [] : [user.id]), limit).all<DocumentSummary>();
   return results;
@@ -105,12 +101,28 @@ export async function documentPage(context: Context, id: string): Promise<Respon
   if (!row) return notFound(context);
   const sources = JSON.parse(row.sources_json) as StoredSource[];
   const scope = JSON.parse(row.scope_json ?? "{}") as Scope;
-  return page(row.title, html`<p class="meta"><a href="/library">Library</a> · ${OUTPUTS[row.kind] ?? row.kind} · ${row.created_at.slice(0, 10)}</p>
+  const header = html`<p class="meta"><a href="/library">Library</a> · ${OUTPUTS[row.kind] ?? row.kind} · ${row.created_at.slice(0, 10)}</p>
 <h1>${row.title}</h1>
-<p class="scope-note">Asked for: ${row.request}${isAll(scope) ? "" : html` · Scope: <strong>${describeScope(scope, await catalog(context.db))}</strong>`}</p>
+<p class="scope-note">Asked for: ${row.request}${isAll(scope) ? "" : html` · Scope: <strong>${describeScope(scope, await catalog(context.db))}</strong>`}</p>`;
+  const remove = html`<form class="inline" method="post" action="/documents/${row.id}/delete"><button class="quiet" type="submit">Delete</button></form>`;
+  if (row.status === "writing") {
+    return page(row.title, html`${header}
+<p class="live">${row.detail ?? "Starting"} · updated ${ago(row.updated_at)}</p>
+<p class="hint">Documents are written from the full transcripts, a part at a time, so a long one can take several minutes or more. This page updates every ${WRITING_REFRESH_SECONDS} seconds. You can leave and find it in your Library.</p>
+<div class="row">${remove}</div>`, { ...chrome(context), refreshSeconds: WRITING_REFRESH_SECONDS });
+  }
+  if (row.status === "failed") {
+    return page(row.title, html`${header}
+<p class="alert">This document couldn't be written: ${row.error ?? "unknown error."}</p>
+<div class="row">
+<form class="inline" method="post" action="/documents/${row.id}/retry"><button type="submit">Try again</button></form>
+${remove}
+</div>`, chrome(context));
+  }
+  return page(row.title, html`${header}
 <div class="row">
 <a class="button" href="/documents/${row.id}.md" download>Download .md</a>
-<form class="inline" method="post" action="/documents/${row.id}/delete"><button class="quiet" type="submit">Delete</button></form>
+${remove}
 </div>
 <article class="document">${renderMarkdown(row.markdown, sources.length)}</article>
 ${sourcesList(sources)}
@@ -123,6 +135,7 @@ export async function documentDownload(context: Context, id: string): Promise<Re
   if (blocked) return blocked;
   const row = await findDocument(context, id);
   if (!row) return notFound(context);
+  if (row.status !== "done") return redirect(`/documents/${row.id}`);
   const sources = JSON.parse(row.sources_json) as StoredSource[];
   const origin = context.url.origin;
   const list = sources.map((source) => {
@@ -138,6 +151,22 @@ export async function documentDownload(context: Context, id: string): Promise<Re
       "X-Content-Type-Options": "nosniff",
     },
   });
+}
+
+/** POST /documents/:id/retry: writes a failed document again, from the start. */
+export async function retryDocument(context: Context, id: string): Promise<Response> {
+  const blocked = (await gate(context)) ?? signedInGate(context);
+  if (blocked) return blocked;
+  const row = await findDocument(context, id);
+  if (!row) return notFound(context);
+  if (row.status !== "failed") return redirect(`/documents/${row.id}`);
+  const limited = await useQuota(context);
+  if (limited) return page("Try again later", html`<h1>Try again later</h1><p class="alert">${limited}</p><p><a href="/documents/${row.id}">Back to the document</a></p>`, { status: 429, ...chrome(context) });
+  await context.db.prepare("UPDATE documents SET status = 'writing', detail = 'Starting', error = NULL, updated_at = ? WHERE id = ?").bind(new Date().toISOString(), row.id).run();
+  if (!(await startWriting(context.env, row.id, `${row.id}-${Date.now()}`))) {
+    await context.db.prepare("UPDATE documents SET status = 'failed', detail = NULL, error = 'Writing couldn''t start. Try again in a minute.' WHERE id = ?").bind(row.id).run();
+  }
+  return redirect(`/documents/${row.id}`);
 }
 
 /** POST /documents/:id/delete */

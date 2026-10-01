@@ -23,7 +23,7 @@ import { APP_SCRIPT, STYLESHEET } from "./assets.ts";
 import { page, SECURITY_HEADERS } from "./html.ts";
 import { serveAudio } from "./audio.ts";
 import { ask, conversation, deleteConversation, home, library, researchRedirect } from "./ask.ts";
-import { deleteDocument, documentDownload, documentPage } from "./documents.ts";
+import { deleteDocument, documentDownload, documentPage, retryDocument } from "./documents.ts";
 import { sermonPage, sermonsPage, transcriptDownload } from "./sermons.ts";
 import { checkNow, episodesDashboard, hourlyTick, importStep, queueFromDashboard, saveConcurrency, scheduleSettings } from "./imports.ts";
 import { keyInfo } from "./keys.ts";
@@ -90,7 +90,7 @@ export default {
   },
 } satisfies ExportedHandler<AppEnv>;
 
-export { EpisodeWorkflow } from "./workflow.ts";
+export { DocumentWorkflow, EpisodeWorkflow } from "./workflow.ts";
 
 async function route(context: Context): Promise<Response> {
   const { request, url } = context;
@@ -141,10 +141,11 @@ async function route(context: Context): Promise<Response> {
       const thread = /^\/ask\/([0-9a-f-]{36})(\/delete)?$/u.exec(url.pathname);
       if (thread && request.method === "GET" && !thread[2]) return conversation(context, thread[1]!);
       if (thread && request.method === "POST" && thread[2]) return deleteConversation(context, thread[1]!);
-      const document = /^\/documents\/([0-9a-f-]{36})(\.md|\/delete)?$/u.exec(url.pathname);
+      const document = /^\/documents\/([0-9a-f-]{36})(\.md|\/delete|\/retry)?$/u.exec(url.pathname);
       if (document && request.method === "GET" && !document[2]) return documentPage(context, document[1]!);
       if (document && request.method === "GET" && document[2] === ".md") return documentDownload(context, document[1]!);
       if (document && request.method === "POST" && document[2] === "/delete") return deleteDocument(context, document[1]!);
+      if (document && request.method === "POST" && document[2] === "/retry") return retryDocument(context, document[1]!);
       const audio = /^\/audio\/([0-9a-f-]{36})$/u.exec(url.pathname);
       if (audio && (request.method === "GET" || request.method === "HEAD")) return serveAudio(context, audio[1]!, () => canViewResearch(context));
       const match = /^\/(setup|admin)\/([a-z]+)$/u.exec(url.pathname);

@@ -1,6 +1,6 @@
 import { hasAdmin } from "./auth.ts";
 import { chrome, type Context, redirect } from "./context.ts";
-import { createDocument, recentDocuments } from "./documents.ts";
+import { createDocument, type DocumentSummary, recentDocuments } from "./documents.ts";
 import { html, type Html, page } from "./html.ts";
 import {
   answer, canViewResearch, type Exchange, gate, type Passage, QUESTION_MAX, renderAnswer, retrieve, sourcesList, type StoredSource, toStored, useQuota,
@@ -22,6 +22,10 @@ export function parseOutput(value: unknown): OutputKind {
 }
 
 const BUSY = "Reading the sermons and writing… this can take up to a minute.";
+
+function documentStatus(doc: DocumentSummary): string {
+  return doc.status === "writing" ? " · Writing…" : doc.status === "failed" ? " · Couldn't be written" : "";
+}
 
 interface AskBoxOptions {
   readonly question?: string;
@@ -116,7 +120,7 @@ ${askBox(context, { question: options.question ?? "", kind: options.kind ?? "ans
 ${options.result ?? ""}
 ${context.session && !options.result ? html`<div class="two-col">
 <section><h2>Recent conversations</h2>${threads.length ? threadList(threads, entries) : html`<p class="empty">Your questions and follow-ups are saved here.</p>`}</section>
-<section><h2>Recent documents</h2>${documents.length ? html`<ul class="list-plain">${documents.map((doc) => html`<li><a href="/documents/${doc.id}">${doc.title}</a><br><span class="hint">${OUTPUTS[doc.kind as OutputKind] ?? doc.kind} · ${doc.created_at.slice(0, 10)}</span></li>`)}</ul>` : html`<p class="empty">Outlines and study guides you create appear here.</p>`}</section>
+<section><h2>Recent documents</h2>${documents.length ? html`<ul class="list-plain">${documents.map((doc) => html`<li><a href="/documents/${doc.id}">${doc.title}</a><br><span class="hint">${OUTPUTS[doc.kind as OutputKind] ?? doc.kind} · ${doc.created_at.slice(0, 10)}${documentStatus(doc)}</span></li>`)}</ul>` : html`<p class="empty">Outlines and study guides you create appear here.</p>`}</section>
 </div>` : ""}
 ${!options.result && latest.length ? html`<section><h2>Latest sermons</h2>
 <ul class="cards">${latest.map((entry) => html`<li class="card"><h3><a href="/episodes/${entry.id}">${titleWithoutSeries(entry.title)}</a></h3>
@@ -165,7 +169,7 @@ export async function ask(context: Context): Promise<Response> {
   const limited = await useQuota(context);
   if (limited) return fail(limited, 429);
   if (kind !== "answer") {
-    return createDocument(context, kind, question, scope, ids, (message, status) => fail(message, status));
+    return createDocument(context, kind, question, scope, (message, status) => fail(message, status));
   }
 
   let passages: Passage[];
@@ -248,7 +252,7 @@ export async function library(context: Context): Promise<Response> {
 <p class="lead">Your saved conversations and documents.${isAdmin ? " As an admin you also see everyone's documents." : ""} Start something new from <a href="/">Ask</a>.</p>
 <div class="two-col">
 <section><h2>Conversations</h2>${threads.length ? threadList(threads, entries) : html`<p class="empty">No conversations yet.</p>`}</section>
-<section><h2>Documents</h2>${documents.length ? html`<ul class="list-plain">${documents.map((doc) => html`<li><a href="/documents/${doc.id}">${doc.title}</a> <a class="hint" href="/documents/${doc.id}.md" download>.md</a><br>
-<span class="hint">${OUTPUTS[doc.kind as OutputKind] ?? doc.kind} · ${doc.created_at.slice(0, 10)}${doc.author && doc.user_id !== context.session!.user.id ? ` · ${doc.author}` : ""}</span></li>`)}</ul>` : html`<p class="empty">No documents yet.</p>`}</section>
+<section><h2>Documents</h2>${documents.length ? html`<ul class="list-plain">${documents.map((doc) => html`<li><a href="/documents/${doc.id}">${doc.title}</a>${doc.status === "done" ? html` <a class="hint" href="/documents/${doc.id}.md" download>.md</a>` : ""}<br>
+<span class="hint">${OUTPUTS[doc.kind as OutputKind] ?? doc.kind} · ${doc.created_at.slice(0, 10)}${doc.author && doc.user_id !== context.session!.user.id ? ` · ${doc.author}` : ""}${documentStatus(doc)}</span></li>`)}</ul>` : html`<p class="empty">No documents yet.</p>`}</section>
 </div>`, chrome(context));
 }

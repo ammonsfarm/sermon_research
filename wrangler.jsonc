@@ -35,12 +35,18 @@
       "bucket_name": "sermon-research-audio"
     }
   ],
-  // One run per episode: transcribe, summarize, index. Each step retries on its own.
+  // One run per episode: transcribe, summarize, index. One run per document:
+  // plan, then write each part from full transcripts. Each step retries on its own.
   "workflows": [
     {
       "name": "sermon-research-episode",
       "binding": "EPISODE_WORKFLOW",
       "class_name": "EpisodeWorkflow"
+    },
+    {
+      "name": "sermon-research-document",
+      "binding": "DOCUMENT_WORKFLOW",
+      "class_name": "DocumentWorkflow"
     }
   ],
   // Hourly tick. The Worker reads the church's schedule from the database and

@@ -6,6 +6,7 @@ import { html, page, type Html } from "./html.ts";
 import { DEFAULT_SCHEDULE, describeSchedule, isDue, isValidTimeZone, localSlot, parseSchedule, type Schedule, WEEKDAYS } from "./schedule.ts";
 import { getSetting, getSetupStep, type PodcastSettings, putSetting } from "./settings.ts";
 import type { AppEnv } from "./env.ts";
+import { failStaleDocuments } from "./writing.ts";
 
 /** Mistral's list price for Voxtral Mini transcription when this was written; check mistral.ai/pricing. */
 const TRANSCRIPTION_USD_PER_MINUTE = 0.001;
@@ -281,6 +282,7 @@ ${error ? html`<p class="alert">${error}</p>` : ""}
 export async function hourlyTick(env: AppEnv, at: Date): Promise<void> {
   if ((await getSetupStep(env.DB)) !== "complete") return;
   await putSetting(env.DB, "last_tick", at.toISOString());
+  await failStaleDocuments(env.DB, at.getTime());
   const schedule = await getSetting<Schedule>(env.DB, "schedule");
   const lastSlot = await getSetting<string>(env.DB, "last_scheduled_slot");
   if (schedule && isDue(schedule, at, lastSlot)) {

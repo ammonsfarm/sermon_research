@@ -4,6 +4,7 @@ import { dispatchQueued } from "./episodes.ts";
 import type { AppEnv } from "./env.ts";
 import { runEpisode } from "./pipeline.ts";
 import { ensureSchema } from "./schema.ts";
+import { writeDocument } from "./writing.ts";
 
 export interface EpisodeParams {
   readonly episodeId: string;
@@ -17,5 +18,17 @@ export class EpisodeWorkflow extends WorkflowEntrypoint<AppEnv, EpisodeParams> {
     await step.do("start next episode", async () => {
       await dispatchQueued(this.env);
     });
+  }
+}
+
+export interface DocumentParams {
+  readonly documentId: string;
+}
+
+/** One run per document attempt: plan it, write each part, join them. */
+export class DocumentWorkflow extends WorkflowEntrypoint<AppEnv, DocumentParams> {
+  override async run(event: WorkflowEvent<DocumentParams>, step: WorkflowStep): Promise<void> {
+    await ensureSchema(this.env.DB);
+    await writeDocument(this.env, step, event.payload.documentId);
   }
 }

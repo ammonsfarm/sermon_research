@@ -159,11 +159,11 @@ ${askBox(context, { scope, entries, label: "Ask about this sermon", fixedScope: 
 </section>
 <section role="tabpanel" id="panel-create" aria-labelledby="tab-create"><h2 class="panel-heading">Create from this sermon</h2>
 ${context.session ? html`<p class="hint">Written in Markdown from this sermon, saved to your Library.</p>
-${(["outline", "questions"] as const).map((kind) => html`<form method="post" action="/research" data-busy="Writing… this can take up to a minute." class="create-one">
+${(["outline", "questions"] as const).map((kind) => html`<form method="post" action="/research" data-busy="Starting…" class="create-one">
 <input type="hidden" name="kind" value="${kind}"><input type="hidden" name="scope_episode" value="${episode.id}">
 <input type="hidden" name="question" value="${`${OUTPUTS[kind]} for “${episode.title}”`}">
 <button class="quiet" type="submit">${OUTPUTS[kind]}</button></form>`)}
-<form method="post" action="/research" data-busy="Writing… this can take up to a minute.">
+<form method="post" action="/research" data-busy="Starting…">
 <input type="hidden" name="kind" value="custom"><input type="hidden" name="scope_episode" value="${episode.id}">
 <label for="f-custom">Something else</label>
 <textarea id="f-custom" name="question" rows="3" maxlength="500" required placeholder="For example: a one-page summary for the church newsletter"></textarea>

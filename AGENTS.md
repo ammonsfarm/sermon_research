@@ -23,13 +23,14 @@ before anything in the "Ask first" list below.
 | `src/audio.ts` | Copies episode audio into the `AUDIO` R2 bucket, signs short-lived links for the transcription service, serves `/audio/:id` with ranges |
 | `src/episodes.ts` | Episode rows from the feed, the queue, and starting workflow runs (up to the admin's "episodes at once" setting) |
 | `src/pipeline.ts` | The per-episode steps: transcribe (Mistral), summarize (answers AI), chunk, embed and write to Vectorize |
-| `src/workflow.ts` | The Cloudflare Workflow class that runs `pipeline.ts` for one episode |
+| `src/workflow.ts` | The Cloudflare Workflow classes: one runs `pipeline.ts` for an episode, the other runs `writing.ts` for a document |
 | `src/schedule.ts` | Daily/weekly schedule in the church's time zone |
 | `src/ask.ts` | Ask home page, the ask box, conversations (the `turns` table, with follow-ups) and the Library |
 | `src/scope.ts` | Question scope: series (taken from the " - Series" end of a title), date range and specific sermons |
 | `src/sermons.ts` | Sermons grid with search and filters, and the sermon page (player, read-along, Summary / Ask / Create panel) |
 | `src/research.ts` | Retrieval (Vectorize, filtered to a scope), cited answers, sources, question limits and research access settings |
-| `src/documents.ts`, `src/markdown.ts` | Markdown documents written from the sermons (outline, study questions, custom), their pages and `.md` download; a small Markdown renderer that escapes everything it doesn't handle |
+| `src/documents.ts`, `src/markdown.ts` | Markdown documents written from the sermons (outline, study questions, custom): starting one, its page (live progress while it's written, Try again if it failed) and `.md` download; a small Markdown renderer that escapes everything it doesn't handle |
+| `src/writing.ts` | How a document is written, in the background: the answers AI picks the sermons from a catalog (titles, dates, scripture, topics) and splits long requests into parts, then each part is written from the full transcripts of its sermons, and the parts are joined with their citations renumbered |
 | `src/members.ts` | Member invites, invite acceptance, removing members |
 | `src/usage.ts` | Hourly and daily counters for questions and searches |
 | `src/context.ts` | Request context and shared redirects |
@@ -38,7 +39,7 @@ before anything in the "Ask first" list below.
 | `src/assets.ts` | The only CSS (`/assets/app.css`) and JavaScript (`/assets/app.js`): busy state on forms, tabs, the read-along. Pages work without the script |
 | `public/fonts/` | Self-hosted Inter and Source Serif 4 (SIL Open Font License), served as static assets before the Worker runs |
 | `test/` | `node:test` suites; `test/d1-sqlite.ts` stands in for D1 |
-| `wrangler.jsonc` | Worker name, D1, Vectorize, Workflow and the hourly cron |
+| `wrangler.jsonc` | Worker name, D1, Vectorize, the two Workflows and the hourly cron |
 
 Commands: `npm run verify` (typecheck and tests), `npm run dev` (local),
 `npx wrangler deploy` (production), `npm run cf-typegen` (after config changes).
@@ -90,10 +91,24 @@ first request after each deploy.
   `src/research.ts`.
 - **Answers are poor or say the sources don't cover it:** check that episodes
   show Done in Admin → Episodes. A stronger answers-AI model helps most.
-  `SOURCES` in `src/research.ts` sets how many passages each answer sees;
-  `DOCUMENT_SOURCES` in `src/documents.ts` does the same for documents.
+  `SOURCES` in `src/research.ts` sets how many passages each answer sees.
+  Documents read whole transcripts instead (see the next item).
+- **How documents are written:** in a Workflow run
+  (`sermon-research-document`), so the person can leave the page. First the
+  answers AI gets a catalog of the sermons in scope (title, date, scripture,
+  topics) and chooses the ones the request needs. A long request (a book, a
+  course) is split into up to `MAX_PARTS` parts with a word count each, and
+  each part is its own AI call with the full transcripts of its sermons, the
+  whole plan and the end of the part before. Outlines and study guides of
+  chosen sermons (the sermon page's Create buttons) skip the planning call.
+  A part's sources are capped at `PART_SOURCE_CHARS` (about 60k tokens);
+  past that it keeps every summary plus the closest passages. Lower it for
+  a model with a small context window. A long book is many calls, so it
+  takes minutes and costs more than an answer, but it counts as one
+  question against the limits. A run that reports nothing for 2 hours is
+  marked failed by the hourly tick, and the document page offers Try again.
 - **Add or change a document type:** edit `OUTPUTS` in `src/ask.ts` (the
-  menu) and `INSTRUCTIONS` in `src/documents.ts` (what the AI is told).
+  menu) and `INSTRUCTIONS` in `src/writing.ts` (what the AI is told).
   Documents count against the same question limits and need a signed-in person.
 - **Scoped questions:** a scope of 40 sermons or fewer is filtered inside
   Vectorize (`episodeId` metadata index); larger scopes fetch more matches and
