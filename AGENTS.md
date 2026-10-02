@@ -27,6 +27,7 @@ before anything in the "Ask first" list below.
 | `src/schedule.ts` | Daily/weekly schedule in the church's time zone |
 | `src/ask.ts` | Ask home page, the ask box, conversations (the `turns` table, with follow-ups) and the Library |
 | `src/scope.ts` | Question scope: series (taken from the " - Series" end of a title), speaker, date range and specific sermons |
+| `src/scriptures.ts` | Each sermon's main passage (`summaries.main_scripture`): the hourly catch-up for sermons summarized before it was kept, and reference cleanup |
 | `src/speakers.ts` | Who preached each sermon: the answers AI reads the feed's description and author and the start of the transcript (pipeline step for new sermons, hourly for older ones); name cleanup; spotting a speaker named in a question |
 | `src/sermons.ts` | Sermons grid with search and filters, and the sermon page (player, read-along, Summary / Ask / Create panel) |
 | `src/research.ts` | Retrieval (Vectorize, filtered to a scope), cited answers, sources, question limits and research access settings |
@@ -123,6 +124,14 @@ first request after each deploy.
   A question that names exactly one speaker ("Pastor Phil's sermons",
   "Friesen") is scoped to their sermons automatically; first names count
   only after a title or as a possessive, and Bible book names never do.
+- **Main texts:** the summary step asks the answers AI for the passage a
+  sermon preaches from (`summaries.main_scripture`) as well as every
+  reference it mentions. Sermons summarized before that are caught up by
+  the hourly tick or Admin → Episodes → "Choose now", which reads the start
+  of each transcript, where the text is usually announced. An empty string
+  means the AI found no single main passage (a topical sermon); null means
+  it hasn't been checked. To check everything again:
+  `npx wrangler d1 execute sermon-research --remote --command "UPDATE summaries SET main_scripture = NULL"`.
 - **Scoped questions:** a scope of 40 sermons or fewer is filtered inside
   Vectorize (`episodeId` metadata index); larger scopes fetch more matches and
   filter afterwards. Follow-ups keep the conversation's scope and send the last

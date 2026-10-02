@@ -157,6 +157,21 @@ export function sourcesPrompt(passages: readonly Passage[]): string {
     `[${passage.n}] "${passage.title}" (${[passage.publishedAt?.slice(0, 10) ?? "undated", passage.speaker].filter(Boolean).join(", ")})${passage.kind === "summary" ? ", summary" : passage.start !== null ? `, at ${formatTime(passage.start)}` : ""}:\n${passage.text}`).join("\n\n");
 }
 
+/**
+ * Reads a reply mapping item numbers to values, like {"1": "a", "2": null},
+ * into `count` values in order, each passed through `read`. Throws when the
+ * reply isn't JSON; `what` names the items in that message.
+ */
+export function parseNumbered<T>(content: string, count: number, read: (value: unknown) => T, what: string): T[] {
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(content.slice(content.indexOf("{"), content.lastIndexOf("}") + 1)) as Record<string, unknown>;
+  } catch {
+    throw new ProviderError(`The answers AI didn't return the ${what} as JSON.`);
+  }
+  return Array.from({ length: count }, (_unused, index) => read(parsed[String(index + 1)]));
+}
+
 /** One chat completion from the configured answers AI. */
 export async function chat(env: AppEnv, system: string, user: string, options: { maxTokens: number; timeoutMs: number }): Promise<string> {
   const llm = await getSetting<LlmSettingsRecord>(env.DB, "llm");

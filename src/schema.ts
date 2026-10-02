@@ -183,6 +183,13 @@ export const MIGRATIONS: readonly { readonly version: number; readonly statement
       `ALTER TABLE episodes ADD COLUMN speaker_source TEXT`,
     ],
   },
+  {
+    version: 10,
+    statements: [
+      // The passage the sermon preaches from. Null until chosen; empty when the AI found no single main passage.
+      `ALTER TABLE summaries ADD COLUMN main_scripture TEXT`,
+    ],
+  },
 ];
 
 let applied: Promise<void> | undefined;

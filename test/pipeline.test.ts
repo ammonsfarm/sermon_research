@@ -247,19 +247,21 @@ test("the schedule can be changed from admin", async () => {
 });
 
 test("summaries are parsed leniently and transcripts chunk with time ranges", () => {
-  assert.deepEqual(parseSummary("Sure! {\"summary\": \" Hi \", \"topics\": [\"a\", 3, \"\"], \"scriptures\": \"no\"} Thanks"), { summary: "Hi", topics: ["a"], scriptures: [] });
+  assert.deepEqual(parseSummary("Sure! {\"summary\": \" Hi \", \"topics\": [\"a\", 3, \"\"], \"scriptures\": \"no\"} Thanks"), { summary: "Hi", mainScripture: null, topics: ["a"], scriptures: [] });
+  assert.equal(parseSummary("{\"summary\": \"Hi\", \"mainScripture\": \" Matthew  5:21—26 \"}").mainScripture, "Matthew 5:21-26");
+  assert.equal(parseSummary("{\"summary\": \"Hi\", \"mainScripture\": \"None\"}").mainScripture, null);
   assert.throws(() => parseSummary("no json here"), /didn't return the summary as JSON/);
   assert.throws(() => parseSummary("{\"summary\": \"\"}"), /empty summary/);
 
   const long = "x".repeat(700);
   const chunks = buildChunks(
     [{ text: long, start: 0, end: 60 }, { text: long, start: 60, end: 120 }, { text: "end", start: 120, end: 125 }],
-    { summary: "S", topics: ["t"], scriptures: [] },
+    { summary: "S", mainScripture: "John 15:1-11", topics: ["t"], scriptures: [] },
   );
   assert.deepEqual(chunks.map((chunk) => [chunk.seq, chunk.kind, chunk.start, chunk.end]), [
     [0, "summary", null, null], [1, "transcript", 0, 60], [2, "transcript", 60, 125],
   ]);
-  assert.equal(chunks[0]!.text, "S\nTopics: t");
+  assert.equal(chunks[0]!.text, "S\nMain text: John 15:1-11\nTopics: t", "the main text is indexed for search with the summary");
 });
 
 test("a summary cut off by the length limit gets a clear error", async () => {

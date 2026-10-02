@@ -52,7 +52,7 @@ function planPrompt(kind: DocumentKind, ministry: Ministry | null): string {
   const shape = kind === "custom"
     ? `If the request is for something long, like a book, a course or a series of lessons, split it into parts in reading order (for example one chapter per sermon or passage, plus an introduction or conclusion if the request suggests one), using at most ${MAX_PARTS} parts. Otherwise plan a single part.`
     : `The request is for a ${OUTPUTS[kind].toLowerCase()}, so plan a single part.`;
-  return `${preamble(ministry)} You plan documents that will be written from the full transcripts of these sermons. You get a numbered list of sermons with their dates, speakers, scripture and topics, then a request. Choose every sermon the request draws on, and only those. ${shape} For each part give a heading, a one or two sentence brief, the numbers of the sermons it draws on (a part with none, like an introduction, works from the summaries of all the chosen sermons), and a length in words: the request's length if it gives one (10 minutes of reading is about 2,300 words), otherwise what suits the part. Reply with only a JSON object: {"title": "the document's title", "parts": [{"heading": "...", "brief": "...", "sermons": [1, 2], "words": 1500}]}.`;
+  return `${preamble(ministry)} You plan documents that will be written from the full transcripts of these sermons. You get a numbered list of sermons with their dates, speakers, main texts, other scripture and topics, then a request. Choose every sermon the request draws on, and only those. ${shape} For each part give a heading, a one or two sentence brief, the numbers of the sermons it draws on (a part with none, like an introduction, works from the summaries of all the chosen sermons), and a length in words: the request's length if it gives one (10 minutes of reading is about 2,300 words), otherwise what suits the part. Reply with only a JSON object: {"title": "the document's title", "parts": [{"heading": "...", "brief": "...", "sermons": [1, 2], "words": 1500}]}.`;
 }
 
 // ---------------------------------------------------------------- planning
@@ -78,6 +78,7 @@ interface Candidate {
   readonly title: string;
   readonly publishedAt: string | null;
   readonly speaker: string | null;
+  readonly mainScripture: string | null;
   readonly scriptures: readonly string[];
   readonly topics: readonly string[];
 }
@@ -85,11 +86,11 @@ interface Candidate {
 /** Indexed sermons the document's scope allows, oldest first. */
 async function candidates(env: AppEnv, scope: Scope, request: string): Promise<Candidate[]> {
   const { results } = await env.DB.prepare(
-    `SELECT e.id, e.title, e.published_at, e.speaker, s.scriptures_json, s.topics_json FROM episodes e JOIN summaries s ON s.episode_id = e.id
+    `SELECT e.id, e.title, e.published_at, e.speaker, s.main_scripture, s.scriptures_json, s.topics_json FROM episodes e JOIN summaries s ON s.episode_id = e.id
      WHERE e.status = 'done' ORDER BY e.published_at, e.id`,
-  ).all<{ id: string; title: string; published_at: string | null; speaker: string | null; scriptures_json: string; topics_json: string }>();
+  ).all<{ id: string; title: string; published_at: string | null; speaker: string | null; main_scripture: string | null; scriptures_json: string; topics_json: string }>();
   let rows: Candidate[] = results.map((row) => ({
-    id: row.id, title: row.title, publishedAt: row.published_at, speaker: row.speaker,
+    id: row.id, title: row.title, publishedAt: row.published_at, speaker: row.speaker, mainScripture: row.main_scripture || null,
     scriptures: JSON.parse(row.scriptures_json) as string[], topics: JSON.parse(row.topics_json) as string[],
   }));
   const allowed = scopeIds(scope, rows.map((row) => ({ id: row.id, title: row.title, publishedAt: row.publishedAt, series: seriesOf(row.title), speaker: row.speaker })));
@@ -113,7 +114,7 @@ export async function planDocument(env: AppEnv, ministry: Ministry | null, kind:
     const ids = sermons.map((sermon) => sermon.id);
     return { title: "", episodeIds: ids, parts: [{ heading: "", brief: "", episodeIds: ids, words: 0 }] };
   }
-  const list = sermons.map((sermon, index) => `${index + 1}. "${sermon.title}" (${sermon.publishedAt?.slice(0, 10) ?? "undated"})${sermon.speaker ? `. Speaker: ${sermon.speaker}` : ""}`
+  const list = sermons.map((sermon, index) => `${index + 1}. "${sermon.title}" (${sermon.publishedAt?.slice(0, 10) ?? "undated"})${sermon.speaker ? `. Speaker: ${sermon.speaker}` : ""}${sermon.mainScripture ? `. Main text: ${sermon.mainScripture}` : ""}`
     + `${sermon.scriptures.length ? `. Scripture: ${sermon.scriptures.join(", ")}` : ""}${sermon.topics.length ? `. Topics: ${sermon.topics.join(", ")}` : ""}`).join("\n");
   const reply = await chat(env, planPrompt(kind, ministry), `Sermons:\n${list}\n\nRequest: ${request}`, { maxTokens: PLAN_MAX_TOKENS, timeoutMs: PLAN_TIMEOUT_MS });
   return parsePlan(reply, sermons);

@@ -3,6 +3,7 @@ import type { AppEnv } from "./env.ts";
 import { getKey } from "./keys.ts";
 import { EMBEDDING_MODEL, MISTRAL_TRANSCRIPTION_MODEL, ProviderError, withUserAgent } from "./providers.ts";
 import { getSetting, type LlmSettingsRecord, type Ministry } from "./settings.ts";
+import { normalizeReference } from "./scriptures.ts";
 import { identifySpeakers } from "./speakers.ts";
 
 export interface Segment {
@@ -21,6 +22,8 @@ export interface Chunk {
 
 export interface SermonSummary {
   readonly summary: string;
+  /** The passage the sermon preaches from, or null for a topical sermon. */
+  readonly mainScripture: string | null;
   readonly topics: readonly string[];
   readonly scriptures: readonly string[];
 }
@@ -88,8 +91,9 @@ export async function runEpisode(env: AppEnv, step: PipelineStep, episodeId: str
       if (!row) throw new ProviderError("The transcript is missing.");
       const apiKey = await requireKey(env, "llm");
       const result = await summarize({ llm, apiKey, ministry, title: row.title, publishedAt: row.published_at, transcript: row.text });
-      await db.prepare("INSERT OR REPLACE INTO summaries (episode_id, summary, topics_json, scriptures_json, model, created_at) VALUES (?, ?, ?, ?, ?, ?)")
-        .bind(episodeId, result.summary, JSON.stringify(result.topics), JSON.stringify(result.scriptures), llm.model, new Date().toISOString()).run();
+      // A null main passage is left for the hourly catch-up to look at again, which records an empty one if there truly isn't one.
+      await db.prepare("INSERT OR REPLACE INTO summaries (episode_id, summary, topics_json, scriptures_json, model, created_at, main_scripture) VALUES (?, ?, ?, ?, ?, ?, ?)")
+        .bind(episodeId, result.summary, JSON.stringify(result.topics), JSON.stringify(result.scriptures), llm.model, new Date().toISOString(), result.mainScripture).run();
     }));
 
     await step.do("identify speaker", SUMMARIZE, tracked(db, episodeId, "summarize", "Identifying the speaker", async () => {
@@ -104,12 +108,12 @@ export async function runEpisode(env: AppEnv, step: PipelineStep, episodeId: str
     await step.do("index", INDEX, tracked(db, episodeId, "index", "Indexing for search", async () => {
       const [transcript, summary] = await Promise.all([
         db.prepare("SELECT segments_json FROM transcripts WHERE episode_id = ?").bind(episodeId).first<{ segments_json: string }>(),
-        db.prepare("SELECT summary, topics_json, scriptures_json FROM summaries WHERE episode_id = ?").bind(episodeId).first<{ summary: string; topics_json: string; scriptures_json: string }>(),
+        db.prepare("SELECT summary, main_scripture, topics_json, scriptures_json FROM summaries WHERE episode_id = ?").bind(episodeId).first<{ summary: string; main_scripture: string | null; topics_json: string; scriptures_json: string }>(),
       ]);
       if (!transcript || !summary) throw new ProviderError("The transcript or summary is missing.");
       const chunks = buildChunks(
         JSON.parse(transcript.segments_json) as Segment[],
-        { summary: summary.summary, topics: JSON.parse(summary.topics_json), scriptures: JSON.parse(summary.scriptures_json) },
+        { summary: summary.summary, mainScripture: summary.main_scripture || null, topics: JSON.parse(summary.topics_json), scriptures: JSON.parse(summary.scriptures_json) },
       );
       const vectors = await embed(chunks.map((chunk) => chunk.text), await requireKey(env, "embeddings"));
       // Replace this episode's chunks wholesale so a re-run never leaves stale ones behind.
@@ -212,7 +216,7 @@ export async function summarize(input: {
 }): Promise<SermonSummary> {
   const speakers = input.ministry?.speakerNames.length ? ` Speakers include ${input.ministry.speakerNames.join(", ")}.` : "";
   const church = input.ministry?.churchName ?? "a church";
-  const system = `You summarize sermons from ${church}.${speakers} Use only what the transcript says. Reply with only a JSON object: {"summary": "2 to 4 short paragraphs", "topics": ["3 to 8 short topics"], "scriptures": ["Bible references discussed, like John 3:16"]}.`;
+  const system = `You summarize sermons from ${church}.${speakers} Use only what the transcript says. Reply with only a JSON object: {"summary": "2 to 4 short paragraphs", "mainScripture": "the passage the sermon preaches from, as one reference like Matthew 5:21-26, or null for a topical sermon without one", "topics": ["3 to 8 short topics"], "scriptures": ["every Bible reference discussed, like John 3:16, with the main passage first"]}. The main passage is usually announced or read near the start ("turn with me to Matthew 5, verses 21 through 26"); a verse quoted in passing isn't it.`;
   const transcript = input.transcript.length > SUMMARY_INPUT_CHARS ? `${input.transcript.slice(0, SUMMARY_INPUT_CHARS)} [transcript truncated]` : input.transcript;
   const result = await post(`${input.llm.baseUrl}/chat/completions`, {
     headers: { Authorization: `Bearer ${input.apiKey}`, "Content-Type": "application/json" },
@@ -246,12 +250,13 @@ export function parseSummary(content: unknown): SermonSummary {
   }
   const strings = (value: unknown) => Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.trim() !== "").map((item) => item.trim()).slice(0, 20) : [];
   if (typeof parsed.summary !== "string" || !parsed.summary.trim()) throw new ProviderError("The answers AI returned an empty summary.");
-  return { summary: parsed.summary.trim(), topics: strings(parsed.topics), scriptures: strings(parsed.scriptures) };
+  return { summary: parsed.summary.trim(), mainScripture: normalizeReference(parsed.mainScripture), topics: strings(parsed.topics), scriptures: strings(parsed.scriptures) };
 }
 
 /** One summary chunk, then transcript segments packed into ~1,200-character chunks with their time range. */
 export function buildChunks(segments: readonly Segment[], summary: SermonSummary): Chunk[] {
   const lines = [summary.summary];
+  if (summary.mainScripture) lines.push(`Main text: ${summary.mainScripture}`);
   if (summary.topics.length) lines.push(`Topics: ${summary.topics.join(", ")}`);
   if (summary.scriptures.length) lines.push(`Scripture: ${summary.scriptures.join(", ")}`);
   const chunks: Chunk[] = [{ seq: 0, kind: "summary", text: lines.join("\n"), start: null, end: null }];

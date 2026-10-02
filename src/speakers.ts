@@ -1,8 +1,7 @@
 import type { AppEnv } from "./env.ts";
 import { fetchFeed } from "./feed.ts";
 import { recordFeed } from "./episodes.ts";
-import { ProviderError } from "./providers.ts";
-import { chat } from "./research.ts";
+import { chat, parseNumbered } from "./research.ts";
 import { getSetting, type Ministry, type PodcastSettings, putSetting } from "./settings.ts";
 
 /** Episodes sent to the answers AI in one request. */
@@ -83,13 +82,7 @@ function prompt(ministry: Ministry | null): string {
 
 /** Reads the answers AI's reply: episode number to name or null. */
 export function parseSpeakers(content: string, count: number, known: readonly string[]): (string | null)[] {
-  let parsed: Record<string, unknown>;
-  try {
-    parsed = JSON.parse(content.slice(content.indexOf("{"), content.lastIndexOf("}") + 1)) as Record<string, unknown>;
-  } catch {
-    throw new ProviderError("The answers AI didn't return the speakers as JSON.");
-  }
-  return Array.from({ length: count }, (_unused, index) => normalizeSpeaker(parsed[String(index + 1)], known));
+  return parseNumbered(content, count, (value) => normalizeSpeaker(value, known), "speakers");
 }
 
 /**

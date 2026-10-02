@@ -90,7 +90,7 @@ test("episode search matches keywords, then related meaning", async () => {
     assert.match(all, /<h1>Sermons<\/h1>/);
     assert.match(all, /Faith &amp; Works/);
     assert.match(all, /Grace Alone/);
-    assert.match(all, /<li class="chip">grace<\/li><li class="chip">Ephesians 2:8<\/li>/, "cards show topics and scripture");
+    assert.match(all, /<li class="chip">grace<\/li><li class="chip">Ephesians 2:1-10<\/li>/, "cards show topics and the main text");
     assert.match(all, /<a href="\/episodes" aria-current="page">Sermons<\/a>/);
 
     const byTitle = await (await site.app.request("/episodes?q=Alone", { cookie: site.cookie })).text();
@@ -121,7 +121,7 @@ test("episode pages show the summary, audio and timestamped transcript", async (
     assert.match(body, /<input type="checkbox" id="follow" checked> Follow along as it plays/);
     assert.match(body, /<span class="seg" data-start="0" data-end="4.5">Welcome, church.<\/span> <span class="seg" data-start="4.5" data-end="11">Today we read Ephesians 2:8.<\/span>/, "each timed sentence can be highlighted and clicked");
     assert.match(body, /Grace is a gift\./);
-    assert.match(body, /<h3>Scripture<\/h3><ul class="chips"><li class="chip">Ephesians 2:8<\/li><\/ul>/);
+    assert.match(body, /<h3>Main text<\/h3><ul class="chips"><li class="chip">Ephesians 2:1-10<\/li><\/ul>\n<h3>Also mentioned<\/h3><ul class="chips"><li class="chip">Ephesians 2:8<\/li><\/ul>/);
     assert.match(body, /<button type="button" role="tab" id="tab-ask" aria-controls="panel-ask">Ask<\/button>/);
     assert.match(body, new RegExp(`<input type="hidden" name="scope_episode" value="${site.ids[0]}">`), "the Ask panel is limited to this sermon");
     assert.match(body, /<input type="hidden" name="kind" value="outline">/);
@@ -282,7 +282,7 @@ test("members create Markdown documents from the sermons, then view, download an
     await runDocuments(site.app);
     const chats = site.providers.calls.filter((call) => call.url.endsWith("/chat/completions")).slice(-2).map((call) => JSON.stringify(call.body));
     assert.match(chats[0]!, /You plan documents/);
-    assert.match(chats[0]!, /1\. \\"Grace Alone\\" \(2026-09-07\)\. Speaker: Jane Doe\. Scripture: Ephesians 2:8\. Topics: grace/, "the planner sees every sermon's speaker, scripture and topics");
+    assert.match(chats[0]!, /1\. \\"Grace Alone\\" \(2026-09-07\)\. Speaker: Jane Doe\. Main text: Ephesians 2:1-10\. Scripture: Ephesians 2:8\. Topics: grace/, "the planner sees every sermon's speaker, main text, scripture and topics");
     assert.match(chats[1]!, /sermon outline/);
     assert.match(chats[1]!, /Grace Church/);
     assert.equal(chats[1]!.match(/Today we read Ephesians 2:8\./gu)?.length, 2, "the outline is written from both sermons' full transcripts");

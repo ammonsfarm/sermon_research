@@ -25,7 +25,7 @@ import { serveAudio } from "./audio.ts";
 import { ask, conversation, deleteConversation, home, library, researchRedirect } from "./ask.ts";
 import { deleteDocument, documentDownload, documentPage, retryDocument } from "./documents.ts";
 import { saveSpeaker, sermonPage, sermonsPage, transcriptDownload } from "./sermons.ts";
-import { checkNow, episodesDashboard, hourlyTick, identifySpeakersNow, importStep, queueFromDashboard, saveConcurrency, scheduleSettings } from "./imports.ts";
+import { checkNow, chooseMainScripturesNow, episodesDashboard, hourlyTick, identifySpeakersNow, importStep, queueFromDashboard, saveConcurrency, scheduleSettings } from "./imports.ts";
 import { keyInfo } from "./keys.ts";
 import { acceptInvite, membersPage, reinviteMember, removeMember, showInvite } from "./members.ts";
 import { canViewResearch, researchAdmin, researchSettings } from "./research.ts";
@@ -118,6 +118,7 @@ async function route(context: Context): Promise<Response> {
     case "GET /admin/episodes": return episodesDashboard(context);
     case "POST /admin/episodes/check": return checkNow(context);
     case "POST /admin/episodes/speakers": return identifySpeakersNow(context);
+    case "POST /admin/episodes/scriptures": return chooseMainScripturesNow(context);
     case "POST /admin/episodes/queue": return queueFromDashboard(context);
     case "POST /admin/episodes/concurrency": return saveConcurrency(context);
     case "GET /admin/schedule":

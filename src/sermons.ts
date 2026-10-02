@@ -5,6 +5,7 @@ import { html, type Html, page } from "./html.ts";
 import type { Segment } from "./pipeline.ts";
 import { formatTime, gate, nearest, SEARCHES_PER_HOUR } from "./research.ts";
 import { catalog, seriesList, seriesOf, titleWithoutSeries } from "./scope.ts";
+import { sameReference } from "./scriptures.ts";
 import { speakerList } from "./speakers.ts";
 import { HOUR_MS, recordUse, usedSince } from "./usage.ts";
 
@@ -14,11 +15,13 @@ interface SermonCard {
   readonly published_at: string | null;
   readonly speaker: string | null;
   readonly summary: string | null;
+  /** Null until chosen, empty when there's no single main passage. */
+  readonly main_scripture: string | null;
   readonly topics_json: string | null;
   readonly scriptures_json: string | null;
 }
 
-const SELECT_CARDS = `SELECT e.id, e.title, e.published_at, e.speaker, s.summary, s.topics_json, s.scriptures_json
+const SELECT_CARDS = `SELECT e.id, e.title, e.published_at, e.speaker, s.summary, s.main_scripture, s.topics_json, s.scriptures_json
   FROM episodes e LEFT JOIN summaries s ON s.episode_id = e.id WHERE e.status = 'done'`;
 
 function likePattern(query: string): string {
@@ -37,7 +40,8 @@ function parseList(json: string | null): string[] {
 function card(row: SermonCard): Html {
   const series = seriesOf(row.title);
   const topics = parseList(row.topics_json).slice(0, 3);
-  const scripture = parseList(row.scriptures_json)[0];
+  // Until the main passage is chosen, the first reference listed usually is it.
+  const scripture = row.main_scripture ?? parseList(row.scriptures_json)[0];
   const summary = row.summary ?? "";
   return html`<li class="card">
 <p class="hint">${row.published_at?.slice(0, 10) ?? ""}${row.speaker ? ` · ${row.speaker}` : ""}${series ? html` · <span class="chip series">${series}</span>` : ""}</p>
@@ -71,7 +75,7 @@ export async function sermonsPage(context: Context): Promise<Response> {
     matches = (await db.prepare(`${SELECT_CARDS} ${order} LIMIT 500`).all<SermonCard>()).results.filter(inSeries);
   } else {
     const like = likePattern(query);
-    matches = (await db.prepare(`${SELECT_CARDS} AND (e.title LIKE ?1 ESCAPE '\\' OR e.speaker LIKE ?1 ESCAPE '\\' OR s.summary LIKE ?1 ESCAPE '\\' OR s.topics_json LIKE ?1 ESCAPE '\\' OR s.scriptures_json LIKE ?1 ESCAPE '\\') ${order} LIMIT 100`)
+    matches = (await db.prepare(`${SELECT_CARDS} AND (e.title LIKE ?1 ESCAPE '\\' OR e.speaker LIKE ?1 ESCAPE '\\' OR s.main_scripture LIKE ?1 ESCAPE '\\' OR s.summary LIKE ?1 ESCAPE '\\' OR s.topics_json LIKE ?1 ESCAPE '\\' OR s.scriptures_json LIKE ?1 ESCAPE '\\') ${order} LIMIT 100`)
       .bind(like).all<SermonCard>()).results.filter(inSeries);
     const bucket = context.session ? `search-user:${context.session.user.id}` : `search-ip:${clientIp(context.request)}`;
     if (await usedSince(db, bucket, Date.now() - HOUR_MS) >= SEARCHES_PER_HOUR) {
@@ -121,9 +125,9 @@ export async function sermonPage(context: Context, id: string): Promise<Response
   if (blocked) return blocked;
   const { db } = context;
   const episode = await db.prepare(
-    `SELECT e.id, e.title, e.published_at, e.audio_url, e.audio_key, e.speaker, s.summary, s.topics_json, s.scriptures_json
+    `SELECT e.id, e.title, e.published_at, e.audio_url, e.audio_key, e.speaker, s.summary, s.main_scripture, s.topics_json, s.scriptures_json
      FROM episodes e JOIN summaries s ON s.episode_id = e.id WHERE e.id = ? AND e.status = 'done'`,
-  ).bind(id).first<{ id: string; title: string; published_at: string | null; audio_url: string | null; audio_key: string | null; speaker: string | null; summary: string; topics_json: string; scriptures_json: string }>();
+  ).bind(id).first<{ id: string; title: string; published_at: string | null; audio_url: string | null; audio_key: string | null; speaker: string | null; summary: string; main_scripture: string | null; topics_json: string; scriptures_json: string }>();
   if (!episode) return page("Not found", html`<h1>Sermon not found</h1><p><a href="/episodes">All sermons</a></p>`, { status: 404, ...chrome(context) });
   const [chunkRows, transcript, entries] = await Promise.all([
     db.prepare("SELECT seq, text, start_seconds FROM chunks WHERE episode_id = ? AND kind = 'transcript' ORDER BY seq")
@@ -133,7 +137,8 @@ export async function sermonPage(context: Context, id: string): Promise<Response
   ]);
   const chunks = chunkRows.results;
   const topics = parseList(episode.topics_json);
-  const scriptures = parseList(episode.scriptures_json);
+  const mainText = episode.main_scripture || null;
+  const scriptures = parseList(episode.scriptures_json).filter((reference) => !sameReference(reference, mainText));
   const series = seriesOf(episode.title);
   // Our own copy in R2 when we have one; the feed's link otherwise.
   const audio = episode.audio_key ? `/audio/${episode.id}` : isWebUrl(episode.audio_url) ? episode.audio_url : null;
@@ -142,7 +147,7 @@ export async function sermonPage(context: Context, id: string): Promise<Response
 
   return page(episode.title, html`<div class="sermon">
 <div class="sermon-head">
-<p class="meta"><a href="/episodes">Sermons</a>${series ? html` · <a href="/episodes?series=${encodeURIComponent(series)}">${series}</a>` : ""} · ${episode.published_at?.slice(0, 10) ?? ""}${episode.speaker ? html` · <a href="/episodes?speaker=${encodeURIComponent(episode.speaker)}">${episode.speaker}</a>` : ""}</p>
+<p class="meta"><a href="/episodes">Sermons</a>${series ? html` · <a href="/episodes?series=${encodeURIComponent(series)}">${series}</a>` : ""} · ${episode.published_at?.slice(0, 10) ?? ""}${episode.speaker ? html` · <a href="/episodes?speaker=${encodeURIComponent(episode.speaker)}">${episode.speaker}</a>` : ""}${mainText ? ` · ${mainText}` : ""}</p>
 <h1>${titleWithoutSeries(episode.title)}</h1>
 ${audio ? html`<div class="player"><audio id="player" controls preload="metadata" src="${audio}"></audio>
 ${segments ? html`<label class="follow"><input type="checkbox" id="follow" checked> Follow along as it plays</label>` : ""}</div>` : ""}
@@ -156,7 +161,8 @@ ${segments ? html`<label class="follow"><input type="checkbox" id="follow" check
 <section role="tabpanel" id="panel-summary" aria-labelledby="tab-summary"><h2 class="panel-heading">Summary</h2>
 <div id="t-0">${episode.summary.split(/\n\s*\n/u).map((paragraph) => html`<p>${paragraph}</p>`)}</div>
 ${topics.length ? html`<h3>Topics</h3><ul class="chips">${topics.map((topic) => html`<li class="chip">${topic}</li>`)}</ul>` : ""}
-${scriptures.length ? html`<h3>Scripture</h3><ul class="chips">${scriptures.map((ref) => html`<li class="chip">${ref}</li>`)}</ul>` : ""}
+${mainText ? html`<h3>Main text</h3><ul class="chips"><li class="chip">${mainText}</li></ul>` : ""}
+${scriptures.length ? html`<h3>${mainText ? "Also mentioned" : "Scripture"}</h3><ul class="chips">${scriptures.map((ref) => html`<li class="chip">${ref}</li>`)}</ul>` : ""}
 ${context.session?.user.role === "admin" ? html`<form class="row" method="post" action="/episodes/${episode.id}/speaker">
 <label for="f-speaker" class="inline-label">Speaker</label>
 <input id="f-speaker" name="speaker" value="${episode.speaker ?? ""}" maxlength="100" list="speakers" placeholder="Unknown">
@@ -206,9 +212,9 @@ export async function transcriptDownload(context: Context, id: string, format: "
   if (blocked) return blocked;
   const { db } = context;
   const episode = await db.prepare(
-    `SELECT e.id, e.title, e.published_at, e.speaker, s.summary, s.topics_json, s.scriptures_json
+    `SELECT e.id, e.title, e.published_at, e.speaker, s.summary, s.main_scripture, s.topics_json, s.scriptures_json
      FROM episodes e JOIN summaries s ON s.episode_id = e.id WHERE e.id = ? AND e.status = 'done'`,
-  ).bind(id).first<{ id: string; title: string; published_at: string | null; speaker: string | null; summary: string; topics_json: string; scriptures_json: string }>();
+  ).bind(id).first<{ id: string; title: string; published_at: string | null; speaker: string | null; summary: string; main_scripture: string | null; topics_json: string; scriptures_json: string }>();
   if (!episode) return new Response("Sermon not found.", { status: 404, headers: { "Content-Type": "text/plain; charset=utf-8" } });
   const { results: chunks } = await db.prepare("SELECT text, start_seconds FROM chunks WHERE episode_id = ? AND kind = 'transcript' ORDER BY seq")
     .bind(id).all<{ text: string; start_seconds: number | null }>();
@@ -221,6 +227,7 @@ export async function transcriptDownload(context: Context, id: string, format: "
       `# ${episode.title}`,
       [date, episode.speaker, church].filter(Boolean).join(" · "),
       `## Summary\n\n${episode.summary.trim()}`,
+      ...(episode.main_scripture ? [`**Main text:** ${episode.main_scripture}`] : []),
       ...(parseList(episode.topics_json).length ? [`**Topics:** ${parseList(episode.topics_json).join(", ")}`] : []),
       ...(parseList(episode.scriptures_json).length ? [`**Scripture:** ${parseList(episode.scriptures_json).join(", ")}`] : []),
       "## Transcript",
