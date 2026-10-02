@@ -38,7 +38,7 @@ test("each sermon's speaker is identified from the feed and the start of its tra
     assert.doesNotMatch(searched.split("Related in meaning")[0]!, /Grace Alone/);
 
     const sermon = await (await site.app.request(`/episodes/${newer}`, { cookie: site.cookie })).text();
-    assert.match(sermon, /· 2026-09-14 · <a href="\/episodes\?speaker=John%20Smith">John Smith<\/a><\/p>/);
+    assert.match(sermon, /· 2026-09-14 · <a href="\/episodes\?speaker=John%20Smith">John Smith<\/a> · Ephesians 2:1-10<\/p>/);
     assert.match(sermon, new RegExp(`<form class="row" method="post" action="/episodes/${newer}/speaker">`), "admins can correct it");
   } finally {
     site.restore();

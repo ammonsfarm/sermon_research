@@ -94,6 +94,9 @@ assistant at this repo. [AGENTS.md](AGENTS.md) tells it how to help.
   sermon, are planned and then written one part at a time in the
   background, with the page showing progress. Each is saved to the Library
   and downloads as a Markdown (.md) file with its sources linked
+- Main texts: each sermon's summary names the passage it preaches from,
+  shown on its card and page apart from the other references it mentions,
+  and used when the AI picks sermons for a document
 - Speakers: the answers AI works out who preached each sermon from the
   feed's description and the start of the transcript. Sermons show their
   speaker and can be filtered by it, scopes can be limited to one, and a

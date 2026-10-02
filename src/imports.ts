@@ -7,6 +7,7 @@ import { DEFAULT_SCHEDULE, describeSchedule, isDue, isValidTimeZone, localSlot, 
 import { getSetting, getSetupStep, type PodcastSettings, putSetting } from "./settings.ts";
 import type { AppEnv } from "./env.ts";
 import { failStaleDocuments } from "./writing.ts";
+import { chooseMissingMainScriptures, HOURLY_MAIN_TEXTS } from "./scriptures.ts";
 import { HOURLY_SPEAKERS, identifyMissingSpeakers } from "./speakers.ts";
 
 /** Mistral's list price for Voxtral Mini transcription when this was written; check mistral.ai/pricing. */
@@ -158,7 +159,7 @@ export async function episodesDashboard(context: Context): Promise<Response> {
   const current = await getSetupStep(context.db);
   if (current !== "complete") return redirect(`/setup/${current}`);
   await rememberOrigin(context);
-  const [counts, episodes, schedule, lastCheck, lastTick, atOnce, speakers] = await Promise.all([
+  const [counts, episodes, schedule, lastCheck, lastTick, atOnce, speakers, mainTexts] = await Promise.all([
     statusCounts(context.db),
     listEpisodes(context.db),
     getSetting<Schedule>(context.db, "schedule"),
@@ -166,7 +167,10 @@ export async function episodesDashboard(context: Context): Promise<Response> {
     getSetting<string>(context.db, "last_tick"),
     concurrency(context.db),
     context.db.prepare("SELECT count(speaker) AS named, sum(speaker_source IS NULL) AS waiting FROM episodes WHERE status = 'done'").first<{ named: number; waiting: number | null }>(),
+    context.db.prepare("SELECT count(nullif(s.main_scripture, '')) AS chosen, sum(s.main_scripture IS NULL) AS waiting FROM summaries s JOIN episodes e ON e.id = s.episode_id WHERE e.status = 'done'")
+      .first<{ chosen: number; waiting: number | null }>(),
   ]);
+  const waitingMainTexts = mainTexts?.waiting ?? 0;
   const waitingSpeakers = speakers?.waiting ?? 0;
   const notice = context.url.searchParams.get("notice");
   const live = counts.running + counts.queued > 0;
@@ -184,6 +188,7 @@ ${notice ? html`<p class="alert-ok">${notice}</p>` : ""}
 <dt>Schedule</dt><dd>${schedule ? describeSchedule(schedule) : "Not set"} · <a href="/admin/schedule">Change</a></dd>
 <dt>Last feed check</dt><dd>${lastCheck ? `${ago(lastCheck.at)} · ${lastCheck.error ?? `${lastCheck.queued} new`}` : "Not yet"}</dd>
 <dt>Speakers</dt><dd>${speakers?.named ?? 0} named${waitingSpeakers ? html` · ${waitingSpeakers} waiting for the AI, which checks hourly <form class="inline" method="post" action="/admin/episodes/speakers" data-busy="Identifying speakers… this can take a minute."><button class="link" type="submit">Identify now</button></form>` : ""} · fix one on its sermon page</dd>
+<dt>Main texts</dt><dd>${mainTexts?.chosen ?? 0} chosen${waitingMainTexts ? html` · ${waitingMainTexts} waiting for the AI, which checks hourly <form class="inline" method="post" action="/admin/episodes/scriptures" data-busy="Choosing main texts… this can take a minute."><button class="link" type="submit">Choose now</button></form>` : ""}</dd>
 <dt>Background worker</dt><dd>${lastTick ? `last ran ${ago(lastTick)}` : "hasn't run yet"} · runs hourly and restarts stalled work</dd>
 </dl>
 <form class="row" method="post" action="/admin/episodes/concurrency">
@@ -262,6 +267,21 @@ export async function identifySpeakersNow(context: Context): Promise<Response> {
   return redirect(`/admin/episodes?notice=${encodeURIComponent(notice)}`);
 }
 
+/** POST /admin/episodes/scriptures : chooses main passages now rather than waiting for the hourly tick. */
+export async function chooseMainScripturesNow(context: Context): Promise<Response> {
+  const denied = requireAdmin(context);
+  if (denied) return denied;
+  let notice: string;
+  try {
+    const checked = await chooseMissingMainScriptures(context.env, HOURLY_MAIN_TEXTS);
+    notice = `Checked ${checked} sermon${checked === 1 ? "" : "s"} for their main text.`;
+  } catch (error) {
+    console.error("main text selection failed", error);
+    notice = `Main texts couldn't be chosen right now: ${error instanceof Error ? error.message : "unknown error"}`;
+  }
+  return redirect(`/admin/episodes?notice=${encodeURIComponent(notice)}`);
+}
+
 /** POST /admin/episodes/queue */
 export async function queueFromDashboard(context: Context): Promise<Response> {
   const denied = requireAdmin(context);
@@ -303,6 +323,7 @@ export async function hourlyTick(env: AppEnv, at: Date): Promise<void> {
   await putSetting(env.DB, "last_tick", at.toISOString());
   await failStaleDocuments(env.DB, at.getTime());
   await identifyMissingSpeakers(env, HOURLY_SPEAKERS).catch((error: unknown) => console.error("speaker identification failed", error));
+  await chooseMissingMainScriptures(env, HOURLY_MAIN_TEXTS).catch((error: unknown) => console.error("main text selection failed", error));
   const schedule = await getSetting<Schedule>(env.DB, "schedule");
   const lastSlot = await getSetting<string>(env.DB, "last_scheduled_slot");
   if (schedule && isDue(schedule, at, lastSlot)) {

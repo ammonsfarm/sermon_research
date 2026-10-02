@@ -141,7 +141,7 @@ export const TRANSCRIPT_SEGMENTS = [
   { text: "Welcome, church.", start: 0, end: 4.5 },
   { text: "Today we read Ephesians 2:8.", start: 4.5, end: 11 },
 ];
-export const SUMMARY_REPLY = "```json\n{\"summary\": \"Grace is a gift.\", \"topics\": [\"grace\"], \"scriptures\": [\"Ephesians 2:8\"]}\n```";
+export const SUMMARY_REPLY = "```json\n{\"summary\": \"Grace is a gift.\", \"mainScripture\": \"Ephesians 2:1–10\", \"topics\": [\"grace\"], \"scriptures\": [\"Ephesians 2:8\"]}\n```";
 
 export const DOCUMENT_REPLY = "```markdown\n# Saved by Grace\n\n**Big idea:** grace is a gift [1].\n\n## Main points\n\n1. Grace is unearned [1]\n   - Read Ephesians 2:8\n2. Faith receives it [2]\n\n<script>alert(1)</script> [evil](javascript:alert(1))\n```";
 
@@ -154,6 +154,11 @@ export const PLAN_SINGLE_REPLY = "{\"title\": \"Saved by Grace\", \"parts\": [{\
 /** Names whoever preached each numbered episode, untidily, as models do: Faith & Works is John Smith's, the rest Jane Doe's. */
 function speakerReply(episodes: string): string {
   return JSON.stringify(Object.fromEntries([...episodes.matchAll(/^(\d+)\. "([^"]*)"/gmu)].map(([, n, title]) => [n, title!.includes("Faith") ? "Rev. John  Smith" : "Pastor Jane Doe"])));
+}
+
+/** Gives each numbered sermon a main passage, except Faith & Works, which is topical. */
+function mainTextReply(sermons: string): string {
+  return JSON.stringify(Object.fromEntries([...sermons.matchAll(/^(\d+)\. "([^"]*)"/gmu)].map(([, n, title]) => [n, title!.includes("Faith") ? null : "Ephesians 2:8–10."])));
 }
 
 /** Each part of a long document. In a part, [1] is its sermon's summary and [2] its transcript. */
@@ -180,7 +185,9 @@ export function fakeProviders(fail: Record<string, number> = {}): { calls: FakeC
     if (url.endsWith("/chat/completions")) {
       const messages = (body as { messages?: { role: string; content: string }[] } | null)?.messages ?? [];
       const system = messages.find((message) => message.role === "system")?.content ?? "";
-      const content = system.includes("who preached each sermon") ? speakerReply(messages.find((message) => message.role === "user")?.content ?? "")
+      const user = messages.find((message) => message.role === "user")?.content ?? "";
+      const content = system.includes("who preached each sermon") ? speakerReply(user)
+        : system.includes("main Bible passage each sermon preaches from") ? mainTextReply(user)
         : system.includes("You plan documents") ? (system.includes("so plan a single part") ? PLAN_SINGLE_REPLY : PLAN_REPLY)
         : system.includes("one part of a longer document") ? PART_REPLY
           : system.includes("Markdown document") ? DOCUMENT_REPLY
