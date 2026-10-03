@@ -3,6 +3,7 @@ import { registerHooks } from "node:module";
 // Workers-only modules don't exist in Node, so tests get small stand-ins.
 const STUBS: Record<string, string> = {
   "cloudflare:workers": "export class WorkflowEntrypoint { constructor(ctx, env) { this.ctx = ctx; this.env = env; } }",
+  "cloudflare:workflows": "export class NonRetryableError extends Error { constructor(message, name = 'NonRetryableError') { super(message); this.name = name; } }",
 };
 
 // Workers' FixedLengthStream only checks the byte count, so a pass-through stream stands in for it.

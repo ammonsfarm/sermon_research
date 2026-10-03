@@ -1,3 +1,4 @@
+import { NonRetryableError } from "cloudflare:workflows";
 import { downloadAudio, formatBytes, signedAudioUrl } from "./audio.ts";
 import { batchEnd, cleanSegments } from "./cleanup.ts";
 import { decodeMp3 } from "./mp3.ts";
@@ -198,11 +199,12 @@ async function transcribeMusePart(env: AppEnv, episodeId: string, limits: MuseLi
     db.prepare("SELECT audio_key, duration_seconds FROM episodes WHERE id = ?").bind(episodeId).first<{ audio_key: string | null; duration_seconds: number | null }>(),
     db.prepare("SELECT done_samples, segments_json FROM transcription_progress WHERE episode_id = ?").bind(episodeId).first<{ done_samples: number; segments_json: string }>(),
   ]);
-  if (!episode?.audio_key) throw new ProviderError("The audio hasn't been copied yet. Retry to download it.");
+  // Retrying the step can't fix these, so the episode fails straight away and frees its place in the queue.
+  if (!episode?.audio_key) throw new NonRetryableError("The audio hasn't been copied yet. Retry to download it.");
   const switchToMistral = "Switch to Mistral in Admin → Transcription, then retry.";
-  if (!episode.audio_key.endsWith(".mp3")) throw new ProviderError(`This site can only convert MP3s to the WAV that Muse accepts, and this episode's audio is .${episode.audio_key.split(".").pop()}. ${switchToMistral}`);
+  if (!episode.audio_key.endsWith(".mp3")) throw new NonRetryableError(`This site can only convert MP3s to the WAV that Muse accepts, and this episode's audio is .${episode.audio_key.split(".").pop()}. ${switchToMistral}`);
   const object = await env.AUDIO.get(episode.audio_key);
-  if (!object) throw new ProviderError("The copy of the audio is missing. Retry to download it again.");
+  if (!object) throw new NonRetryableError("The copy of the audio is missing. Retry to download it again.");
 
   const from = progress?.done_samples ?? 0;
   const offset = from / MUSE_SAMPLE_RATE;
@@ -212,7 +214,7 @@ async function transcribeMusePart(env: AppEnv, episodeId: string, limits: MuseLi
   const wav = new Uint8Array(WAV_HEADER_BYTES + max * 2);
   const pcm = new Int16Array(wav.buffer, WAV_HEADER_BYTES, max);
   const { samples, more } = await decodeMp3(object.body, MUSE_SAMPLE_RATE, from, pcm);
-  if (from === 0 && samples === 0) throw new ProviderError(`The audio couldn't be read as MP3. ${switchToMistral}`);
+  if (from === 0 && samples === 0) throw new NonRetryableError(`The audio couldn't be read as MP3. ${switchToMistral}`);
   const end = more ? quietestSplit(pcm, samples, MUSE_SAMPLE_RATE, limits.searchSeconds) : samples;
 
   const segments = progress ? JSON.parse(progress.segments_json) as Segment[] : [];
