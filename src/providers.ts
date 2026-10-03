@@ -25,6 +25,33 @@ export interface LlmSettings {
   readonly model: string;
 }
 
+/** Muse's chat completions `reasoning_effort` values, least to most. */
+export const REASONING_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
+export const DEFAULT_REASONING_EFFORT: ReasoningEffort = "low";
+
+export function isReasoningEffort(value: unknown): value is ReasoningEffort {
+  return REASONING_EFFORTS.includes(value as ReasoningEffort);
+}
+
+/** Meta's API, which serves Muse. */
+export function isMetaApi(baseUrl: string): boolean {
+  try {
+    const host = new URL(baseUrl).hostname;
+    return host === "api.meta.ai" || host.endsWith(".api.meta.ai");
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The reasoning field for a chat completion body. Only Meta's API gets one: other
+ * OpenAI-compatible providers can reject a field they don't know with a 400.
+ */
+export function reasoningFields(baseUrl: string, effort: ReasoningEffort = DEFAULT_REASONING_EFFORT): { reasoning_effort?: ReasoningEffort } {
+  return isMetaApi(baseUrl) ? { reasoning_effort: effort } : {};
+}
+
 /** Pulls the human-readable message out of a provider's error body (OpenAI, Gemini, Mistral and Resend shapes). */
 export function providerMessage(body: string): string {
   if (body.trimStart().startsWith("<")) return ""; // an HTML error page says nothing useful
@@ -62,7 +89,7 @@ export async function checkLlm(settings: LlmSettings, apiKey: string, fetcher: t
   const response = await call(`${settings.baseUrl.replace(/\/+$/u, "")}/chat/completions`, {
     method: "POST",
     headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ model: settings.model, messages: [{ role: "user", content: "Reply with the single word OK." }], max_tokens: 16 }),
+    body: JSON.stringify({ model: settings.model, messages: [{ role: "user", content: "Reply with the single word OK." }], max_tokens: 16, ...reasoningFields(settings.baseUrl, "low") }),
   }, fetcher, "The answers provider");
   const body = await response.json().catch(() => null) as { choices?: unknown[] } | null;
   if (!Array.isArray(body?.choices)) throw new ProviderError("The answers provider replied, but not in the OpenAI chat format.");

@@ -83,6 +83,35 @@ test("a question gets a cited answer with linked sources", async () => {
   }
 });
 
+test("answers and documents send the chat reasoning effort once the answers AI is Meta's API", async () => {
+  const site = await indexedSite();
+  const isChat = (call: { url: string }) => call.url.endsWith("/chat/completions");
+  try {
+    await site.app.request("/research", { form: { question: "What is grace?" }, cookie: site.cookie });
+    const before = site.providers.calls.filter(isChat);
+    assert.ok(before.length > 0);
+    assert.ok(before.every((call) => !("reasoning_effort" in (call.body as object))), "OpenAI gets no reasoning field");
+
+    const saved = await site.app.request("/admin/llm", { form: { baseUrl: "https://api.meta.ai/v1", model: "muse-test", apiKey: "", summaryEffort: "high", chatEffort: "medium" }, cookie: site.cookie });
+    assert.equal(saved.headers.get("Location"), "/admin?saved=1");
+    assert.match(await (await site.app.request("/admin", { cookie: site.cookie })).text(), /muse-test at api\.meta\.ai · reasoning effort: summaries high, chat medium/);
+    await site.app.request("/research", { form: { question: "And faith?" }, cookie: site.cookie });
+    const answered = site.providers.calls.findLast(isChat)!;
+    assert.equal(answered.url, "https://api.meta.ai/v1/chat/completions");
+    assert.match(JSON.stringify(answered.body), /numbered sources/);
+    assert.equal((answered.body as { reasoning_effort?: string }).reasoning_effort, "medium");
+
+    const start = site.providers.calls.length;
+    await site.app.request("/research", { form: { question: "An outline on grace", kind: "outline" }, cookie: site.cookie });
+    await runDocuments(site.app);
+    const writing = site.providers.calls.slice(start).filter(isChat);
+    assert.ok(writing.length > 0, "the document was written");
+    assert.ok(writing.every((call) => (call.body as { reasoning_effort?: string }).reasoning_effort === "medium"), "documents use the chat effort");
+  } finally {
+    site.restore();
+  }
+});
+
 test("episode search matches keywords, then related meaning", async () => {
   const site = await indexedSite();
   try {
