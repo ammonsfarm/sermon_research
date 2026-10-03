@@ -12,7 +12,7 @@ import { buildChunks, parseSummary, summarize, type PipelineStep, runEpisode } f
 import { ensureSchema } from "../src/schema.ts";
 import { isDue, localSlot, type Schedule } from "../src/schedule.ts";
 import { getSetting, putSetting } from "../src/settings.ts";
-import { AUDIO_BYTES, completeSetup, createApp, fakeProviders, type MuseUpload, ORIGIN, PROVIDERS, SCHEDULE_FORM, type TestApp, TONES_MP3 } from "./helpers.ts";
+import { AUDIO_BYTES, completeSetup, createApp, fakeProviders, type MuseUpload, ORIGIN, PROVIDERS, readMuseUpload, SCHEDULE_FORM, type TestApp, TONES_MP3 } from "./helpers.ts";
 
 /** Runs workflow steps inline, like a Workflow run with no retries. */
 const inlineStep: PipelineStep = { do: (_name, _config, callback) => callback() };
@@ -587,7 +587,7 @@ test("Muse transcribes MP3 audio part by part, split at pauses, and a retry carr
     if (url === "https://api.meta.ai/v1/asr/transcribe" && ++museRequests === 3) return Response.json({ type: "rate_limit", message: "Too many sessions" }, { status: 429 });
     return faked(input, init);
   }) as typeof fetch;
-  const parts = { partSeconds: 4, searchSeconds: 2 };
+  const parts = { partSeconds: 4, minPartSeconds: 1, searchSeconds: 2 };
   try {
     const cookie = await completeSetup(app, { count: 1 });
     assert.equal((await app.request("/admin/transcription", { form: PROVIDERS.muse, cookie })).headers.get("Location"), "/admin?saved=1");
@@ -627,6 +627,46 @@ test("Muse transcribes MP3 audio part by part, split at pauses, and a retry carr
     assert.equal(providers.calls.filter((call) => call.url.includes("mistral.ai/v1/audio")).length, 0, "Mistral isn't used");
     const transcript = await app.env.DB.prepare("SELECT cleaned_by FROM transcripts WHERE episode_id = ?").bind(episode!.id).first<{ cleaned_by: string }>();
     assert.equal(transcript?.cleaned_by, "gpt-test", "Muse's draft is cleaned up like Mistral's");
+  } finally {
+    providers.restore();
+  }
+});
+
+test("when Muse times out on a part, the retry and every later episode send shorter ones", async () => {
+  const app = createApp();
+  const providers = fakeProviders();
+  const faked = globalThis.fetch;
+  // Muse's gateway gives up on anything over 2.5 seconds.
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url.startsWith("https://cdn.example.org/")) return new Response(TONES_MP3, { headers: { "Content-Type": "audio/mpeg", "Content-Length": String(TONES_MP3.byteLength) } });
+    if (url === "https://api.meta.ai/v1/asr/transcribe") {
+      const upload = await readMuseUpload(init!.body as Blob, new Headers(init!.headers).get("Content-Type") ?? "");
+      if (upload.wav.samples.length > 2.5 * MUSE_SAMPLE_RATE) return new Response("error code: 504", { status: 504 });
+    }
+    return faked(input, init);
+  }) as typeof fetch;
+  const limits = { partSeconds: 4, minPartSeconds: 1, searchSeconds: 2 };
+  try {
+    const cookie = await completeSetup(app, { count: 2 });
+    await app.request("/admin/transcription", { form: PROVIDERS.muse, cookie });
+    const [first, second] = await episodes(app);
+    await runEpisode(app.env, inlineStep, first!.id, limits);
+    const failed = (await episodes(app))[0]!;
+    assert.equal(failed.status, "failed");
+    assert.equal(failed.error, "Muse timed out transcribing this part (HTTP 504). It said: \"error code: 504\" The next try sends 2-second parts.");
+    assert.equal(await getSetting<number>(app.env.DB, "muse_part_seconds"), 2);
+
+    const before = museCalls(providers).length;
+    await runEpisode(app.env, inlineStep, first!.id, limits);
+    await runEpisode(app.env, inlineStep, second!.id, limits);
+    assert.deepEqual((await episodes(app)).map((row) => row.status), ["done", "done"], "both finish without timing out again");
+    const lengths = museCalls(providers).slice(before).map((call) => (call.body as MuseUpload).wav.samples.length / MUSE_SAMPLE_RATE);
+    assert.ok(lengths.length >= 6 && lengths.every((seconds) => seconds <= 2), `every part is 2 seconds or less: ${lengths.join(", ")}`);
+    const draft = await app.env.DB.prepare("SELECT segments_json FROM transcripts_draft WHERE episode_id = ?").bind(first!.id).first<{ segments_json: string }>();
+    const segments = JSON.parse(draft!.segments_json) as { start: number; end: number }[];
+    assert.ok(segments.every((segment, index) => index === 0 || segment.start >= segments[index - 1]!.end - 0.001), "the shorter parts still join up in order");
+    assert.ok(segments.at(-1)!.end > 5.5, "the whole recording is covered");
   } finally {
     providers.restore();
   }

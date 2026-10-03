@@ -4,13 +4,29 @@ import type { Segment } from "./pipeline.ts";
 export const MUSE_SAMPLE_RATE = 16_000;
 
 export interface MuseLimits {
-  /** Longest part sent at once. Muse allows 10 minutes; this leaves room to end at a pause. */
+  /**
+   * The longest part to start with. Muse accepts 10 minutes, but its gateway
+   * gives up (HTTP 504) after about 2 minutes of transcribing: a 9.5-minute
+   * part timed out, and 5 minutes went through, so parts start a little under that.
+   */
   readonly partSeconds: number;
-  /** How far back from the end of a full part to look for the quietest moment to split at. */
+  /** The shortest a part gets after Muse times out on longer ones. */
+  readonly minPartSeconds: number;
+  /** How far back from the end of a full part to look for a pause to split at; at most a third of the part. */
   readonly searchSeconds: number;
 }
 
-export const MUSE_LIMITS: MuseLimits = { partSeconds: 570, searchSeconds: 30 };
+export const MUSE_LIMITS: MuseLimits = { partSeconds: 240, minPartSeconds: 30, searchSeconds: 30 };
+
+/**
+ * The part length the site settled on after Muse timed out on longer ones, in
+ * seconds. Every episode uses it from then on; delete the setting to start
+ * again from `MUSE_LIMITS.partSeconds`.
+ */
+export const MUSE_PART_SETTING = "muse_part_seconds";
+
+/** Muse statuses that mean a part took too long: gateway timeouts, and 500 for its processing budget. */
+export const MUSE_TOO_LONG: ReadonlySet<number> = new Set([408, 500, 504, 524]);
 
 /** One stretch of speech from Muse's ENDPOINTING mode, timed from the start of the part sent. */
 export interface MuseTurn {

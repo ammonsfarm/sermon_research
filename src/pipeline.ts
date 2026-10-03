@@ -2,12 +2,12 @@ import { NonRetryableError } from "cloudflare:workflows";
 import { downloadAudio, formatBytes, signedAudioUrl } from "./audio.ts";
 import { batchEnd, cleanSegments } from "./cleanup.ts";
 import { decodeMp3 } from "./mp3.ts";
-import { MUSE_LIMITS, MUSE_SAMPLE_RATE, type MuseLimits, quietestSplit, turnsToSegments, WAV_HEADER_BYTES, writeWavHeader } from "./muse.ts";
+import { MUSE_LIMITS, MUSE_PART_SETTING, MUSE_SAMPLE_RATE, MUSE_TOO_LONG, type MuseLimits, quietestSplit, turnsToSegments, WAV_HEADER_BYTES, writeWavHeader } from "./muse.ts";
 import type { AppEnv } from "./env.ts";
 import { getKey } from "./keys.ts";
-import { EMBEDDING_MODEL, MISTRAL_TRANSCRIPTION_MODEL, MUSE_TRANSCRIPTION_MODEL, museTranscribe, ProviderError, reasoningFields, withUserAgent } from "./providers.ts";
+import { EMBEDDING_MODEL, MISTRAL_TRANSCRIPTION_MODEL, MUSE_TRANSCRIPTION_MODEL, MuseTranscribeError, museTranscribe, ProviderError, reasoningFields, withUserAgent } from "./providers.ts";
 import { formatTime } from "./research.ts";
-import { getSetting, type LlmSettingsRecord, type Ministry, type TranscriptionSettings } from "./settings.ts";
+import { getSetting, type LlmSettingsRecord, type Ministry, putSetting, type TranscriptionSettings } from "./settings.ts";
 import { normalizeReference } from "./scriptures.ts";
 import { identifySpeakers } from "./speakers.ts";
 
@@ -208,19 +208,30 @@ async function transcribeMusePart(env: AppEnv, episodeId: string, limits: MuseLi
 
   const from = progress?.done_samples ?? 0;
   const offset = from / MUSE_SAMPLE_RATE;
+  const partSeconds = Math.min(limits.partSeconds, (await getSetting<number>(db, MUSE_PART_SETTING)) ?? limits.partSeconds);
   await setDetail(db, episodeId, `Transcribing with Muse: ${formatTime(offset)}${episode.duration_seconds ? ` of ${formatTime(episode.duration_seconds)}` : ""} done`);
   // The part is decoded straight into a WAV file's body, so it's never copied.
-  const max = Math.round(limits.partSeconds * MUSE_SAMPLE_RATE);
+  const max = Math.round(partSeconds * MUSE_SAMPLE_RATE);
   const wav = new Uint8Array(WAV_HEADER_BYTES + max * 2);
   const pcm = new Int16Array(wav.buffer, WAV_HEADER_BYTES, max);
   const { samples, more } = await decodeMp3(object.body, MUSE_SAMPLE_RATE, from, pcm);
   if (from === 0 && samples === 0) throw new NonRetryableError(`The audio couldn't be read as MP3. ${switchToMistral}`);
-  const end = more ? quietestSplit(pcm, samples, MUSE_SAMPLE_RATE, limits.searchSeconds) : samples;
+  const end = more ? quietestSplit(pcm, samples, MUSE_SAMPLE_RATE, Math.min(limits.searchSeconds, partSeconds / 3)) : samples;
 
   const segments = progress ? JSON.parse(progress.segments_json) as Segment[] : [];
   if (end > 0) {
     writeWavHeader(wav, end);
-    const reply = await museTranscribe(wav.subarray(0, WAV_HEADER_BYTES + end * 2), await requireKey(env, "transcription"));
+    let reply: Awaited<ReturnType<typeof museTranscribe>>;
+    try {
+      reply = await museTranscribe(wav.subarray(0, WAV_HEADER_BYTES + end * 2), await requireKey(env, "transcription"));
+    } catch (error) {
+      if (!(error instanceof MuseTranscribeError) || !MUSE_TOO_LONG.has(error.status) || partSeconds <= limits.minPartSeconds) throw error;
+      // Muse gave up on a part this long, so the retry, and every part after it on any episode, is shorter.
+      // Halving the length that failed, rather than whatever is saved, means two episodes timing out together halve it once.
+      const shorter = Math.max(limits.minPartSeconds, Math.floor(partSeconds / 2));
+      await putSetting(db, MUSE_PART_SETTING, Math.min(shorter, (await getSetting<number>(db, MUSE_PART_SETTING)) ?? shorter));
+      throw new ProviderError(`${error.message} The next try sends ${shorter}-second parts.`);
+    }
     segments.push(...turnsToSegments(reply, offset, end / MUSE_SAMPLE_RATE));
   }
   const now = new Date().toISOString();

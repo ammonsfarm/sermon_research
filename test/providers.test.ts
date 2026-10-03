@@ -192,6 +192,7 @@ test("Muse's documented errors are explained, with Muse's own message", async ()
     [413, /^Muse says the audio part is over its 32 MB limit \(HTTP 413\)\. It said: "Reason 413"$/u],
     [429, /^Muse says the account is at its limit for transcriptions running at once or per hour \(HTTP 429\)\./u],
     [500, /^Muse transcription returned HTTP 500\. It said: "Reason 500"$/u],
+    [504, /^Muse timed out transcribing this part \(HTTP 504\)\. It said: "Reason 504"$/u],
   ];
   for (const [status, message] of cases) {
     const error = await museTranscribe(wav, "k", replying(status)).then(() => null, (caught: unknown) => caught);
