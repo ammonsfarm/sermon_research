@@ -5,11 +5,13 @@ import worker from "../src/index.ts";
 import { DEFAULT_CONCURRENCY, dispatchQueued, recordFeed } from "../src/episodes.ts";
 import { hourlyTick } from "../src/imports.ts";
 import { batchEnd, mergeCleaned } from "../src/cleanup.ts";
+import { decodeMp3 } from "../src/mp3.ts";
+import { MUSE_SAMPLE_RATE, quietestSplit, turnsToSegments, wavFile } from "../src/muse.ts";
 import { buildChunks, parseSummary, summarize, type PipelineStep, runEpisode } from "../src/pipeline.ts";
 import { ensureSchema } from "../src/schema.ts";
 import { isDue, localSlot, type Schedule } from "../src/schedule.ts";
 import { getSetting, putSetting } from "../src/settings.ts";
-import { AUDIO_BYTES, completeSetup, createApp, fakeProviders, ORIGIN, SCHEDULE_FORM, type TestApp } from "./helpers.ts";
+import { AUDIO_BYTES, completeSetup, createApp, fakeProviders, type MuseUpload, ORIGIN, PROVIDERS, SCHEDULE_FORM, type TestApp, TONES_MP3 } from "./helpers.ts";
 
 /** Runs workflow steps inline, like a Workflow run with no retries. */
 const inlineStep: PipelineStep = { do: (_name, _config, callback) => callback() };
@@ -506,6 +508,146 @@ test("the dashboard shows when the background worker last ran and stops refreshi
     await hourlyTick(app.env, new Date());
     page = await (await app.request("/admin/episodes", { cookie })).text();
     assert.match(page, /Background worker<\/dt><dd>last ran just now/);
+  } finally {
+    providers.restore();
+  }
+});
+
+// ---------------------------------------------------------------- Muse transcription
+
+const museCalls = (providers: ReturnType<typeof fakeProviders>) => providers.calls.filter((call) => call.url === "https://api.meta.ai/v1/asr/transcribe");
+
+/** Loudness of the decoded audio between two times, as root mean square. */
+function rms(samples: Int16Array, fromSeconds: number, toSeconds: number): number {
+  const part = samples.subarray(Math.round(fromSeconds * MUSE_SAMPLE_RATE), Math.round(toSeconds * MUSE_SAMPLE_RATE));
+  return Math.sqrt(part.reduce((total, sample) => total + sample * sample, 0) / part.length);
+}
+
+test("MP3 audio decodes to 16 kHz mono, the same samples however it's split into parts", async () => {
+  const whole = new Int16Array(6 * MUSE_SAMPLE_RATE);
+  const all = await decodeMp3(new Response(TONES_MP3).body!, MUSE_SAMPLE_RATE, 0, whole);
+  assert.equal(all.more, false);
+  assert.ok(all.samples > 5.5 * MUSE_SAMPLE_RATE && all.samples < 5.6 * MUSE_SAMPLE_RATE, `5.5 s plus the encoder's padding, got ${all.samples / MUSE_SAMPLE_RATE} s`);
+  assert.ok(rms(whole, 0.2, 2.3) > 500 && rms(whole, 3.3, 5.3) > 500, "both tones come through, downmixed to mono");
+  assert.ok(rms(whole, 2.65, 3.05) < 50, "the silence stays silent");
+
+  const first = new Int16Array(2 * MUSE_SAMPLE_RATE);
+  const start = await decodeMp3(new Response(TONES_MP3).body!, MUSE_SAMPLE_RATE, 0, first);
+  assert.deepEqual(start, { samples: 2 * MUSE_SAMPLE_RATE, more: true }, "a full part says more audio follows");
+  const rest = new Int16Array(6 * MUSE_SAMPLE_RATE);
+  const end = await decodeMp3(new Response(TONES_MP3).body!, MUSE_SAMPLE_RATE, start.samples, rest);
+  assert.equal(start.samples + end.samples, all.samples);
+  assert.deepEqual([...first, ...rest.subarray(0, end.samples)], [...whole.subarray(0, all.samples)], "parts join without a gap or an overlap");
+
+  const notMp3 = await decodeMp3(new Response(AUDIO_BYTES).body!, MUSE_SAMPLE_RATE, 0, new Int16Array(100));
+  assert.deepEqual(notMp3, { samples: 0, more: false });
+});
+
+test("a full part ends at its quietest moment, and WAV files are mono 16-bit PCM", async () => {
+  const samples = new Int16Array(6 * MUSE_SAMPLE_RATE);
+  await decodeMp3(new Response(TONES_MP3).body!, MUSE_SAMPLE_RATE, 0, samples);
+  const split = quietestSplit(samples, 4 * MUSE_SAMPLE_RATE, MUSE_SAMPLE_RATE, 2) / MUSE_SAMPLE_RATE;
+  assert.ok(split > 2.55 && split < 3.15, `splits in the silence at 2.5 to 3.1 s, got ${split}`);
+  assert.equal(quietestSplit(samples, 1_000, MUSE_SAMPLE_RATE, 2), 1_000, "a part too short to search ends where it is");
+
+  const wav = wavFile(new Int16Array([1, -2]));
+  const view = new DataView(wav.buffer);
+  const ascii = (offset: number) => String.fromCharCode(...wav.subarray(offset, offset + 4));
+  assert.deepEqual([ascii(0), view.getUint32(4, true), ascii(8), ascii(12), view.getUint32(16, true)], ["RIFF", 40, "WAVE", "fmt ", 16]);
+  assert.deepEqual([view.getUint16(20, true), view.getUint16(22, true), view.getUint32(24, true), view.getUint32(28, true), view.getUint16(32, true), view.getUint16(34, true)], [1, 1, 16_000, 32_000, 2, 16]);
+  assert.deepEqual([ascii(36), view.getUint32(40, true), view.getInt16(44, true), view.getInt16(46, true)], ["data", 4, 1, -2]);
+});
+
+test("Muse turns become segments in seconds from the start of the sermon", () => {
+  assert.deepEqual(turnsToSegments({
+    turns: [
+      { turnId: 1, startMs: 4_250, endMs: 9_000, transcript: "  Turn with me   to Romans. " },
+      { turnId: 0, startMs: 0, endMs: 4_100, transcript: "Good morning." },
+      { turnId: 2, startMs: 9_000, endMs: 9_500, transcript: "   " },
+      { turnId: 3, startMs: "soon", endMs: 10_000, transcript: "Unplaced." },
+    ],
+  }, 570, 600), [
+    { text: "Good morning.", start: 570, end: 574.1 },
+    { text: "Turn with me to Romans.", start: 574.25, end: 579 },
+  ], "offset by where the part starts, in order, without empty or untimed turns");
+  assert.deepEqual(turnsToSegments({ transcript: "All of it.", turns: [] }, 30, 12.5), [{ text: "All of it.", start: 30, end: 42.5 }], "a reply without turns covers the part");
+  assert.deepEqual(turnsToSegments({ turns: [] }, 0, 10), []);
+});
+
+test("Muse transcribes MP3 audio part by part, split at pauses, and a retry carries on from the last saved part", async () => {
+  const app = createApp();
+  const providers = fakeProviders();
+  const faked = globalThis.fetch;
+  let museRequests = 0;
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url.startsWith("https://cdn.example.org/")) return new Response(TONES_MP3, { headers: { "Content-Type": "audio/mpeg", "Content-Length": String(TONES_MP3.byteLength) } });
+    // The second part hits Muse's rate limit once.
+    if (url === "https://api.meta.ai/v1/asr/transcribe" && ++museRequests === 3) return Response.json({ type: "rate_limit", message: "Too many sessions" }, { status: 429 });
+    return faked(input, init);
+  }) as typeof fetch;
+  const parts = { partSeconds: 4, searchSeconds: 2 };
+  try {
+    const cookie = await completeSetup(app, { count: 1 });
+    assert.equal((await app.request("/admin/transcription", { form: PROVIDERS.muse, cookie })).headers.get("Location"), "/admin?saved=1");
+    const [episode] = await episodes(app);
+    await runEpisode(app.env, inlineStep, episode!.id, parts);
+
+    const failed = (await episodes(app))[0]!;
+    assert.equal(failed.status, "failed");
+    assert.match(failed.error ?? "", /^Muse says the account is at its limit .* \(HTTP 429\)\..* It said: "Too many sessions"$/u);
+    const progress = await app.env.DB.prepare("SELECT done_samples, segments_json FROM transcription_progress WHERE episode_id = ?").bind(episode!.id).first<{ done_samples: number; segments_json: string }>();
+    const firstPart = progress!.done_samples / MUSE_SAMPLE_RATE;
+    assert.ok(firstPart > 2.55 && firstPart < 3.15, `the first part ends in the pause, at ${firstPart} s`);
+    assert.equal(JSON.parse(progress!.segments_json).length, 2);
+
+    await runEpisode(app.env, inlineStep, episode!.id, parts);
+    assert.equal((await episodes(app))[0]!.status, "done");
+    const sent = museCalls(providers).slice(1).map((call) => call.body as MuseUpload);
+    assert.equal(sent.length, 2, "the check, then each part once: the saved part isn't sent again");
+    assert.equal(museCalls(providers)[1]!.authorization, "Bearer muse-key-4321");
+    for (const upload of sent) {
+      assert.deepEqual(upload.request, { mode: "ENDPOINTING", model: "muse-voice-transcribe-1.0", audioEncoding: "WAV" });
+      assert.equal(upload.requestHeaders, "Content-Disposition: form-data; name=\"request\"\r\nContent-Type: application/json", "the request part is JSON, without a filename");
+      assert.match(upload.audioHeaders, /name="audio"; filename="audio\.wav"\r\nContent-Type: audio\/wav/);
+      assert.deepEqual([upload.wav.riff, upload.wav.format, upload.wav.channels, upload.wav.rate, upload.wav.bits], ["RIFF", 1, 1, 16_000, 16]);
+      assert.ok(upload.wav.samples.length <= 4 * MUSE_SAMPLE_RATE, "no part is longer than the limit");
+    }
+    assert.equal(sent[0]!.wav.samples.length, progress!.done_samples);
+
+    const draft = await app.env.DB.prepare("SELECT segments_json, model FROM transcripts_draft WHERE episode_id = ?").bind(episode!.id).first<{ segments_json: string; model: string }>();
+    assert.equal(draft?.model, "muse-voice-transcribe-1.0");
+    const segments = JSON.parse(draft!.segments_json) as { text: string; start: number; end: number }[];
+    const half = (seconds: number) => Math.round(seconds * 1000 / 2) / 1000;
+    const secondPart = sent[1]!.wav.samples.length / MUSE_SAMPLE_RATE;
+    assert.deepEqual(segments.map((segment) => segment.text), ["First half.", "Second half.", "First half.", "Second half."]);
+    assert.deepEqual(segments.map((segment) => segment.start), [0, half(firstPart), firstPart, firstPart + half(secondPart)].map((seconds) => Math.round(seconds * 1000) / 1000), "the second part's turns are offset by the first part's length");
+    assert.equal(await app.env.DB.prepare("SELECT count(*) AS n FROM transcription_progress").first<{ n: number }>().then((row) => row?.n), 0, "progress is cleared once done");
+    assert.equal(providers.calls.filter((call) => call.url.includes("mistral.ai/v1/audio")).length, 0, "Mistral isn't used");
+    const transcript = await app.env.DB.prepare("SELECT cleaned_by FROM transcripts WHERE episode_id = ?").bind(episode!.id).first<{ cleaned_by: string }>();
+    assert.equal(transcript?.cleaned_by, "gpt-test", "Muse's draft is cleaned up like Mistral's");
+  } finally {
+    providers.restore();
+  }
+});
+
+test("Muse explains audio it can't read instead of sending it", async () => {
+  const app = createApp();
+  const providers = fakeProviders();
+  try {
+    const cookie = await completeSetup(app, { count: 1 });
+    await app.request("/admin/transcription", { form: PROVIDERS.muse, cookie });
+    const [episode] = await episodes(app);
+    await runEpisode(app.env, inlineStep, episode!.id);
+    const failed = (await episodes(app))[0]!;
+    assert.equal(failed.status, "failed");
+    assert.equal(failed.error, "The audio couldn't be read as MP3. Switch to Mistral in Admin → Transcription, then retry.");
+    assert.equal(museCalls(providers).length, 1, "only the key check reached Muse");
+
+    await app.env.DB.prepare("UPDATE episodes SET audio_key = 'episodes/x.m4a' WHERE id = ?").bind(episode!.id).run();
+    app.audio.set("episodes/x.m4a", { bytes: AUDIO_BYTES, contentType: "audio/mp4" });
+    await runEpisode(app.env, inlineStep, episode!.id);
+    assert.match((await episodes(app))[0]!.error ?? "", /^This site can only convert MP3s to the WAV that Muse accepts, and this episode's audio is \.m4a\./u);
   } finally {
     providers.restore();
   }

@@ -10,12 +10,17 @@ import {
   EMBEDDING_MODEL,
   isHttpsUrl,
   isReasoningEffort,
+  isTranscriptionProvider,
   MISTRAL_TRANSCRIPTION_MODEL,
+  MUSE_TRANSCRIPTION_MODEL,
   OPENAI_BASE_URL,
   ProviderError,
   REASONING_EFFORTS,
   type ReasoningEffort,
   sendEmail,
+  TRANSCRIPTION_MODELS,
+  TRANSCRIPTION_PROVIDERS,
+  type TranscriptionProvider,
 } from "./providers.ts";
 import {
   type CheckedSettings,
@@ -29,6 +34,7 @@ import {
   putSetting,
   SETUP_STEPS,
   type SetupStep,
+  type TranscriptionSettings,
 } from "./settings.ts";
 
 export type ProviderStep = "podcast" | "llm" | "embeddings" | "transcription" | "email";
@@ -138,12 +144,21 @@ ${field({ name: "apiKey", label: "OpenAI API key", type: "password", error: erro
 </form>`;
 }
 
-function transcriptionForm(state: StepState, errors: Errors = {}): Html {
+const TRANSCRIPTION_CHOICES: Record<TranscriptionProvider, { name: string; hint: string }> = {
+  mistral: { name: "Mistral", hint: `${MISTRAL_TRANSCRIPTION_MODEL}. Takes full-length recordings in any common format. Create a key at console.mistral.ai.` },
+  muse: { name: "Muse", hint: `Meta's ${MUSE_TRANSCRIPTION_MODEL}. Muse only accepts WAV, so this site converts your feed's MP3s to WAV and sends them 10 minutes at a time. Feeds in other formats need Mistral. Create a key at dev.meta.ai.` },
+};
+
+function transcriptionForm(state: StepState, errors: Errors = {}, provider: string = "mistral"): Html {
   return html`<h1>Transcription</h1>
-<p class="lead">Sermon audio is transcribed with Mistral's ${MISTRAL_TRANSCRIPTION_MODEL} model, which handles full-length recordings. Create a key at console.mistral.ai.</p>
+<p class="lead">Choose the service that turns sermon audio into text, then paste its API key.</p>
 ${errors.form ? html`<p class="alert">${errors.form}</p>` : ""}
 <form method="post" action="${action(state)}">
-${field({ name: "apiKey", label: "Mistral API key", type: "password", error: errors.apiKey, hint: keyHint(state, "transcription", "Stored encrypted."), autocomplete: "new-password" })}
+<fieldset class="choices"><legend>Transcription service</legend>
+${TRANSCRIPTION_PROVIDERS.map((value) => html`<label class="choice"><input type="radio" name="provider" value="${value}"${value === provider ? html` checked` : ""}><span><strong>${TRANSCRIPTION_CHOICES[value].name}</strong><br><span class="hint">${TRANSCRIPTION_CHOICES[value].hint}</span></span></label>`)}
+${errors.provider ? html`<p class="error">${errors.provider}</p>` : ""}
+</fieldset>
+${field({ name: "apiKey", label: "API key", type: "password", error: errors.apiKey, hint: keyHint(state, "transcription", "Stored encrypted. Changing service needs that service's key."), autocomplete: "new-password" })}
 <button type="submit">Test and save</button>
 </form>`;
 }
@@ -178,7 +193,7 @@ export async function stepForm(context: Context, step: ProviderStep, wizard: boo
       return render(state, llmForm(state, {}, llm ? { baseUrl: llm.baseUrl, model: llm.model, summaryEffort: llm.summaryEffort ?? DEFAULT_REASONING_EFFORT, chatEffort: llm.chatEffort ?? DEFAULT_REASONING_EFFORT } : {}));
     }
     case "embeddings": return render(state, embeddingsForm(state, {}, await canReuseLlmKey(db)));
-    case "transcription": return render(state, transcriptionForm(state));
+    case "transcription": return render(state, transcriptionForm(state, {}, (await getSetting<TranscriptionSettings>(db, "transcription"))?.provider ?? "mistral"));
     case "email": {
       const email = await getSetting<EmailSettings>(db, "email");
       return render(state, emailForm(state, {}, email && "from" in email ? { from: email.from } : {}));
@@ -269,16 +284,18 @@ export async function stepSubmit(context: Context, step: ProviderStep, wizard: b
         return done();
       }
       case "transcription": {
+        const provider = text("provider", 20) || "mistral";
+        if (!isTranscriptionProvider(provider)) return render(state, transcriptionForm(state, { provider: "Choose Mistral or Muse." }), 400);
         const apiKey = await keyOrStored("transcription");
-        if (!apiKey) return render(state, transcriptionForm(state, { apiKey: "Enter a Mistral API key." }), 400);
+        if (!apiKey) return render(state, transcriptionForm(state, { apiKey: `Enter a ${TRANSCRIPTION_CHOICES[provider].name} API key.` }, provider), 400);
         try {
-          await checkTranscription(apiKey);
+          await checkTranscription(provider, apiKey);
         } catch (error) {
-          if (error instanceof ProviderError) return render(state, transcriptionForm(state, { form: error.message }), 400);
+          if (error instanceof ProviderError) return render(state, transcriptionForm(state, { form: error.message }, provider), 400);
           throw error;
         }
         await putKey(db, secret, "transcription", apiKey);
-        await putSetting(db, "transcription", { model: MISTRAL_TRANSCRIPTION_MODEL, checkedAt: new Date().toISOString() } satisfies CheckedSettings);
+        await putSetting(db, "transcription", { provider, model: TRANSCRIPTION_MODELS[provider], checkedAt: new Date().toISOString() } satisfies TranscriptionSettings);
         return done();
       }
       case "email": {

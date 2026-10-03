@@ -207,6 +207,18 @@ export const MIGRATIONS: readonly { readonly version: number; readonly statement
       `ALTER TABLE transcripts ADD COLUMN cleaned_by TEXT`,
     ],
   },
+  {
+    version: 12,
+    statements: [
+      // Muse transcribes 10 minutes at a time: how far it has got, in 16 kHz samples, and the segments so far.
+      `CREATE TABLE IF NOT EXISTS transcription_progress (
+        episode_id TEXT PRIMARY KEY REFERENCES episodes(id) ON DELETE CASCADE,
+        done_samples INTEGER NOT NULL,
+        segments_json TEXT NOT NULL CHECK (json_valid(segments_json)),
+        updated_at TEXT NOT NULL
+      )`,
+    ],
+  },
 ];
 
 let applied: Promise<void> | undefined;

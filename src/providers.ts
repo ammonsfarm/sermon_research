@@ -1,8 +1,21 @@
+import { MUSE_SAMPLE_RATE, wavFile } from "./muse.ts";
+
 /** Fixed embedding model so every deployment's vectors match the Vectorize index (1536 dimensions). */
 export const EMBEDDING_MODEL = "text-embedding-3-small";
 export const EMBEDDING_DIMENSIONS = 1536;
 export const OPENAI_BASE_URL = "https://api.openai.com/v1";
 export const MISTRAL_TRANSCRIPTION_MODEL = "voxtral-mini-latest";
+export const MUSE_TRANSCRIPTION_MODEL = "muse-voice-transcribe-1.0";
+export const MUSE_TRANSCRIBE_URL = "https://api.meta.ai/v1/asr/transcribe";
+
+export const TRANSCRIPTION_PROVIDERS = ["mistral", "muse"] as const;
+export type TranscriptionProvider = (typeof TRANSCRIPTION_PROVIDERS)[number];
+
+export function isTranscriptionProvider(value: unknown): value is TranscriptionProvider {
+  return TRANSCRIPTION_PROVIDERS.includes(value as TranscriptionProvider);
+}
+
+export const TRANSCRIPTION_MODELS: Record<TranscriptionProvider, string> = { mistral: MISTRAL_TRANSCRIPTION_MODEL, muse: MUSE_TRANSCRIPTION_MODEL };
 
 /**
  * Sent on every outbound request. Workers' fetch sends no User-Agent by default,
@@ -19,6 +32,22 @@ export function withUserAgent(headers: HeadersInit = {}): Headers {
 }
 
 export class ProviderError extends Error {}
+
+/** Muse transcription's documented failures, explained. `status` is the HTTP status. */
+export class MuseTranscribeError extends ProviderError {
+  readonly status: number;
+
+  constructor(status: number, body: string) {
+    const detail = providerMessage(body);
+    const explained = status === 400 ? "Muse couldn't use the audio (HTTP 400). Each part must be mono 16-bit WAV, at most 10 minutes long."
+      : status === 401 || status === 403 ? `Muse refused the transcription key (HTTP ${status}). Check it in Admin → Transcription.`
+        : status === 413 ? "Muse says the audio part is over its 32 MB limit (HTTP 413)."
+          : status === 429 ? "Muse says the account is at its limit for transcriptions running at once or per hour (HTTP 429). It retries on its own; lower \"Episodes at once\" if it keeps happening."
+            : `Muse transcription returned HTTP ${status}.`;
+    super(`${explained}${detail ? ` It said: "${detail}"` : ""}`);
+    this.status = status;
+  }
+}
 
 export interface LlmSettings {
   readonly baseUrl: string;
@@ -105,9 +134,50 @@ export async function checkEmbeddings(apiKey: string, fetcher: typeof fetch = fe
   if (body?.data?.[0]?.embedding?.length !== EMBEDDING_DIMENSIONS) throw new ProviderError("OpenAI replied, but not with a 1536-dimension embedding.");
 }
 
-/** Lists models to confirm the Mistral key works; transcribing a sample would cost money on every check. */
-export async function checkTranscription(apiKey: string, fetcher: typeof fetch = fetch): Promise<void> {
+/**
+ * Confirms the transcription key works. For Mistral, lists models: transcribing
+ * a sample would cost money on every check. Muse has no free call, so it
+ * transcribes one second of silence, a fraction of a cent.
+ */
+export async function checkTranscription(provider: TranscriptionProvider, apiKey: string, fetcher: typeof fetch = fetch): Promise<void> {
+  if (provider === "muse") {
+    const reply = await museTranscribe(wavFile(new Int16Array(MUSE_SAMPLE_RATE)), apiKey, fetcher, 30_000);
+    if (typeof reply !== "object" || reply === null || Array.isArray(reply)) throw new ProviderError("Muse replied, but not with a transcription.");
+    return;
+  }
   await call("https://api.mistral.ai/v1/models", { headers: { Authorization: `Bearer ${apiKey}` } }, fetcher, "Mistral");
+}
+
+/**
+ * Sends one WAV (mono 16-bit, 16 or 24 kHz, up to 10 minutes and 32 MB) to
+ * Muse's file transcription in ENDPOINTING mode, which splits it into timed
+ * turns. The multipart body is written out by hand so the request part goes as
+ * JSON without a filename, as in Muse's own curl example.
+ */
+export async function museTranscribe(wav: Uint8Array, apiKey: string, fetcher: typeof fetch = fetch, timeoutMs = 5 * 60_000): Promise<{ turns?: unknown; transcript?: unknown }> {
+  const boundary = `sermon-research-${crypto.randomUUID()}`;
+  const request = JSON.stringify({ mode: "ENDPOINTING", model: MUSE_TRANSCRIPTION_MODEL, audioEncoding: "WAV" });
+  const body = new Blob([
+    `--${boundary}\r\nContent-Disposition: form-data; name="request"\r\nContent-Type: application/json\r\n\r\n${request}\r\n`,
+    `--${boundary}\r\nContent-Disposition: form-data; name="audio"; filename="audio.wav"\r\nContent-Type: audio/wav\r\n\r\n`,
+    wav,
+    `\r\n--${boundary}--\r\n`,
+  ]);
+  let response: Response;
+  try {
+    response = await fetcher(MUSE_TRANSCRIBE_URL, {
+      method: "POST",
+      headers: withUserAgent({ Authorization: `Bearer ${apiKey}`, "Content-Type": `multipart/form-data; boundary=${boundary}`, Accept: "application/json" }),
+      body,
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch {
+    throw new ProviderError("Muse transcription didn't respond. Try again in a minute.");
+  }
+  if (!response.ok) throw new MuseTranscribeError(response.status, await response.text().catch(() => ""));
+  const reply = await response.json().catch(() => null) as unknown;
+  if (typeof reply !== "object" || reply === null) throw new ProviderError("Muse replied, but not with JSON.");
+  return reply as { turns?: unknown; transcript?: unknown };
 }
 
 export async function sendEmail(

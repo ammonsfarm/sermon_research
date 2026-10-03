@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { getKey } from "../src/keys.ts";
-import { isMetaApi, providerMessage, reasoningFields, sendEmail } from "../src/providers.ts";
-import { getSetting, type LlmSettingsRecord } from "../src/settings.ts";
-import { ADMIN, completeSetup, cookieFrom, createApp, fakeProviders, FEED_URL, MINISTRY, PROVIDERS, SECRET } from "./helpers.ts";
+import { isMetaApi, MuseTranscribeError, museTranscribe, providerMessage, reasoningFields, sendEmail } from "../src/providers.ts";
+import { getSetting, type LlmSettingsRecord, type TranscriptionSettings } from "../src/settings.ts";
+import { ADMIN, completeSetup, cookieFrom, createApp, fakeProviders, FEED_URL, MINISTRY, type MuseUpload, PROVIDERS, SECRET } from "./helpers.ts";
 
 async function atStep(step: string) {
   const app = createApp();
@@ -120,6 +120,85 @@ test("embeddings reuse the OpenAI answers key when left blank", async () => {
   } finally {
     providers.restore();
   }
+});
+
+test("transcription is Mistral unless the admin picks Muse, which is checked with a second of silence", async () => {
+  const { app, cookie } = await atStep("transcription");
+  const providers = fakeProviders();
+  try {
+    const form = await (await app.request("/setup/transcription", { cookie })).text();
+    assert.match(form, /<input type="radio" name="provider" value="mistral" checked><span><strong>Mistral<\/strong>/);
+    assert.match(form, /<input type="radio" name="provider" value="muse"><span><strong>Muse<\/strong><br><span class="hint">Meta&#39;s muse-voice-transcribe-1\.0\. Muse only accepts WAV, so this site converts your feed&#39;s MP3s to WAV/);
+
+    const unknown = await app.request("/setup/transcription", { form: { provider: "whisper", apiKey: "k" }, cookie });
+    assert.equal(unknown.status, 400);
+    assert.match(await unknown.text(), /Choose Mistral or Muse\./);
+    assert.equal(providers.calls.length, 0, "nothing is sent for an unknown service");
+
+    const refused = fakeProviders({ "https://api.meta.ai/v1/asr/transcribe": 401 });
+    try {
+      const rejected = await app.request("/setup/transcription", { form: PROVIDERS.muse, cookie });
+      assert.equal(rejected.status, 400);
+      const page = await rejected.text();
+      assert.match(page, /Muse refused the transcription key \(HTTP 401\)\. Check it in Admin → Transcription\. It said: &quot;nope&quot;/);
+      assert.match(page, /value="muse" checked/, "the choice is kept");
+    } finally {
+      refused.restore();
+    }
+
+    const saved = await app.request("/setup/transcription", { form: PROVIDERS.muse, cookie });
+    assert.equal(saved.headers.get("Location"), "/setup/email");
+    const check = providers.calls.at(-1)!;
+    assert.equal(check.url, "https://api.meta.ai/v1/asr/transcribe");
+    assert.equal(check.authorization, "Bearer muse-key-4321");
+    const upload = check.body as MuseUpload;
+    assert.deepEqual([upload.wav.rate, upload.wav.channels, upload.wav.samples.length, upload.wav.samples.every((sample) => sample === 0)], [16_000, 1, 16_000, true]);
+    const setting = await getSetting<TranscriptionSettings>(app.env.DB, "transcription");
+    assert.deepEqual([setting?.provider, setting?.model], ["muse", "muse-voice-transcribe-1.0"]);
+    assert.match(await (await app.request("/setup/transcription", { cookie })).text(), /value="muse" checked/);
+
+    // Mistral is still the default, checked as before.
+    await app.request("/setup/transcription", { form: PROVIDERS.transcription, cookie });
+    assert.equal(providers.calls.at(-1)?.url, "https://api.mistral.ai/v1/models");
+    const mistral = await getSetting<TranscriptionSettings>(app.env.DB, "transcription");
+    assert.deepEqual([mistral?.provider, mistral?.model], ["mistral", "voxtral-mini-latest"]);
+  } finally {
+    providers.restore();
+  }
+});
+
+test("the admin overview names the transcription service", async () => {
+  const app = createApp();
+  const cookie = await completeSetup(app);
+  assert.match(await (await app.request("/admin", { cookie })).text(), /<dd>Mistral voxtral-mini-latest · key ending 5678<\/dd>/);
+  const providers = fakeProviders();
+  try {
+    await app.request("/admin/transcription", { form: PROVIDERS.muse, cookie });
+  } finally {
+    providers.restore();
+  }
+  assert.match(await (await app.request("/admin", { cookie })).text(), /<dd>Muse muse-voice-transcribe-1\.0 · key ending 4321<\/dd>/);
+  await app.env.DB.prepare("UPDATE settings SET value_json = json_remove(value_json, '$.provider') WHERE key = 'transcription'").run();
+  assert.match(await (await app.request("/admin", { cookie })).text(), /<dd>Mistral muse-voice-transcribe-1\.0/, "a setting saved before Muse was offered reads as Mistral");
+});
+
+test("Muse's documented errors are explained, with Muse's own message", async () => {
+  const replying = (status: number) => (async () => Response.json({ type: "invalid_request", code: "x", param: null, message: `Reason ${status}` }, { status })) as typeof fetch;
+  const wav = new Uint8Array(44);
+  const cases: [number, RegExp][] = [
+    [400, /^Muse couldn't use the audio \(HTTP 400\)\. Each part must be mono 16-bit WAV, at most 10 minutes long\. It said: "Reason 400"$/u],
+    [401, /^Muse refused the transcription key \(HTTP 401\)\./u],
+    [413, /^Muse says the audio part is over its 32 MB limit \(HTTP 413\)\. It said: "Reason 413"$/u],
+    [429, /^Muse says the account is at its limit for transcriptions running at once or per hour \(HTTP 429\)\./u],
+    [500, /^Muse transcription returned HTTP 500\. It said: "Reason 500"$/u],
+  ];
+  for (const [status, message] of cases) {
+    const error = await museTranscribe(wav, "k", replying(status)).then(() => null, (caught: unknown) => caught);
+    assert.ok(error instanceof MuseTranscribeError, `HTTP ${status}`);
+    assert.equal(error.status, status);
+    assert.match(error.message, message);
+  }
+  await assert.rejects(museTranscribe(wav, "k", (async () => { throw new TypeError("network"); }) as typeof fetch), /^Error: Muse transcription didn't respond/u);
 });
 
 test("steps can't be skipped ahead in the wizard", async () => {

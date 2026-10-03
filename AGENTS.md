@@ -16,13 +16,15 @@ before anything in the "Ask first" list below.
 | `src/settings.ts` | Key-value settings stored in D1 (ministry details, provider choices, wizard progress) |
 | `src/steps.ts` | Wizard and admin pages for the podcast feed, answers AI, embeddings, transcription and email |
 | `src/feed.ts` | Podcast RSS fetch and parse, including each episode's description and author |
-| `src/providers.ts` | Live checks and calls to OpenAI-compatible APIs, OpenAI embeddings, Mistral and Resend |
+| `src/providers.ts` | Live checks and calls to OpenAI-compatible APIs, OpenAI embeddings, Mistral, Muse transcription (with its error messages) and Resend |
 | `src/keys.ts` | API keys stored AES-GCM encrypted in `provider_keys` |
 | `src/links.ts` | Emailed sign-in links |
 | `src/imports.ts` | Import step with cost estimate, episodes dashboard, schedule page, hourly cron logic |
 | `src/audio.ts` | Copies episode audio into the `AUDIO` R2 bucket, signs short-lived links for the transcription service, serves `/audio/:id` with ranges |
 | `src/episodes.ts` | Episode rows from the feed, the queue, and starting workflow runs (up to the admin's "episodes at once" setting) |
-| `src/pipeline.ts` | The per-episode steps: transcribe (Mistral) into `transcripts_draft`, clean up into `transcripts`, summarize and identify the speaker (answers AI), chunk, embed and write to Vectorize |
+| `src/pipeline.ts` | The per-episode steps: transcribe (Mistral in one step, or Muse a part at a time) into `transcripts_draft`, clean up into `transcripts`, summarize and identify the speaker (answers AI), chunk, embed and write to Vectorize |
+| `src/mp3.ts`, `src/mp3.wasm` | Decodes the stored MP3 to 16 kHz mono for Muse, inside the Worker. The `.wasm` is minimp3 (public domain, `vendor/minimp3`) with the small wrapper in `wasm/mp3.c`; it's committed, and `scripts/build-mp3-wasm.sh` rebuilds it with Zig |
+| `src/muse.ts` | Muse's side of transcription: WAV files, ending each part at a pause, and turning Muse's turns into timed segments |
 | `src/cleanup.ts` | Transcript cleanup: the prompt, batching, and keeping the draft wherever the answers AI's change looks like more than a correction |
 | `src/workflow.ts` | The Cloudflare Workflow classes: one runs `pipeline.ts` for an episode, the other runs `writing.ts` for a document |
 | `src/schedule.ts` | Daily/weekly schedule in the church's time zone |
@@ -188,6 +190,23 @@ first request after each deploy.
   are marked failed by the next hourly tick, and can then be retried.
 - **Process more or fewer episodes at once:** Admin → Episodes → "Episodes
   at once" (1 to 5, default 2). Use 1 for free or low-limit provider plans.
+- **Transcription service:** Admin → Transcription chooses Mistral (the
+  default; sites set up before the choice existed have no `provider` and
+  read as Mistral) or Muse (`muse-voice-transcribe-1.0`). Both use the same
+  `transcription` key slot, so switching needs the other service's key; the
+  Muse check transcribes one second of silence. Mistral fetches the audio
+  itself from a signed link. Muse only takes mono 16-bit WAV of up to 10
+  minutes and 32 MB, and Workers can't run ffmpeg, so each part is its own
+  workflow step that decodes the R2 copy of the MP3 from the start with the
+  WebAssembly decoder in `src/mp3.ts`, keeps up to 9.5 minutes
+  (`MUSE_LIMITS` in `src/muse.ts`) as 16 kHz mono, ends it at the quietest
+  quarter second in its last 30 seconds, and sends it. Turns come back in
+  milliseconds from the start of the part and are offset into the sermon.
+  Progress is saved in `transcription_progress`, so a retry carries on from
+  the last finished part. Decoding a 45-minute sermon's last part takes
+  about 3 seconds of CPU and 45 MB of memory, inside the Workers Paid
+  plan's 30-second default. Muse can't take M4A, AAC or other non-MP3
+  feeds; those episodes fail with a message saying to switch to Mistral.
 - **Transcription says the file couldn't be fetched:** Mistral downloads the
   audio from `/audio/:id` on this site using a signed link, so the site must
   be reachable publicly. The link's origin is saved as `site_origin` whenever
@@ -207,7 +226,7 @@ first request after each deploy.
   makes them unreadable and they must be re-entered.
 - Anything that costs money: paid plans, or importing many episodes. The
   import page's estimate uses list prices from when it was written; have the
-  person check current Mistral and AI provider pricing for large imports.
+  person check current transcription (Mistral or Muse) and AI provider pricing for large imports.
 - Deleting the Vectorize index.
 
 ## Never

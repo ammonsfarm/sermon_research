@@ -4,14 +4,16 @@ import { concurrency, dispatchQueued, type EpisodeRow, listEpisodes, MAX_CONCURR
 import { type Feed, FeedError, fetchFeed } from "./feed.ts";
 import { html, page, type Html } from "./html.ts";
 import { DEFAULT_SCHEDULE, describeSchedule, isDue, isValidTimeZone, localSlot, parseSchedule, type Schedule, WEEKDAYS } from "./schedule.ts";
-import { getSetting, getSetupStep, type PodcastSettings, putSetting } from "./settings.ts";
+import type { TranscriptionProvider } from "./providers.ts";
+import { getSetting, getSetupStep, type PodcastSettings, putSetting, type TranscriptionSettings } from "./settings.ts";
 import type { AppEnv } from "./env.ts";
 import { failStaleDocuments } from "./writing.ts";
 import { chooseMissingMainScriptures, HOURLY_MAIN_TEXTS } from "./scriptures.ts";
 import { HOURLY_SPEAKERS, identifyMissingSpeakers } from "./speakers.ts";
 
-/** Mistral's list price for Voxtral Mini transcription when this was written; check mistral.ai/pricing. */
-const TRANSCRIPTION_USD_PER_MINUTE = 0.001;
+/** List prices when this was written: Mistral's Voxtral Mini (mistral.ai/pricing) and Muse's $0.18 an hour (dev.meta.ai). */
+const TRANSCRIPTION_USD_PER_MINUTE: Record<TranscriptionProvider, number> = { mistral: 0.001, muse: 0.003 };
+const TRANSCRIPTION_NAMES: Record<TranscriptionProvider, string> = { mistral: "Mistral", muse: "Muse" };
 /** Used when a feed doesn't say how long an episode is. */
 const ASSUMED_MINUTES = 40;
 /** Rough spoken-English token rate, used to size the answers AI's work: reading the transcript to clean it, writing it back, then reading it to summarize. */
@@ -25,7 +27,7 @@ export interface Estimate {
   readonly aiTokens: number;
 }
 
-export function estimate(feed: Feed, count: number): Estimate {
+export function estimate(feed: Feed, count: number, provider: TranscriptionProvider = "mistral"): Estimate {
   const chosen = [...feed.episodes].filter((episode) => episode.audioUrl)
     .sort((a, b) => (b.publishedAt ?? "").localeCompare(a.publishedAt ?? "")).slice(0, count);
   const guessed = chosen.filter((episode) => !episode.durationSeconds).length;
@@ -34,7 +36,7 @@ export function estimate(feed: Feed, count: number): Estimate {
     episodes: chosen.length,
     minutes,
     guessedDurations: guessed,
-    transcriptionUsd: minutes * TRANSCRIPTION_USD_PER_MINUTE,
+    transcriptionUsd: minutes * TRANSCRIPTION_USD_PER_MINUTE[provider],
     aiTokens: minutes * TOKENS_PER_MINUTE * 3 + chosen.length * 4_000,
   };
 }
@@ -58,7 +60,7 @@ function scheduleFields(schedule: Schedule): Html {
 <input id="f-timeZone" name="timeZone" value="${schedule.timeZone}" required></div>`;
 }
 
-function importView(context: Context, feed: Feed, schedule: Schedule, error?: string): Html {
+function importView(context: Context, feed: Feed, schedule: Schedule, provider: TranscriptionProvider, error?: string): Html {
   const total = feed.episodes.filter((episode) => episode.audioUrl).length;
   const options = [0, 10, 50].filter((count) => count < total).concat(total);
   return html`<p class="steps">Setup · step 8 of 8</p>
@@ -68,12 +70,12 @@ ${error ? html`<p class="alert">${error}</p>` : ""}
 <form method="post" action="/setup/import">
 <fieldset class="choices"><legend>How many past episodes?</legend>
 ${options.map((count) => {
-    const cost = estimate(feed, count);
+    const cost = estimate(feed, count, provider);
     return html`<label class="choice"><input type="radio" name="count" value="${count}"${count === Math.min(10, total) ? html` checked` : ""}>
 <span><strong>${count === 0 ? "None, only new ones" : count === total ? `All ${count}` : `Newest ${count}`}</strong>${count > 0 ? html`<br><span class="hint">About ${cost.minutes.toLocaleString("en-US")} minutes of audio · transcription ${money(cost.transcriptionUsd)} · about ${cost.aiTokens.toLocaleString("en-US")} tokens on your answers AI, about a third of them written out${cost.guessedDurations ? ` · ${cost.guessedDurations} lengths guessed` : ""}</span>` : ""}</span></label>`;
   })}
 </fieldset>
-<p class="hint">Transcription uses Mistral's list price of $${TRANSCRIPTION_USD_PER_MINUTE} per minute when this was written; embeddings add a few cents at most. Check your providers' current prices.</p>
+<p class="hint">Transcription uses ${TRANSCRIPTION_NAMES[provider]}'s list price of $${TRANSCRIPTION_USD_PER_MINUTE[provider]} per minute when this was written; embeddings add a few cents at most. Check your providers' current prices.</p>
 <h2>Schedule</h2>
 ${scheduleFields(schedule)}
 <button type="submit">Start import</button>
@@ -95,15 +97,16 @@ export async function importStep(context: Context): Promise<Response> {
     const message = error instanceof FeedError ? error.message : "The feed couldn't be read.";
     return page("Import", html`<h1>Import episodes</h1><p class="alert">${message}</p><p><a href="/setup/import">Try again</a></p>`, { status: 502, ...chrome(context) });
   }
+  const provider = (await getSetting<TranscriptionSettings>(context.db, "transcription"))?.provider ?? "mistral";
   const guessedZone = (context.request as Request & { cf?: { timezone?: string } }).cf?.timezone;
   const defaults: Schedule = { ...DEFAULT_SCHEDULE, timeZone: guessedZone && isValidTimeZone(guessedZone) ? guessedZone : DEFAULT_SCHEDULE.timeZone };
-  if (context.request.method === "GET") return page("Import", importView(context, feed, defaults), chrome(context));
+  if (context.request.method === "GET") return page("Import", importView(context, feed, defaults, provider), chrome(context));
 
   const form = await context.request.formData();
   const parsed = parseSchedule(form);
   const count = Number(form.get("count"));
-  if ("error" in parsed) return page("Import", importView(context, feed, defaults, parsed.error), { status: 400, ...chrome(context) });
-  if (!Number.isInteger(count) || count < 0) return page("Import", importView(context, feed, parsed.schedule, "Choose how many episodes to import."), { status: 400, ...chrome(context) });
+  if ("error" in parsed) return page("Import", importView(context, feed, defaults, provider, parsed.error), { status: 400, ...chrome(context) });
+  if (!Number.isInteger(count) || count < 0) return page("Import", importView(context, feed, parsed.schedule, provider, "Choose how many episodes to import."), { status: 400, ...chrome(context) });
   await putSetting(context.db, "schedule", parsed.schedule);
   await rememberOrigin(context);
   await recordFeed(context.db, feed, { backfill: count });
