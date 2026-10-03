@@ -1,9 +1,9 @@
 import { type Context, clientIp, redirect, requireAdmin, chrome } from "./context.ts";
 import { html, type Html, page } from "./html.ts";
 import { renderMarkdown } from "./markdown.ts";
-import { ProviderError, withUserAgent } from "./providers.ts";
+import { ProviderError, reasoningFields, withUserAgent } from "./providers.ts";
 import { embed, requireKey, type Segment } from "./pipeline.ts";
-import { getSetting, getSetupStep, type LlmSettingsRecord, type Ministry, putSetting } from "./settings.ts";
+import { type EffortSetting, getSetting, getSetupStep, type LlmSettingsRecord, type Ministry, putSetting } from "./settings.ts";
 import { HOUR_MS, recordUse, startOfUtcDay, usedSince } from "./usage.ts";
 import type { AppEnv } from "./env.ts";
 
@@ -172,8 +172,8 @@ export function parseNumbered<T>(content: string, count: number, read: (value: u
   return Array.from({ length: count }, (_unused, index) => read(parsed[String(index + 1)]));
 }
 
-/** One chat completion from the configured answers AI. */
-export async function chat(env: AppEnv, system: string, user: string, options: { maxTokens: number; timeoutMs: number }): Promise<string> {
+/** One chat completion from the configured answers AI. Sermon processing passes `effort: "summaryEffort"`; the rest use the chat effort. */
+export async function chat(env: AppEnv, system: string, user: string, options: { maxTokens: number; timeoutMs: number; effort?: EffortSetting }): Promise<string> {
   const llm = await getSetting<LlmSettingsRecord>(env.DB, "llm");
   if (!llm) throw new ProviderError("The answers AI isn't set up.");
   const apiKey = await requireKey(env, "llm");
@@ -184,6 +184,7 @@ export async function chat(env: AppEnv, system: string, user: string, options: {
       model: llm.model,
       messages: [{ role: "system", content: system }, { role: "user", content: user }],
       max_tokens: options.maxTokens,
+      ...reasoningFields(llm.baseUrl, llm[options.effort ?? "chatEffort"]),
     }),
     signal: AbortSignal.timeout(options.timeoutMs),
   });

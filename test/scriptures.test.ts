@@ -4,6 +4,7 @@ import test from "node:test";
 import { hourlyTick } from "../src/imports.ts";
 import { parseNumbered } from "../src/research.ts";
 import { normalizeReference, sameReference } from "../src/scriptures.ts";
+import { putSetting } from "../src/settings.ts";
 import { indexedSite, type TestApp } from "./helpers.ts";
 
 const isChat = (call: { url: string }) => call.url.endsWith("/chat/completions");
@@ -32,6 +33,21 @@ test("the summary names the main passage, kept apart from everything else mentio
     assert.match(search.split("Related in meaning")[0]!, /Faith &amp; Works/, "keyword search matches the main text");
     const markdown = await (await site.app.request(`/episodes/${newer}/transcript.md`, { cookie: site.cookie })).text();
     assert.match(markdown, /## Summary\n\nGrace is a gift\.\n\n\*\*Main text:\*\* Ephesians 2:1-10\n\n\*\*Topics:\*\* grace\n\n\*\*Scripture:\*\* Ephesians 2:8/);
+  } finally {
+    site.restore();
+  }
+});
+
+test("the main-text catch-up uses the summary reasoning effort", async () => {
+  const site = await indexedSite();
+  try {
+    await putSetting(site.app.env.DB, "llm", { baseUrl: "https://api.meta.ai/v1", model: "muse", summaryEffort: "high", chatEffort: "minimal", checkedAt: "" });
+    await site.app.env.DB.prepare("UPDATE summaries SET main_scripture = NULL").run();
+    const before = site.providers.calls.length;
+    await hourlyTick(site.app.env, new Date());
+    const asked = site.providers.calls.slice(before).filter(isChat).find((call) => JSON.stringify(call.body).includes("main Bible passage"))!;
+    assert.equal(asked.url, "https://api.meta.ai/v1/chat/completions");
+    assert.equal((asked.body as { reasoning_effort?: string }).reasoning_effort, "high");
   } finally {
     site.restore();
   }

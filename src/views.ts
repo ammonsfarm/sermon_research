@@ -3,6 +3,7 @@ import type { ResearchSettings } from "./research.ts";
 import type { User } from "./auth.ts";
 import type { keyInfo } from "./keys.ts";
 import { field, html, type Html } from "./html.ts";
+import { DEFAULT_REASONING_EFFORT, isMetaApi } from "./providers.ts";
 import type { CheckedSettings, EmailSettings, LlmSettingsRecord, Ministry, PodcastSettings } from "./settings.ts";
 
 type Errors = Readonly<Record<string, string>>;
@@ -122,7 +123,7 @@ ${overview.saved ? html`<p>Saved.</p>` : ""}
 <h2>Connections</h2>
 <dl>
 <dt><a href="/admin/podcast">Podcast</a></dt><dd>${podcast ? `${podcast.title} · ${podcast.episodeCount} episodes` : "Not set"}</dd>
-<dt><a href="/admin/llm">Answers AI</a></dt><dd>${llm ? `${llm.model} at ${new URL(llm.baseUrl).host}${keyLabel(keys.llm)}` : "Not set"}</dd>
+<dt><a href="/admin/llm">Answers AI</a></dt><dd>${llm ? `${llm.model} at ${new URL(llm.baseUrl).host}${isMetaApi(llm.baseUrl) ? ` · reasoning effort: summaries ${llm.summaryEffort ?? DEFAULT_REASONING_EFFORT}, chat ${llm.chatEffort ?? DEFAULT_REASONING_EFFORT}` : ""}${keyLabel(keys.llm)}` : "Not set"}</dd>
 <dt><a href="/admin/embeddings">Embeddings</a></dt><dd>${embeddings ? `${embeddings.model}${keyLabel(keys.embeddings)}` : "Not set"}</dd>
 <dt><a href="/admin/transcription">Transcription</a></dt><dd>${transcription ? `Mistral ${transcription.model}${keyLabel(keys.transcription)}` : "Not set"}</dd>
 <dt><a href="/admin/email">Email</a></dt><dd>${email && "from" in email ? `Resend from ${email.from}${keyLabel(keys.email)}` : "Off (password sign-in only)"}</dd>

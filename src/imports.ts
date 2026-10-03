@@ -14,7 +14,7 @@ import { HOURLY_SPEAKERS, identifyMissingSpeakers } from "./speakers.ts";
 const TRANSCRIPTION_USD_PER_MINUTE = 0.001;
 /** Used when a feed doesn't say how long an episode is. */
 const ASSUMED_MINUTES = 40;
-/** Rough spoken-English token rate, used to size the summary cost on the answers AI. */
+/** Rough spoken-English token rate, used to size the answers AI's work: reading the transcript to clean it, writing it back, then reading it to summarize. */
 const TOKENS_PER_MINUTE = 200;
 
 export interface Estimate {
@@ -22,7 +22,7 @@ export interface Estimate {
   readonly minutes: number;
   readonly guessedDurations: number;
   readonly transcriptionUsd: number;
-  readonly summaryTokens: number;
+  readonly aiTokens: number;
 }
 
 export function estimate(feed: Feed, count: number): Estimate {
@@ -35,7 +35,7 @@ export function estimate(feed: Feed, count: number): Estimate {
     minutes,
     guessedDurations: guessed,
     transcriptionUsd: minutes * TRANSCRIPTION_USD_PER_MINUTE,
-    summaryTokens: minutes * TOKENS_PER_MINUTE + chosen.length * 2_000,
+    aiTokens: minutes * TOKENS_PER_MINUTE * 3 + chosen.length * 4_000,
   };
 }
 
@@ -70,7 +70,7 @@ ${error ? html`<p class="alert">${error}</p>` : ""}
 ${options.map((count) => {
     const cost = estimate(feed, count);
     return html`<label class="choice"><input type="radio" name="count" value="${count}"${count === Math.min(10, total) ? html` checked` : ""}>
-<span><strong>${count === 0 ? "None, only new ones" : count === total ? `All ${count}` : `Newest ${count}`}</strong>${count > 0 ? html`<br><span class="hint">About ${cost.minutes.toLocaleString("en-US")} minutes of audio · transcription ${money(cost.transcriptionUsd)} · about ${cost.summaryTokens.toLocaleString("en-US")} tokens on your answers AI${cost.guessedDurations ? ` · ${cost.guessedDurations} lengths guessed` : ""}</span>` : ""}</span></label>`;
+<span><strong>${count === 0 ? "None, only new ones" : count === total ? `All ${count}` : `Newest ${count}`}</strong>${count > 0 ? html`<br><span class="hint">About ${cost.minutes.toLocaleString("en-US")} minutes of audio · transcription ${money(cost.transcriptionUsd)} · about ${cost.aiTokens.toLocaleString("en-US")} tokens on your answers AI, about a third of them written out${cost.guessedDurations ? ` · ${cost.guessedDurations} lengths guessed` : ""}</span>` : ""}</span></label>`;
   })}
 </fieldset>
 <p class="hint">Transcription uses Mistral's list price of $${TRANSCRIPTION_USD_PER_MINUTE} per minute when this was written; embeddings add a few cents at most. Check your providers' current prices.</p>

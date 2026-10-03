@@ -108,7 +108,7 @@ export async function identifySpeakers(env: AppEnv, episodeIds: readonly string[
       row.description ? `Feed description: ${row.description}` : "",
       row.opening ? `Transcript start: ${row.opening}…` : "",
     ].filter(Boolean).join("\n")).join("\n\n");
-    const reply = await chat(env, prompt(ministry), episodes, { maxTokens: SPEAKER_MAX_TOKENS, timeoutMs: SPEAKER_TIMEOUT_MS });
+    const reply = await chat(env, prompt(ministry), episodes, { maxTokens: SPEAKER_MAX_TOKENS, timeoutMs: SPEAKER_TIMEOUT_MS, effort: "summaryEffort" });
     const speakers = parseSpeakers(reply, results.length, ministry?.speakerNames ?? []);
     await db.batch(results.map((row, index) => db.prepare("UPDATE episodes SET speaker = ?, speaker_source = 'ai' WHERE id = ? AND speaker_source IS NULL").bind(speakers[index], row.id)));
     checked += results.length;

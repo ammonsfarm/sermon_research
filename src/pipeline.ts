@@ -1,7 +1,8 @@
 import { downloadAudio, formatBytes, signedAudioUrl } from "./audio.ts";
+import { batchEnd, cleanSegments } from "./cleanup.ts";
 import type { AppEnv } from "./env.ts";
 import { getKey } from "./keys.ts";
-import { EMBEDDING_MODEL, MISTRAL_TRANSCRIPTION_MODEL, ProviderError, withUserAgent } from "./providers.ts";
+import { EMBEDDING_MODEL, MISTRAL_TRANSCRIPTION_MODEL, ProviderError, reasoningFields, withUserAgent } from "./providers.ts";
 import { getSetting, type LlmSettingsRecord, type Ministry } from "./settings.ts";
 import { normalizeReference } from "./scriptures.ts";
 import { identifySpeakers } from "./speakers.ts";
@@ -40,6 +41,8 @@ export interface StepConfig {
 
 const DOWNLOAD: StepConfig = { retries: { limit: 3, delay: "1 minute", backoff: "exponential" }, timeout: "15 minutes" };
 const TRANSCRIBE: StepConfig = { retries: { limit: 3, delay: "1 minute", backoff: "exponential" }, timeout: "15 minutes" };
+/** Several calls in one step; each batch is saved as it's done, so a retry or a timeout loses at most one. */
+const CLEAN: StepConfig = { retries: { limit: 5, delay: "30 seconds", backoff: "exponential" }, timeout: "20 minutes" };
 const SUMMARIZE: StepConfig = { retries: { limit: 3, delay: "30 seconds", backoff: "exponential" }, timeout: "5 minutes" };
 const INDEX: StepConfig = { retries: { limit: 3, delay: "30 seconds", backoff: "exponential" }, timeout: "10 minutes" };
 const FINISH: StepConfig = { retries: { limit: 5, delay: "10 seconds", backoff: "exponential" }, timeout: "1 minute" };
@@ -56,7 +59,7 @@ export async function runEpisode(env: AppEnv, step: PipelineStep, episodeId: str
   const secret = env.APP_SECRET ?? "";
   try {
     await step.do("download audio", DOWNLOAD, tracked(db, episodeId, "transcribe", "Downloading the audio", async () => {
-      if (await db.prepare("SELECT 1 FROM transcripts WHERE episode_id = ?").bind(episodeId).first()) return;
+      if (await hasTranscript(db, episodeId)) return;
       const episode = await db.prepare("SELECT audio_url, audio_key FROM episodes WHERE id = ?").bind(episodeId).first<{ audio_url: string | null; audio_key: string | null }>();
       if (episode?.audio_key && await env.AUDIO.head(episode.audio_key)) return;
       if (!episode?.audio_url) throw new ProviderError("This episode has no audio file in the feed.");
@@ -65,7 +68,7 @@ export async function runEpisode(env: AppEnv, step: PipelineStep, episodeId: str
     }));
 
     await step.do("transcribe", TRANSCRIBE, tracked(db, episodeId, "transcribe", "Transcribing with Mistral (often 2 to 10 minutes)", async () => {
-      if (await db.prepare("SELECT 1 FROM transcripts WHERE episode_id = ?").bind(episodeId).first()) return;
+      if (await hasTranscript(db, episodeId)) return;
       const [episode, origin] = await Promise.all([
         db.prepare("SELECT audio_bytes FROM episodes WHERE id = ?").bind(episodeId).first<{ audio_bytes: number | null }>(),
         getSetting<string>(db, "site_origin"),
@@ -75,8 +78,31 @@ export async function runEpisode(env: AppEnv, step: PipelineStep, episodeId: str
       const apiKey = await requireKey(env, "transcription");
       // Mistral fetches our own copy through a short-lived signed link.
       const segments = await transcribe(await signedAudioUrl(secret, origin, episodeId), apiKey);
-      await db.prepare("INSERT OR REPLACE INTO transcripts (episode_id, text, segments_json, model, created_at) VALUES (?, ?, ?, ?, ?)")
-        .bind(episodeId, segments.map((segment) => segment.text.trim()).join(" "), JSON.stringify(segments), MISTRAL_TRANSCRIPTION_MODEL, new Date().toISOString()).run();
+      await db.prepare("INSERT OR REPLACE INTO transcripts_draft (episode_id, text, segments_json, model, created_at) VALUES (?, ?, ?, ?, ?)")
+        .bind(episodeId, joined(segments), JSON.stringify(segments), MISTRAL_TRANSCRIPTION_MODEL, new Date().toISOString()).run();
+    }));
+
+    await step.do("clean transcript", CLEAN, tracked(db, episodeId, "transcribe", "Cleaning up the transcript", async () => {
+      if (await db.prepare("SELECT 1 FROM transcripts WHERE episode_id = ?").bind(episodeId).first()) return;
+      const [llm, ministry, draft] = await Promise.all([
+        getSetting<LlmSettingsRecord>(db, "llm"),
+        getSetting<Ministry>(db, "ministry"),
+        db.prepare("SELECT e.title, d.segments_json, d.cleaned_json, d.model FROM transcripts_draft d JOIN episodes e ON e.id = d.episode_id WHERE d.episode_id = ?")
+          .bind(episodeId).first<{ title: string; segments_json: string; cleaned_json: string | null; model: string }>(),
+      ]);
+      if (!llm) throw new ProviderError("The answers AI isn't set up.");
+      if (!draft) throw new ProviderError("The draft transcript is missing.");
+      const segments = JSON.parse(draft.segments_json) as Segment[];
+      const cleaned = draft.cleaned_json ? JSON.parse(draft.cleaned_json) as string[] : [];
+      while (cleaned.length < segments.length) {
+        await setDetail(db, episodeId, `Cleaning up the transcript with the answers AI (${Math.floor(cleaned.length / segments.length * 100)}% done)`);
+        const first = cleaned.length;
+        cleaned.push(...await cleanSegments(env, ministry, draft.title, segments.slice(first, batchEnd(segments, first)), first));
+        await db.prepare("UPDATE transcripts_draft SET cleaned_json = ? WHERE episode_id = ?").bind(JSON.stringify(cleaned), episodeId).run();
+      }
+      const clean = segments.map((segment, index) => ({ ...segment, text: cleaned[index] ?? segment.text }));
+      await db.prepare("INSERT OR REPLACE INTO transcripts (episode_id, text, segments_json, model, created_at, cleaned_by) VALUES (?, ?, ?, ?, ?, ?)")
+        .bind(episodeId, joined(clean), JSON.stringify(clean), draft.model, new Date().toISOString(), llm.model).run();
     }));
 
     await step.do("summarize", SUMMARIZE, tracked(db, episodeId, "summarize", "Writing the summary", async () => {
@@ -145,6 +171,15 @@ export async function runEpisode(env: AppEnv, step: PipelineStep, episodeId: str
         .bind(describeError(error), new Date().toISOString(), episodeId).run();
     });
   }
+}
+
+/** True once Mistral's draft or the cleaned transcript is saved, so the audio needn't be fetched or transcribed again. */
+async function hasTranscript(db: D1Database, episodeId: string): Promise<boolean> {
+  return Boolean(await db.prepare("SELECT 1 FROM transcripts_draft WHERE episode_id = ?1 UNION ALL SELECT 1 FROM transcripts WHERE episode_id = ?1").bind(episodeId).first());
+}
+
+function joined(segments: readonly Segment[]): string {
+  return segments.map((segment) => segment.text.trim()).join(" ");
 }
 
 /** Workflows re-create errors between steps, so rely on the message rather than the class. */
@@ -228,6 +263,7 @@ export async function summarize(input: {
       ],
       // Generous because thinking models (Gemini 3.x, o-series) can spend part of this before replying.
       max_tokens: SUMMARY_MAX_TOKENS,
+      ...reasoningFields(input.llm.baseUrl, input.llm.summaryEffort),
     }),
   }, "The answers AI", 4 * 60_000) as { choices?: { finish_reason?: unknown; message?: { content?: unknown } }[] };
   const choice = result.choices?.[0];

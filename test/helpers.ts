@@ -137,10 +137,18 @@ export const FEED_XML = `<?xml version="1.0"?>
 /** What the fake church website serves for every episode's MP3. */
 export const AUDIO_BYTES = new TextEncoder().encode("ID3 fake mp3 audio bytes");
 
+/** What Mistral hears, mistakes included. The fake answers AI's cleanup turns it into "Welcome, church. Today we read Ephesians 2:8." */
 export const TRANSCRIPT_SEGMENTS = [
-  { text: "Welcome, church.", start: 0, end: 4.5 },
-  { text: "Today we read Ephesians 2:8.", start: 4.5, end: 11 },
+  { text: "Welcome. church.", start: 0, end: 4.5 },
+  { text: "Today we read a fusions 2:8.", start: 4.5, end: 11 },
 ];
+
+/** Fixes the transcript's two mistakes and returns the segments in the same JSON, as the cleanup prompt asks. */
+function cleanupReply(user: string): string {
+  const items = JSON.parse(user.slice(user.indexOf("Segments:\n") + "Segments:\n".length)) as { id: number; text: string }[];
+  const fixed = items.map((item) => ({ id: item.id, text: item.text.replace("Welcome. church.", "Welcome, church.").replace("a fusions", "Ephesians") }));
+  return `\`\`\`json\n${JSON.stringify(fixed)}\n\`\`\``;
+}
 export const SUMMARY_REPLY = "```json\n{\"summary\": \"Grace is a gift.\", \"mainScripture\": \"Ephesians 2:1–10\", \"topics\": [\"grace\"], \"scriptures\": [\"Ephesians 2:8\"]}\n```";
 
 export const DOCUMENT_REPLY = "```markdown\n# Saved by Grace\n\n**Big idea:** grace is a gift [1].\n\n## Main points\n\n1. Grace is unearned [1]\n   - Read Ephesians 2:8\n2. Faith receives it [2]\n\n<script>alert(1)</script> [evil](javascript:alert(1))\n```";
@@ -186,7 +194,8 @@ export function fakeProviders(fail: Record<string, number> = {}): { calls: FakeC
       const messages = (body as { messages?: { role: string; content: string }[] } | null)?.messages ?? [];
       const system = messages.find((message) => message.role === "system")?.content ?? "";
       const user = messages.find((message) => message.role === "user")?.content ?? "";
-      const content = system.includes("who preached each sermon") ? speakerReply(user)
+      const content = system.includes("You are a transcript editor") ? cleanupReply(user)
+        : system.includes("who preached each sermon") ? speakerReply(user)
         : system.includes("main Bible passage each sermon preaches from") ? mainTextReply(user)
         : system.includes("You plan documents") ? (system.includes("so plan a single part") ? PLAN_SINGLE_REPLY : PLAN_REPLY)
         : system.includes("one part of a longer document") ? PART_REPLY

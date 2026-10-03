@@ -4,6 +4,7 @@ import test from "node:test";
 import worker from "../src/index.ts";
 import { DEFAULT_CONCURRENCY, dispatchQueued, recordFeed } from "../src/episodes.ts";
 import { hourlyTick } from "../src/imports.ts";
+import { batchEnd, mergeCleaned } from "../src/cleanup.ts";
 import { buildChunks, parseSummary, summarize, type PipelineStep, runEpisode } from "../src/pipeline.ts";
 import { ensureSchema } from "../src/schema.ts";
 import { isDue, localSlot, type Schedule } from "../src/schedule.ts";
@@ -113,6 +114,110 @@ test("an episode runs end to end: transcript, summary, chunks and vectors", asyn
   } finally {
     providers.restore();
   }
+});
+
+test("Mistral's draft is kept, cleaned up by the answers AI, and only the cleaned transcript is summarized and indexed", async () => {
+  const app = createApp();
+  const providers = fakeProviders();
+  try {
+    await completeSetup(app, { count: 1 });
+    const [episode] = await episodes(app);
+    await runEpisode(app.env, inlineStep, episode!.id);
+    assert.equal((await episodes(app))[0]!.status, "done");
+
+    const draft = await app.env.DB.prepare("SELECT text, segments_json, model FROM transcripts_draft WHERE episode_id = ?").bind(episode!.id).first<{ text: string; segments_json: string; model: string }>();
+    assert.equal(draft?.text, "Welcome. church. Today we read a fusions 2:8.", "the draft is exactly what Mistral heard");
+    assert.equal(draft?.model, "voxtral-mini-latest");
+    const transcript = await app.env.DB.prepare("SELECT text, segments_json, model, cleaned_by FROM transcripts WHERE episode_id = ?").bind(episode!.id).first<{ text: string; segments_json: string; model: string; cleaned_by: string }>();
+    assert.equal(transcript?.text, "Welcome, church. Today we read Ephesians 2:8.");
+    assert.deepEqual(JSON.parse(transcript!.segments_json), [
+      { text: "Welcome, church.", start: 0, end: 4.5 },
+      { text: "Today we read Ephesians 2:8.", start: 4.5, end: 11 },
+    ], "the cleaned segments keep Mistral's timings");
+    assert.deepEqual([transcript?.model, transcript?.cleaned_by], ["voxtral-mini-latest", "gpt-test"]);
+
+    const chats = providers.calls.filter((call) => call.url.endsWith("/chat/completions")).map((call) => JSON.stringify(call.body));
+    const cleaning = chats.findIndex((body) => body.includes("You are a transcript editor"));
+    const summarizing = chats.findIndex((body) => body.includes("You summarize sermons"));
+    assert.ok(cleaning >= 0 && cleaning < summarizing, "cleanup comes before the summary");
+    assert.match(chats[cleaning]!, /Do NOT summarize, rewrite, or remove spoken content/);
+    assert.match(chats[cleaning]!, /Sermon: \\"Faith & Works\\"\\nChurch: Grace Church/);
+    assert.match(chats[cleaning]!, /\[\{\\"id\\":1,\\"text\\":\\"Welcome\. church\.\\"\},\{\\"id\\":2,/, "segments go as JSON with their IDs");
+    assert.match(chats[summarizing]!, /Today we read Ephesians 2:8\./);
+    assert.doesNotMatch(chats.slice(summarizing).join(""), /a fusions/, "nothing after cleanup sees the draft");
+    const chunk = await app.env.DB.prepare("SELECT text FROM chunks WHERE episode_id = ? AND kind = 'transcript'").bind(episode!.id).first<{ text: string }>();
+    assert.equal(chunk?.text, "Welcome, church. Today we read Ephesians 2:8.", "search indexes the cleaned words");
+
+    // A retry doesn't clean again.
+    const before = providers.calls.length;
+    await runEpisode(app.env, inlineStep, episode!.id);
+    assert.equal(providers.calls.slice(before).filter((call) => JSON.stringify(call.body ?? "").includes("transcript editor")).length, 0);
+  } finally {
+    providers.restore();
+  }
+});
+
+test("a long transcript is cleaned a batch at a time, and a retry carries on from the last saved batch", async () => {
+  const app = createApp();
+  const providers = fakeProviders();
+  const faked = globalThis.fetch;
+  // 30 sentences of about 500 characters: more than one cleanup batch.
+  const long = Array.from({ length: 30 }, (_unused, index) => ({ text: `Sentence ${index + 1} about a fusions. ${"word ".repeat(95).trim()}.`, start: index * 10, end: index * 10 + 10 }));
+  let cleanups = 0;
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url === "https://api.mistral.ai/v1/audio/transcriptions") return Response.json({ text: "", segments: long });
+    // The second batch fails once.
+    if (url.endsWith("/chat/completions") && String(init?.body).includes("transcript editor") && ++cleanups === 2) return new Response("{\"error\":\"busy\"}", { status: 503 });
+    return faked(input, init);
+  }) as typeof fetch;
+  try {
+    await completeSetup(app, { count: 1 });
+    const [episode] = await episodes(app);
+    await runEpisode(app.env, inlineStep, episode!.id);
+    const failed = (await episodes(app))[0]!;
+    assert.equal(failed.status, "failed");
+    assert.match(failed.error ?? "", /The answers AI returned HTTP 503/);
+    const saved = await app.env.DB.prepare("SELECT cleaned_json FROM transcripts_draft WHERE episode_id = ?").bind(episode!.id).first<{ cleaned_json: string }>();
+    const progress = JSON.parse(saved!.cleaned_json) as string[];
+    assert.ok(progress.length > 0 && progress.length < long.length, "the first batches are saved");
+    assert.match(progress[0]!, /^Sentence 1 about Ephesians\./);
+
+    await runEpisode(app.env, inlineStep, episode!.id);
+    assert.equal((await episodes(app))[0]!.status, "done");
+    const asked = providers.calls.filter((call) => JSON.stringify(call.body ?? "").includes("transcript editor")).map((call) => JSON.stringify(call.body));
+    assert.equal(asked.filter((body) => body.includes("Sentence 1 about")).length, 1, "a retry doesn't clean the saved batches again");
+    assert.equal(asked.length, 2, "the failed batch is the only one sent again");
+    const transcript = await app.env.DB.prepare("SELECT segments_json FROM transcripts WHERE episode_id = ?").bind(episode!.id).first<{ segments_json: string }>();
+    const segments = JSON.parse(transcript!.segments_json) as { text: string; start: number }[];
+    assert.equal(segments.length, 30);
+    assert.ok(segments.every((segment, index) => segment.text.startsWith(`Sentence ${index + 1} about Ephesians.`) && segment.start === index * 10));
+  } finally {
+    providers.restore();
+  }
+});
+
+test("cleanup keeps the draft wherever the answers AI drops, rewrites or garbles a segment", () => {
+  const items = [
+    { id: 1, text: "Welcome. church." },
+    { id: 2, text: "Today we read a fusions 2:8 and we see that grace is a gift from God." },
+    { id: 3, text: "Amen." },
+  ];
+  assert.deepEqual(mergeCleaned(items, JSON.stringify([
+    { id: 1, text: "Welcome, church." },
+    { id: 2, text: "Grace is a gift." },
+    { id: 99, text: "Invented." },
+  ])), ["Welcome, church.", items[1]!.text, "Amen."], "a summarized segment and a missing one keep the draft; unknown IDs are ignored");
+  assert.deepEqual(mergeCleaned(items, "Here you go:\n```json\n{\"segments\": [{\"id\": \"3\", \"text\": \" Amen!  \"}]}\n```"), [items[0]!.text, items[1]!.text, "Amen!"], "wrapped replies and string IDs are read");
+  assert.deepEqual(mergeCleaned(items, "Sorry, I can't help with that."), items.map((item) => item.text), "a reply that isn't JSON changes nothing");
+  assert.deepEqual(mergeCleaned(items, "[{\"id\": 1, \"text\": \"\"}]"), items.map((item) => item.text), "an emptied segment keeps the draft");
+});
+
+test("cleanup batches stay within their budget but always take at least one segment", () => {
+  const segments = [100, 100, 100, 500, 50].map((chars, index) => ({ text: "x".repeat(chars), start: index, end: index + 1 }));
+  assert.equal(batchEnd(segments, 0, 300), 3);
+  assert.equal(batchEnd(segments, 3, 300), 4, "an oversized segment goes alone");
+  assert.equal(batchEnd(segments, 4, 300), 5);
 });
 
 test("a failed episode records the provider's error and can be retried from the dashboard", async () => {
@@ -274,6 +379,44 @@ test("a summary cut off by the length limit gets a clear error", async () => {
     );
   } finally {
     globalThis.fetch = original;
+  }
+});
+
+test("summaries send the summary reasoning effort to Meta's API and to no one else", async () => {
+  const original = globalThis.fetch;
+  const bodies: Record<string, unknown>[] = [];
+  globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+    return Response.json({ choices: [{ message: { content: "{\"summary\": \"Grace is a gift.\"}" } }] });
+  }) as typeof fetch;
+  try {
+    const input = { apiKey: "k", ministry: null, title: "T", publishedAt: null, transcript: "words" };
+    await summarize({ ...input, llm: { baseUrl: "https://llm.example", model: "m", summaryEffort: "high", checkedAt: "" } });
+    await summarize({ ...input, llm: { baseUrl: "https://api.meta.ai/v1", model: "muse", checkedAt: "" } });
+    await summarize({ ...input, llm: { baseUrl: "https://api.meta.ai/v1", model: "muse", summaryEffort: "medium", chatEffort: "max", checkedAt: "" } });
+    assert.equal("reasoning_effort" in bodies[0]!, false);
+    assert.equal(bodies[1]!.reasoning_effort, "low", "sites saved before the setting existed get low");
+    assert.equal(bodies[2]!.reasoning_effort, "medium", "the summary effort, not the chat one");
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test("processing a sermon uses the summary reasoning effort for every answers-AI call, speaker included", async () => {
+  const app = createApp();
+  const providers = fakeProviders();
+  try {
+    await completeSetup(app, { count: 1 });
+    await putSetting(app.env.DB, "llm", { baseUrl: "https://api.meta.ai/v1", model: "muse", summaryEffort: "high", chatEffort: "minimal", checkedAt: "" });
+    const [episode] = await episodes(app);
+    await runEpisode(app.env, inlineStep, episode!.id);
+    const chats = providers.calls.filter((call) => call.url === "https://api.meta.ai/v1/chat/completions");
+    assert.match(JSON.stringify(chats.map((call) => call.body)), /who preached each sermon/, "the speaker step ran");
+    assert.match(JSON.stringify(chats.map((call) => call.body)), /You are a transcript editor/, "the cleanup step ran");
+    assert.ok(chats.length >= 3);
+    assert.deepEqual([...new Set(chats.map((call) => (call.body as { reasoning_effort?: string }).reasoning_effort))], ["high"]);
+  } finally {
+    providers.restore();
   }
 });
 

@@ -1,3 +1,4 @@
+import type { ReasoningEffort } from "./providers.ts";
 import { DEFAULT_SCHEME, isScheme } from "./theme.ts";
 
 export interface Ministry {
@@ -32,8 +33,15 @@ export interface PodcastSettings {
 export interface LlmSettingsRecord {
   readonly baseUrl: string;
   readonly model: string;
+  /** Summaries, speakers and main texts. Sent only to Meta's API; missing on sites set up before it existed, which means "low". */
+  readonly summaryEffort?: ReasoningEffort;
+  /** Answers and documents, likewise. */
+  readonly chatEffort?: ReasoningEffort;
   readonly checkedAt: string;
 }
+
+/** Which of the answers AI's reasoning efforts a call uses. */
+export type EffortSetting = "summaryEffort" | "chatEffort";
 
 export interface CheckedSettings {
   readonly model: string;

@@ -190,6 +190,23 @@ export const MIGRATIONS: readonly { readonly version: number; readonly statement
       `ALTER TABLE summaries ADD COLUMN main_scripture TEXT`,
     ],
   },
+  {
+    version: 11,
+    statements: [
+      // Mistral's transcript as it came back, kept after the answers AI cleans it up into transcripts.
+      // cleaned_json holds the cleaned segment texts so far, so a retry carries on where it stopped.
+      `CREATE TABLE IF NOT EXISTS transcripts_draft (
+        episode_id TEXT PRIMARY KEY REFERENCES episodes(id) ON DELETE CASCADE,
+        text TEXT NOT NULL,
+        segments_json TEXT NOT NULL CHECK (json_valid(segments_json)),
+        model TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        cleaned_json TEXT CHECK (cleaned_json IS NULL OR json_valid(cleaned_json))
+      )`,
+      // The answers AI model that cleaned the transcript; null for ones transcribed before cleanup.
+      `ALTER TABLE transcripts ADD COLUMN cleaned_by TEXT`,
+    ],
+  },
 ];
 
 let applied: Promise<void> | undefined;

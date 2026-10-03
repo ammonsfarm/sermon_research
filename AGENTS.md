@@ -22,7 +22,8 @@ before anything in the "Ask first" list below.
 | `src/imports.ts` | Import step with cost estimate, episodes dashboard, schedule page, hourly cron logic |
 | `src/audio.ts` | Copies episode audio into the `AUDIO` R2 bucket, signs short-lived links for the transcription service, serves `/audio/:id` with ranges |
 | `src/episodes.ts` | Episode rows from the feed, the queue, and starting workflow runs (up to the admin's "episodes at once" setting) |
-| `src/pipeline.ts` | The per-episode steps: transcribe (Mistral), summarize (answers AI), chunk, embed and write to Vectorize |
+| `src/pipeline.ts` | The per-episode steps: transcribe (Mistral) into `transcripts_draft`, clean up into `transcripts`, summarize and identify the speaker (answers AI), chunk, embed and write to Vectorize |
+| `src/cleanup.ts` | Transcript cleanup: the prompt, batching, and keeping the draft wherever the answers AI's change looks like more than a correction |
 | `src/workflow.ts` | The Cloudflare Workflow classes: one runs `pipeline.ts` for an episode, the other runs `writing.ts` for a document |
 | `src/schedule.ts` | Daily/weekly schedule in the church's time zone |
 | `src/ask.ts` | Ask home page, the ask box, conversations (the `turns` table, with follow-ups) and the Library |
@@ -124,6 +125,17 @@ first request after each deploy.
   A question that names exactly one speaker ("Pastor Phil's sermons",
   "Friesen") is scoped to their sermons automatically; first names count
   only after a title or as a possessive, and Bible book names never do.
+- **Transcript cleanup:** Mistral's transcript is saved as it came back in
+  `transcripts_draft`. The answers AI then corrects it (`CLEANUP_PROMPT` in
+  `src/cleanup.ts`: proper nouns, stray periods at pauses, capitals) about
+  8,000 characters at a time, sending the segments as JSON with IDs, and the
+  result goes to `transcripts` with Mistral's timings. Everything after that
+  (summary, speaker, main text, search, read-along, documents) reads the
+  cleaned one. A segment keeps its draft text when the reply leaves it out,
+  isn't JSON, or changes more than about a fifth of its words. Each batch is
+  saved in `transcripts_draft.cleaned_json`, so a retry carries on from there.
+  `transcripts.cleaned_by` names the model; it's null for sermons transcribed
+  before cleanup existed, which aren't cleaned.
 - **Main texts:** the summary step asks the answers AI for the passage a
   sermon preaches from (`summaries.main_scripture`) as well as every
   reference it mentions. Sermons summarized before that are caught up by
@@ -149,6 +161,13 @@ first request after each deploy.
 - **Change a provider or rotate a key:** have the person use Admin →
   Connections. A blank key field keeps the saved key. Keys can't be read back
   out of the database in plain text by design.
+- **Muse and reasoning effort:** when the answers AI's base address is on
+  `api.meta.ai`, every chat call sends `reasoning_effort`. Admin → Answers AI
+  has two, both Low by default: "Summary" for sermon processing (transcript
+  cleanup, summaries, speakers, main texts) and "Chat" for answers and documents. A new `chat()`
+  caller picks one with its `effort` option; the connection check always uses
+  Low. Other providers never get the field, since some reject unknown fields
+  with a 400.
 - **Sign-in link emails don't arrive:** the sender address must be on a domain
   verified in Resend (resend.com → Domains, which needs DNS records). Check
   the Resend dashboard's logs, then `npx wrangler tail` for

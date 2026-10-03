@@ -6,15 +6,20 @@ import {
   checkEmbeddings,
   checkLlm,
   checkTranscription,
+  DEFAULT_REASONING_EFFORT,
   EMBEDDING_MODEL,
   isHttpsUrl,
+  isReasoningEffort,
   MISTRAL_TRANSCRIPTION_MODEL,
   OPENAI_BASE_URL,
   ProviderError,
+  REASONING_EFFORTS,
+  type ReasoningEffort,
   sendEmail,
 } from "./providers.ts";
 import {
   type CheckedSettings,
+  type EffortSetting,
   type EmailSettings,
   getSetting,
   getSetupStep,
@@ -38,6 +43,10 @@ const TITLES: Record<ProviderStep, string> = {
   embeddings: "Search embeddings",
   transcription: "Transcription",
   email: "Email",
+};
+
+const EFFORT_LABELS: Record<ReasoningEffort, string> = {
+  none: "None", minimal: "Minimal", low: "Low", medium: "Medium", high: "High", xhigh: "Extra high", max: "Maximum",
 };
 
 type Errors = Record<string, string>;
@@ -99,14 +108,24 @@ function podcastPreview(state: StepState, feedUrl: string, feed: Feed): Html {
 
 function llmForm(state: StepState, errors: Errors = {}, values: Values = {}): Html {
   return html`<h1>Answers AI</h1>
-<p class="lead">This AI writes episode summaries and answers research questions. Any provider with an OpenAI-compatible API works, such as OpenAI, Google Gemini, OpenRouter or Anthropic.</p>
+<p class="lead">This AI writes episode summaries and answers research questions. Any provider with an OpenAI-compatible API works, such as OpenAI, Google Gemini, OpenRouter, Anthropic or Meta's Muse.</p>
 ${errors.form ? html`<p class="alert">${errors.form}</p>` : ""}
 <form method="post" action="${action(state)}">
 ${field({ name: "baseUrl", label: "API base address", type: "url", value: values.baseUrl ?? OPENAI_BASE_URL, error: errors.baseUrl, hint: "For OpenAI keep the default. Gemini: https://generativelanguage.googleapis.com/v1beta/openai", required: true })}
 ${field({ name: "model", label: "Model", value: values.model ?? "", error: errors.model, hint: "For example gpt-5-mini or gemini-2.5-flash.", required: true })}
 ${field({ name: "apiKey", label: "API key", type: "password", error: errors.apiKey, hint: keyHint(state, "llm", "Stored encrypted."), autocomplete: "new-password" })}
+${effortField("summaryEffort", "Summary reasoning effort", "For cleaning up and summarizing each new sermon's transcript, and picking its speaker and main passage.", values, errors)}
+${effortField("chatEffort", "Chat reasoning effort", "For answering questions and writing documents.", values, errors)}
 <button type="submit">Test and save</button>
 </form>`;
+}
+
+function effortField(name: EffortSetting, label: string, use: string, values: Values, errors: Errors): Html {
+  const selected = values[name] ?? DEFAULT_REASONING_EFFORT;
+  return html`<div class="field${errors[name] ? " invalid" : ""}"><label for="f-${name}">${label}</label>
+<p class="hint">${use} Only sent to Meta's API (api.meta.ai), for Muse; other providers ignore it. More effort is slower and costs more.</p>
+<select id="f-${name}" name="${name}">${REASONING_EFFORTS.map((effort) => html`<option value="${effort}"${effort === selected ? html` selected` : ""}>${EFFORT_LABELS[effort]}${effort === DEFAULT_REASONING_EFFORT ? " (default)" : ""}</option>`)}</select>
+${errors[name] ? html`<p class="error">${errors[name]}</p>` : ""}</div>`;
 }
 
 function embeddingsForm(state: StepState, errors: Errors = {}, reuse = false): Html {
@@ -156,7 +175,7 @@ export async function stepForm(context: Context, step: ProviderStep, wizard: boo
     case "podcast": return render(state, podcastForm(state, {}, { feedUrl: (await getSetting<PodcastSettings>(db, "podcast"))?.feedUrl ?? "" }));
     case "llm": {
       const llm = await getSetting<LlmSettingsRecord>(db, "llm");
-      return render(state, llmForm(state, {}, llm ? { baseUrl: llm.baseUrl, model: llm.model } : {}));
+      return render(state, llmForm(state, {}, llm ? { baseUrl: llm.baseUrl, model: llm.model, summaryEffort: llm.summaryEffort ?? DEFAULT_REASONING_EFFORT, chatEffort: llm.chatEffort ?? DEFAULT_REASONING_EFFORT } : {}));
     }
     case "embeddings": return render(state, embeddingsForm(state, {}, await canReuseLlmKey(db)));
     case "transcription": return render(state, transcriptionForm(state));
@@ -213,20 +232,26 @@ export async function stepSubmit(context: Context, step: ProviderStep, wizard: b
       }
       case "llm": {
         const values = { baseUrl: text("baseUrl").replace(/\/+$/u, ""), model: text("model", 200) };
+        const summaryEffort = text("summaryEffort", 20) || DEFAULT_REASONING_EFFORT;
+        const chatEffort = text("chatEffort", 20) || DEFAULT_REASONING_EFFORT;
         const errors: Errors = {};
         if (!isHttpsUrl(values.baseUrl)) errors.baseUrl = "Use an https:// address.";
         if (!values.model) errors.model = "Enter a model name.";
+        if (!isReasoningEffort(summaryEffort)) errors.summaryEffort = "Choose a reasoning effort from the list.";
+        if (!isReasoningEffort(chatEffort)) errors.chatEffort = "Choose a reasoning effort from the list.";
         const apiKey = await keyOrStored("llm");
         if (!apiKey) errors.apiKey = "Enter an API key.";
-        if (Object.keys(errors).length > 0 || !apiKey) return render(state, llmForm(state, errors, values), 400);
+        if (Object.keys(errors).length > 0 || !apiKey || !isReasoningEffort(summaryEffort) || !isReasoningEffort(chatEffort)) {
+          return render(state, llmForm(state, errors, { ...values, summaryEffort, chatEffort }), 400);
+        }
         try {
           await checkLlm(values, apiKey);
         } catch (error) {
-          if (error instanceof ProviderError) return render(state, llmForm(state, { form: error.message }, values), 400);
+          if (error instanceof ProviderError) return render(state, llmForm(state, { form: error.message }, { ...values, summaryEffort, chatEffort }), 400);
           throw error;
         }
         await putKey(db, secret, "llm", apiKey);
-        await putSetting(db, "llm", { ...values, checkedAt: new Date().toISOString() } satisfies LlmSettingsRecord);
+        await putSetting(db, "llm", { ...values, summaryEffort, chatEffort, checkedAt: new Date().toISOString() } satisfies LlmSettingsRecord);
         return done();
       }
       case "embeddings": {
