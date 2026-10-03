@@ -146,7 +146,7 @@ ${field({ name: "apiKey", label: "OpenAI API key", type: "password", error: erro
 
 const TRANSCRIPTION_CHOICES: Record<TranscriptionProvider, { name: string; hint: string }> = {
   mistral: { name: "Mistral", hint: `${MISTRAL_TRANSCRIPTION_MODEL}. Takes full-length recordings in any common format. Create a key at console.mistral.ai.` },
-  muse: { name: "Muse", hint: `Meta's ${MUSE_TRANSCRIPTION_MODEL}. Muse only accepts WAV, so this site converts your feed's MP3s to WAV and sends them 10 minutes at a time. Feeds in other formats need Mistral. Create a key at dev.meta.ai.` },
+  muse: { name: "Muse", hint: `Meta's ${MUSE_TRANSCRIPTION_MODEL}. Muse only accepts WAV, so this site converts your feed's MP3s to WAV and sends them a few minutes at a time. Feeds in other formats need Mistral. Create a key at dev.meta.ai.` },
 };
 
 function transcriptionForm(state: StepState, errors: Errors = {}, provider: string = "mistral"): Html {

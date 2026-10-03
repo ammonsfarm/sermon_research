@@ -199,9 +199,16 @@ first request after each deploy.
   itself from a signed link. Muse only takes mono 16-bit WAV of up to 10
   minutes and 32 MB, and Workers can't run ffmpeg, so each part is its own
   workflow step that decodes the R2 copy of the MP3 from the start with the
-  WebAssembly decoder in `src/mp3.ts`, keeps up to 9.5 minutes
+  WebAssembly decoder in `src/mp3.ts`, keeps up to 4 minutes
   (`MUSE_LIMITS` in `src/muse.ts`) as 16 kHz mono, ends it at the quietest
-  quarter second in its last 30 seconds, and sends it. Turns come back in
+  quarter second in its last 30 seconds, and sends it. Muse accepts 10
+  minutes, but its gateway returns 504 after about 2 minutes of
+  transcribing: a 9.5-minute part timed out in production, and a 5-minute
+  one went through. When Muse times out
+  (408, 504, 524, or 500 for its processing budget), the part length halves,
+  down to 30 seconds, and is saved site-wide in the `muse_part_seconds`
+  setting so later episodes start there. To try longer parts again:
+  `npx wrangler d1 execute sermon-research --remote --command "DELETE FROM settings WHERE key = 'muse_part_seconds'"`. Turns come back in
   milliseconds from the start of the part and are offset into the sermon.
   Progress is saved in `transcription_progress`, so a retry carries on from
   the last finished part. Decoding a 45-minute sermon's last part takes

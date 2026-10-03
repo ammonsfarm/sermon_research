@@ -43,6 +43,7 @@ export class MuseTranscribeError extends ProviderError {
       : status === 401 || status === 403 ? `Muse refused the transcription key (HTTP ${status}). Check it in Admin → Transcription.`
         : status === 413 ? "Muse says the audio part is over its 32 MB limit (HTTP 413)."
           : status === 429 ? "Muse says the account is at its limit for transcriptions running at once or per hour (HTTP 429). It retries on its own; lower \"Episodes at once\" if it keeps happening."
+            : status === 408 || status === 504 || status === 524 ? `Muse timed out transcribing this part (HTTP ${status}).`
             : `Muse transcription returned HTTP ${status}.`;
     super(`${explained}${detail ? ` It said: "${detail}"` : ""}`);
     this.status = status;
