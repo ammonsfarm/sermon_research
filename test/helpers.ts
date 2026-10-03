@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 import worker from "../src/index.ts";
 import type { AppEnv } from "../src/env.ts";
 import { type PipelineStep, runEpisode } from "../src/pipeline.ts";
@@ -136,6 +138,8 @@ export const FEED_XML = `<?xml version="1.0"?>
 
 /** What the fake church website serves for every episode's MP3. */
 export const AUDIO_BYTES = new TextEncoder().encode("ID3 fake mp3 audio bytes");
+/** A real MP3, 44.1 kHz stereo: 2.5 s of tone, 0.6 s of silence, 2.4 s of tone. */
+export const TONES_MP3 = new Uint8Array(readFileSync(`${import.meta.dirname}/fixtures/tones.mp3`));
 
 /** What Mistral hears, mistakes included. The fake answers AI's cleanup turns it into "Welcome, church. Today we read Ephesians 2:8." */
 export const TRANSCRIPT_SEGMENTS = [
@@ -174,6 +178,50 @@ export const PART_REPLY = "## Chapter from the model\n\nThe preacher told a stor
 
 export interface FakeCall { readonly url: string; readonly method: string; readonly authorization: string | null; readonly userAgent: string | null; readonly body: unknown }
 
+/** A Muse request as the server would read it: each part's headers, the request JSON, and the WAV's format and samples. */
+export interface MuseUpload {
+  readonly requestHeaders: string;
+  readonly audioHeaders: string;
+  readonly request: Record<string, unknown>;
+  readonly wav: { readonly riff: string; readonly format: number; readonly channels: number; readonly rate: number; readonly bits: number; readonly samples: Int16Array };
+}
+
+export async function readMuseUpload(body: Blob, contentType: string): Promise<MuseUpload> {
+  const boundary = /boundary=(.+)$/u.exec(contentType)![1]!;
+  const bytes = new Uint8Array(await body.arrayBuffer());
+  const text = new TextDecoder("latin1").decode(bytes);
+  const parts = new Map<string, { headers: string; start: number; end: number }>();
+  let at = text.indexOf(`--${boundary}\r\n`);
+  while (at >= 0) {
+    const headersEnd = text.indexOf("\r\n\r\n", at);
+    const next = text.indexOf(`\r\n--${boundary}`, headersEnd);
+    const headers = text.slice(text.indexOf("\r\n", at) + 2, headersEnd);
+    parts.set(/name="([^"]+)"/u.exec(headers)![1]!, { headers, start: headersEnd + 4, end: next });
+    at = text.startsWith("--", next + 4 + boundary.length) ? -1 : next + 2;
+  }
+  const request = parts.get("request")!;
+  const audio = parts.get("audio")!;
+  const view = new DataView(bytes.buffer, audio.start, audio.end - audio.start);
+  const samples = new Int16Array(bytes.slice(audio.start + 44, audio.end).buffer);
+  return {
+    requestHeaders: request.headers,
+    audioHeaders: audio.headers,
+    request: JSON.parse(text.slice(request.start, request.end)) as Record<string, unknown>,
+    wav: { riff: text.slice(audio.start, audio.start + 4), format: view.getUint16(20, true), channels: view.getUint16(22, true), rate: view.getUint32(24, true), bits: view.getUint16(34, true), samples },
+  };
+}
+
+/** Muse hears two turns in any part with sound, its first and second half, and nothing in silence. */
+function museReply(upload: MuseUpload) {
+  const ms = Math.round(upload.wav.samples.length / upload.wav.rate * 1000);
+  if (upload.wav.samples.every((sample) => sample === 0)) return { sessionId: "s", transcript: "", audioDurationMs: ms, turns: [] };
+  const half = Math.round(ms / 2);
+  return {
+    sessionId: "s", transcript: "First half. Second half.", audioDurationMs: ms,
+    turns: [{ turnId: 0, startMs: 0, endMs: half, transcript: " First half. " }, { turnId: 1, startMs: half, endMs: ms, transcript: "Second half." }],
+  };
+}
+
 /**
  * Replaces global fetch with fake podcast, OpenAI, Mistral and Resend endpoints.
  * `fail` maps a URL prefix to an HTTP status to return instead.
@@ -184,7 +232,8 @@ export function fakeProviders(fail: Record<string, number> = {}): { calls: FakeC
   globalThis.fetch = (async (input: RequestInfo | URL, init: RequestInit = {}) => {
     const url = String(input instanceof Request ? input.url : input);
     const headers = new Headers(init.headers);
-    const body = typeof init.body === "string" ? JSON.parse(init.body) : null;
+    const body = typeof init.body === "string" ? JSON.parse(init.body)
+      : init.body instanceof Blob && url === "https://api.meta.ai/v1/asr/transcribe" ? await readMuseUpload(init.body, headers.get("Content-Type") ?? "") : null;
     calls.push({ url, method: init.method ?? "GET", authorization: headers.get("Authorization"), userAgent: headers.get("User-Agent"), body });
     const failure = Object.entries(fail).find(([prefix]) => url.startsWith(prefix));
     if (failure) return new Response("{\"error\":\"nope\"}", { status: failure[1] });
@@ -209,6 +258,7 @@ export function fakeProviders(fail: Record<string, number> = {}): { calls: FakeC
       return Response.json({ data: Array.from({ length: count }, (_unused, index) => ({ index, embedding: Array(1536).fill(0.01) })) });
     }
     if (url === "https://api.mistral.ai/v1/audio/transcriptions") return Response.json({ text: "full", segments: TRANSCRIPT_SEGMENTS });
+    if (url === "https://api.meta.ai/v1/asr/transcribe") return Response.json(museReply(body as MuseUpload));
     if (url === "https://api.mistral.ai/v1/models") return Response.json({ data: [] });
     if (url === "https://api.resend.com/emails") return Response.json({ id: "email-1" });
     return new Response("not found", { status: 404 });
@@ -220,6 +270,7 @@ export const PROVIDERS = {
   llm: { baseUrl: "https://api.openai.com/v1", model: "gpt-test", apiKey: "sk-llm-key-1234" },
   embeddings: { apiKey: "" },
   transcription: { apiKey: "mistral-key-5678" },
+  muse: { provider: "muse", apiKey: "muse-key-4321" },
   email: { intent: "save", from: "Grace Church <sermons@grace.example>", apiKey: "re_key_9999" },
 };
 

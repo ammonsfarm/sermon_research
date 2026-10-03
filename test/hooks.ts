@@ -17,6 +17,10 @@ registerHooks({
   },
   load(url, context, nextLoad) {
     if (url.startsWith("stub:")) return { format: "module", source: STUBS[url.slice(5)]!, shortCircuit: true };
+    // Wrangler hands the Worker a compiled WebAssembly.Module for a .wasm import; so does this.
+    if (url.endsWith(".wasm")) {
+      return { format: "module", source: `import { readFileSync } from "node:fs"; export default new WebAssembly.Module(readFileSync(new URL(${JSON.stringify(url)})));`, shortCircuit: true };
+    }
     return nextLoad(url, context);
   },
 });

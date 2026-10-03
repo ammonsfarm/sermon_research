@@ -1,9 +1,12 @@
 import { downloadAudio, formatBytes, signedAudioUrl } from "./audio.ts";
 import { batchEnd, cleanSegments } from "./cleanup.ts";
+import { decodeMp3 } from "./mp3.ts";
+import { MUSE_LIMITS, MUSE_SAMPLE_RATE, type MuseLimits, quietestSplit, turnsToSegments, WAV_HEADER_BYTES, writeWavHeader } from "./muse.ts";
 import type { AppEnv } from "./env.ts";
 import { getKey } from "./keys.ts";
-import { EMBEDDING_MODEL, MISTRAL_TRANSCRIPTION_MODEL, ProviderError, reasoningFields, withUserAgent } from "./providers.ts";
-import { getSetting, type LlmSettingsRecord, type Ministry } from "./settings.ts";
+import { EMBEDDING_MODEL, MISTRAL_TRANSCRIPTION_MODEL, MUSE_TRANSCRIPTION_MODEL, museTranscribe, ProviderError, reasoningFields, withUserAgent } from "./providers.ts";
+import { formatTime } from "./research.ts";
+import { getSetting, type LlmSettingsRecord, type Ministry, type TranscriptionSettings } from "./settings.ts";
 import { normalizeReference } from "./scriptures.ts";
 import { identifySpeakers } from "./speakers.ts";
 
@@ -41,6 +44,10 @@ export interface StepConfig {
 
 const DOWNLOAD: StepConfig = { retries: { limit: 3, delay: "1 minute", backoff: "exponential" }, timeout: "15 minutes" };
 const TRANSCRIBE: StepConfig = { retries: { limit: 3, delay: "1 minute", backoff: "exponential" }, timeout: "15 minutes" };
+/** One Muse part: decode up to 10 minutes of the MP3 and transcribe it. Extra retries ride out Muse's rate limits. */
+const MUSE_PART: StepConfig = { retries: { limit: 5, delay: "1 minute", backoff: "exponential" }, timeout: "10 minutes" };
+/** About 9 hours of audio, so a runaway loop stops. */
+const MAX_MUSE_PARTS = 60;
 /** Several calls in one step; each batch is saved as it's done, so a retry or a timeout loses at most one. */
 const CLEAN: StepConfig = { retries: { limit: 5, delay: "30 seconds", backoff: "exponential" }, timeout: "20 minutes" };
 const SUMMARIZE: StepConfig = { retries: { limit: 3, delay: "30 seconds", backoff: "exponential" }, timeout: "5 minutes" };
@@ -54,7 +61,7 @@ const CHUNK_CHARS = 1_200;
 const EMBED_BATCH = 64;
 
 /** Runs one episode end to end. Every step writes its own results, so a retry resumes where it stopped. */
-export async function runEpisode(env: AppEnv, step: PipelineStep, episodeId: string): Promise<void> {
+export async function runEpisode(env: AppEnv, step: PipelineStep, episodeId: string, muse: MuseLimits = MUSE_LIMITS): Promise<void> {
   const db = env.DB;
   const secret = env.APP_SECRET ?? "";
   try {
@@ -67,7 +74,14 @@ export async function runEpisode(env: AppEnv, step: PipelineStep, episodeId: str
       await db.prepare("UPDATE episodes SET audio_key = ?, audio_bytes = ?, updated_at = ? WHERE id = ?").bind(stored.key, stored.bytes, new Date().toISOString(), episodeId).run();
     }));
 
-    await step.do("transcribe", TRANSCRIBE, tracked(db, episodeId, "transcribe", "Transcribing with Mistral (often 2 to 10 minutes)", async () => {
+    const service = await step.do("choose transcription service", FINISH, async () => (await getSetting<TranscriptionSettings>(db, "transcription"))?.provider ?? "mistral");
+
+    if (service === "muse") {
+      // Muse takes 10 minutes at a time, so each part is its own step, and each saves its progress.
+      for (let part = 1; !(await step.do(`transcribe with Muse, part ${part}`, MUSE_PART, tracked(db, episodeId, "transcribe", "Transcribing with Muse", () => transcribeMusePart(env, episodeId, muse)))); part++) {
+        if (part >= MAX_MUSE_PARTS) throw new ProviderError("This recording is too long for Muse transcription.");
+      }
+    } else await step.do("transcribe", TRANSCRIBE, tracked(db, episodeId, "transcribe", "Transcribing with Mistral (often 2 to 10 minutes)", async () => {
       if (await hasTranscript(db, episodeId)) return;
       const [episode, origin] = await Promise.all([
         db.prepare("SELECT audio_bytes FROM episodes WHERE id = ?").bind(episodeId).first<{ audio_bytes: number | null }>(),
@@ -173,6 +187,57 @@ export async function runEpisode(env: AppEnv, step: PipelineStep, episodeId: str
   }
 }
 
+/**
+ * Transcribes an episode's next part with Muse and saves it. Returns true once
+ * the whole recording is done and the draft transcript is written.
+ */
+async function transcribeMusePart(env: AppEnv, episodeId: string, limits: MuseLimits): Promise<boolean> {
+  const db = env.DB;
+  if (await hasTranscript(db, episodeId)) return true;
+  const [episode, progress] = await Promise.all([
+    db.prepare("SELECT audio_key, duration_seconds FROM episodes WHERE id = ?").bind(episodeId).first<{ audio_key: string | null; duration_seconds: number | null }>(),
+    db.prepare("SELECT done_samples, segments_json FROM transcription_progress WHERE episode_id = ?").bind(episodeId).first<{ done_samples: number; segments_json: string }>(),
+  ]);
+  if (!episode?.audio_key) throw new ProviderError("The audio hasn't been copied yet. Retry to download it.");
+  const switchToMistral = "Switch to Mistral in Admin → Transcription, then retry.";
+  if (!episode.audio_key.endsWith(".mp3")) throw new ProviderError(`This site can only convert MP3s to the WAV that Muse accepts, and this episode's audio is .${episode.audio_key.split(".").pop()}. ${switchToMistral}`);
+  const object = await env.AUDIO.get(episode.audio_key);
+  if (!object) throw new ProviderError("The copy of the audio is missing. Retry to download it again.");
+
+  const from = progress?.done_samples ?? 0;
+  const offset = from / MUSE_SAMPLE_RATE;
+  await setDetail(db, episodeId, `Transcribing with Muse: ${formatTime(offset)}${episode.duration_seconds ? ` of ${formatTime(episode.duration_seconds)}` : ""} done`);
+  // The part is decoded straight into a WAV file's body, so it's never copied.
+  const max = Math.round(limits.partSeconds * MUSE_SAMPLE_RATE);
+  const wav = new Uint8Array(WAV_HEADER_BYTES + max * 2);
+  const pcm = new Int16Array(wav.buffer, WAV_HEADER_BYTES, max);
+  const { samples, more } = await decodeMp3(object.body, MUSE_SAMPLE_RATE, from, pcm);
+  if (from === 0 && samples === 0) throw new ProviderError(`The audio couldn't be read as MP3. ${switchToMistral}`);
+  const end = more ? quietestSplit(pcm, samples, MUSE_SAMPLE_RATE, limits.searchSeconds) : samples;
+
+  const segments = progress ? JSON.parse(progress.segments_json) as Segment[] : [];
+  if (end > 0) {
+    writeWavHeader(wav, end);
+    const reply = await museTranscribe(wav.subarray(0, WAV_HEADER_BYTES + end * 2), await requireKey(env, "transcription"));
+    segments.push(...turnsToSegments(reply, offset, end / MUSE_SAMPLE_RATE));
+  }
+  const now = new Date().toISOString();
+  if (more) {
+    await db.prepare(
+      `INSERT INTO transcription_progress (episode_id, done_samples, segments_json, updated_at) VALUES (?, ?, ?, ?)
+       ON CONFLICT(episode_id) DO UPDATE SET done_samples = excluded.done_samples, segments_json = excluded.segments_json, updated_at = excluded.updated_at`,
+    ).bind(episodeId, from + end, JSON.stringify(segments), now).run();
+    return false;
+  }
+  if (segments.length === 0) throw new ProviderError("Muse heard no speech in this recording. Check that the audio plays.");
+  await db.batch([
+    db.prepare("INSERT OR REPLACE INTO transcripts_draft (episode_id, text, segments_json, model, created_at) VALUES (?, ?, ?, ?, ?)")
+      .bind(episodeId, joined(segments), JSON.stringify(segments), MUSE_TRANSCRIPTION_MODEL, now),
+    db.prepare("DELETE FROM transcription_progress WHERE episode_id = ?").bind(episodeId),
+  ]);
+  return true;
+}
+
 /** True once Mistral's draft or the cleaned transcript is saved, so the audio needn't be fetched or transcribed again. */
 async function hasTranscript(db: D1Database, episodeId: string): Promise<boolean> {
   return Boolean(await db.prepare("SELECT 1 FROM transcripts_draft WHERE episode_id = ?1 UNION ALL SELECT 1 FROM transcripts WHERE episode_id = ?1").bind(episodeId).first());
@@ -195,11 +260,11 @@ async function setDetail(db: D1Database, episodeId: string, detail: string): Pro
  * Wraps a step so the dashboard shows what it's doing, and so an error that
  * Workflows is about to retry is visible instead of silent.
  */
-function tracked(db: D1Database, episodeId: string, stage: "transcribe" | "summarize" | "index", detail: string, work: () => Promise<void>): () => Promise<void> {
+function tracked<T>(db: D1Database, episodeId: string, stage: "transcribe" | "summarize" | "index", detail: string, work: () => Promise<T>): () => Promise<T> {
   return async () => {
     await db.prepare("UPDATE episodes SET stage = ?, detail = ?, updated_at = ? WHERE id = ?").bind(stage, detail, new Date().toISOString(), episodeId).run();
     try {
-      await work();
+      return await work();
     } catch (error) {
       await db.prepare("UPDATE episodes SET last_error = ?, detail = ?, updated_at = ? WHERE id = ?")
         .bind(describeError(error), `${detail}: hit an error, retrying automatically`, new Date().toISOString(), episodeId).run()

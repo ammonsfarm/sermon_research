@@ -39,7 +39,7 @@ create the admin account. Then it walks through:
 3. The **answers AI**: any OpenAI-compatible API (OpenAI, Gemini, OpenRouter,
    Anthropic and others). Enter the base address, model and key.
 4. **Search embeddings**: an OpenAI key for `text-embedding-3-small`. If step 3 was OpenAI, you can reuse that key.
-5. **Transcription**: a Mistral key (Voxtral handles full-length sermon audio)
+5. **Transcription**: Mistral (Voxtral handles full-length sermon audio in any common format) or Meta's Muse (Muse only accepts WAV, so the Worker converts the feed's MP3s to WAV and sends them 10 minutes at a time; feeds in other formats need Mistral), and its key
 6. **Email** (optional): a Resend key and sender address, so people can sign in with an emailed link
 7. **Import**: how many past episodes to process now (none, 10, 50 or all),
    each with an estimate of audio minutes and cost, and a daily or weekly
@@ -64,7 +64,8 @@ assistant at this repo. [AGENTS.md](AGENTS.md) tells it how to help.
 - A database schema that installs and upgrades itself, so there's no migration step
 - Episode processing: the Worker copies each episode's audio into R2 (so a
   church website's bot check can't block the transcription service), Mistral
-  transcribes it from a short-lived signed link to that copy, the answers AI writes a summary with topics and scripture references,
+  transcribes it from a short-lived signed link to that copy (or Muse, a part
+  at a time), the answers AI writes a summary with topics and scripture references,
   and the transcript is split into timestamped passages and indexed for search
 - A live episodes dashboard that refreshes itself while work runs, showing
   each episode's current step, retry errors and when the background worker

@@ -43,6 +43,7 @@ import {
   parseMinistry,
   type PodcastSettings,
   putSetting,
+  type TranscriptionSettings,
 } from "./settings.ts";
 import { isProviderStep, stepForm, stepSubmit } from "./steps.ts";
 import {
@@ -240,7 +241,7 @@ async function admin(context: Context): Promise<Response> {
     getSetting<PodcastSettings>(db, "podcast"),
     getSetting<LlmSettingsRecord>(db, "llm"),
     getSetting<CheckedSettings>(db, "embeddings"),
-    getSetting<CheckedSettings>(db, "transcription"),
+    getSetting<TranscriptionSettings>(db, "transcription"),
     getSetting<EmailSettings>(db, "email"),
     keyInfo(db),
     researchSettings(db),
