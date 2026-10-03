@@ -127,11 +127,12 @@ first request after each deploy.
   A question that names exactly one speaker ("Pastor Phil's sermons",
   "Friesen") is scoped to their sermons automatically; first names count
   only after a title or as a possessive, and Bible book names never do.
-- **Transcript cleanup:** Mistral's transcript is saved as it came back in
+- **Transcript cleanup:** the transcript (Mistral's or Muse's) is saved as it came back in
   `transcripts_draft`. The answers AI then corrects it (`CLEANUP_PROMPT` in
   `src/cleanup.ts`: proper nouns, stray periods at pauses, capitals) about
   8,000 characters at a time, sending the segments as JSON with IDs, and the
-  result goes to `transcripts` with Mistral's timings. Everything after that
+  result goes to `transcripts` with the original timings. It uses the "Summary
+  reasoning effort" from Admin → Answers AI. Everything after that
   (summary, speaker, main text, search, read-along, documents) reads the
   cleaned one. A segment keeps its draft text when the reply leaves it out,
   isn't JSON, or changes more than about a fifth of its words. Each batch is
@@ -165,8 +166,8 @@ first request after each deploy.
   out of the database in plain text by design.
 - **Muse and reasoning effort:** when the answers AI's base address is on
   `api.meta.ai`, every chat call sends `reasoning_effort`. Admin → Answers AI
-  has two, both Low by default: "Summary" for sermon processing (transcript
-  cleanup, summaries, speakers, main texts) and "Chat" for answers and documents. A new `chat()`
+  has two, both Low by default: "Summary" for sermon processing (the
+  full-text transcript review, summaries, speakers, main texts) and "Chat" for answers and documents. A new `chat()`
   caller picks one with its `effort` option; the connection check always uses
   Low. Other providers never get the field, since some reject unknown fields
   with a 400.

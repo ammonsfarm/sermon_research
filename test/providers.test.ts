@@ -85,6 +85,7 @@ test("Meta's API gets reasoning efforts: low for the check, the admin's two choi
     const form = await (await app.request("/setup/llm", { cookie })).text();
     assert.match(select(form, "summaryEffort"), /<option value="low">Low \(default\)<\/option>.*<option value="high" selected>High<\/option>/su);
     assert.match(select(form, "chatEffort"), /<option value="minimal" selected>Minimal<\/option>/);
+    assert.match(form, /<label for="f-summaryEffort">Summary reasoning effort<\/label>\n<p class="hint">For each new sermon: the full-text review of its transcript \(spelling of names and places, capital letters, stray periods\), its summary/);
   } finally {
     providers.restore();
   }

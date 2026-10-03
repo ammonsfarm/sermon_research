@@ -4,6 +4,7 @@ import test from "node:test";
 import worker from "../src/index.ts";
 import { DEFAULT_CONCURRENCY, dispatchQueued, recordFeed } from "../src/episodes.ts";
 import { hourlyTick } from "../src/imports.ts";
+import { NonRetryableError } from "cloudflare:workflows";
 import { batchEnd, mergeCleaned } from "../src/cleanup.ts";
 import { decodeMp3 } from "../src/mp3.ts";
 import { MUSE_SAMPLE_RATE, quietestSplit, turnsToSegments, wavFile } from "../src/muse.ts";
@@ -631,14 +632,18 @@ test("Muse transcribes MP3 audio part by part, split at pauses, and a retry carr
   }
 });
 
-test("Muse explains audio it can't read instead of sending it", async () => {
+test("Muse explains audio it can't read instead of sending it, without retrying", async () => {
   const app = createApp();
   const providers = fakeProviders();
+  // Records what each step throws, as Workflows would see it.
+  const thrown: unknown[] = [];
+  const recording: PipelineStep = { do: async (_name, _config, callback) => callback().catch((error: unknown) => { thrown.push(error); throw error; }) };
   try {
     const cookie = await completeSetup(app, { count: 1 });
     await app.request("/admin/transcription", { form: PROVIDERS.muse, cookie });
     const [episode] = await episodes(app);
-    await runEpisode(app.env, inlineStep, episode!.id);
+    await runEpisode(app.env, recording, episode!.id);
+    assert.ok(thrown[0] instanceof NonRetryableError, "Workflows doesn't retry a format it can't convert");
     const failed = (await episodes(app))[0]!;
     assert.equal(failed.status, "failed");
     assert.equal(failed.error, "The audio couldn't be read as MP3. Switch to Mistral in Admin → Transcription, then retry.");
@@ -646,7 +651,8 @@ test("Muse explains audio it can't read instead of sending it", async () => {
 
     await app.env.DB.prepare("UPDATE episodes SET audio_key = 'episodes/x.m4a' WHERE id = ?").bind(episode!.id).run();
     app.audio.set("episodes/x.m4a", { bytes: AUDIO_BYTES, contentType: "audio/mp4" });
-    await runEpisode(app.env, inlineStep, episode!.id);
+    await runEpisode(app.env, recording, episode!.id);
+    assert.ok(thrown.at(-1) instanceof NonRetryableError);
     assert.match((await episodes(app))[0]!.error ?? "", /^This site can only convert MP3s to the WAV that Muse accepts, and this episode's audio is \.m4a\./u);
   } finally {
     providers.restore();

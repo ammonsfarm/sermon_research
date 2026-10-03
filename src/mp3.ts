@@ -1,5 +1,5 @@
+import { NonRetryableError } from "cloudflare:workflows";
 import decoderModule from "./mp3.wasm";
-import { ProviderError } from "./providers.ts";
 
 /** What wasm/mp3.c exports. */
 interface Decoder {
@@ -84,7 +84,7 @@ export async function decodeMp3(stream: ReadableStream<Uint8Array>, rate: number
       position += used;
       if (!samples) continue;
       const hz = decoder.sample_rate();
-      if (sourceRate && hz !== sourceRate) throw new ProviderError("This MP3 changes sample rate partway through, which Muse transcription can't follow. Use Mistral for it.");
+      if (sourceRate && hz !== sourceRate) throw new NonRetryableError("This MP3 changes sample rate partway through, which Muse transcription can't follow. Switch to Mistral in Admin → Transcription, then retry.");
       sourceRate = hz;
       // Skip whole frames before the part starts without averaging them.
       if (Math.floor((source + samples - 1) * rate / sourceRate) < from - 1) {

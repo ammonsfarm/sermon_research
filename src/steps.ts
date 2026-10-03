@@ -120,7 +120,7 @@ ${errors.form ? html`<p class="alert">${errors.form}</p>` : ""}
 ${field({ name: "baseUrl", label: "API base address", type: "url", value: values.baseUrl ?? OPENAI_BASE_URL, error: errors.baseUrl, hint: "For OpenAI keep the default. Gemini: https://generativelanguage.googleapis.com/v1beta/openai", required: true })}
 ${field({ name: "model", label: "Model", value: values.model ?? "", error: errors.model, hint: "For example gpt-5-mini or gemini-2.5-flash.", required: true })}
 ${field({ name: "apiKey", label: "API key", type: "password", error: errors.apiKey, hint: keyHint(state, "llm", "Stored encrypted."), autocomplete: "new-password" })}
-${effortField("summaryEffort", "Summary reasoning effort", "For cleaning up and summarizing each new sermon's transcript, and picking its speaker and main passage.", values, errors)}
+${effortField("summaryEffort", "Summary reasoning effort", "For each new sermon: the full-text review of its transcript (spelling of names and places, capital letters, stray periods), its summary, and picking its speaker and main passage.", values, errors)}
 ${effortField("chatEffort", "Chat reasoning effort", "For answering questions and writing documents.", values, errors)}
 <button type="submit">Test and save</button>
 </form>`;
