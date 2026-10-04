@@ -3,7 +3,18 @@
  * fresh deploy needs no separate migration command. Append new versions; never
  * edit one that has shipped.
  */
-export const MIGRATIONS: readonly { readonly version: number; readonly statements: readonly string[] }[] = [
+export interface Migration {
+  readonly version: number;
+  readonly statements: readonly string[];
+  /**
+   * Columns to add only where they're missing. SQLite has no ADD COLUMN IF NOT
+   * EXISTS, and a table that CREATE TABLE IF NOT EXISTS left alone can lack
+   * columns a later version of it has.
+   */
+  readonly columns?: readonly { readonly table: string; readonly name: string; readonly definition: string }[];
+}
+
+export const MIGRATIONS: readonly Migration[] = [
   {
     version: 1,
     statements: [
@@ -219,6 +230,13 @@ export const MIGRATIONS: readonly { readonly version: number; readonly statement
       )`,
     ],
   },
+  {
+    version: 13,
+    statements: [],
+    // A transcripts_draft table made before version 11, by tools outside the app, was left
+    // without the column the transcript review saves its progress in.
+    columns: [{ table: "transcripts_draft", name: "cleaned_json", definition: "TEXT CHECK (cleaned_json IS NULL OR json_valid(cleaned_json))" }],
+  },
 ];
 
 let applied: Promise<void> | undefined;
@@ -243,8 +261,13 @@ async function migrate(db: D1Database): Promise<void> {
   const done = new Set(results.map((row) => row.version));
   for (const migration of MIGRATIONS) {
     if (done.has(migration.version)) continue;
+    const missing: string[] = [];
+    for (const column of migration.columns ?? []) {
+      const exists = await db.prepare("SELECT 1 FROM pragma_table_info(?) WHERE name = ?").bind(column.table, column.name).first();
+      if (!exists) missing.push(`ALTER TABLE ${column.table} ADD COLUMN ${column.name} ${column.definition}`);
+    }
     await db.batch([
-      ...migration.statements.map((sql) => db.prepare(sql)),
+      ...[...migration.statements, ...missing].map((sql) => db.prepare(sql)),
       db.prepare("INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?, ?)").bind(migration.version, new Date().toISOString()),
     ]);
   }
