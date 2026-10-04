@@ -138,7 +138,10 @@ first request after each deploy.
   isn't JSON, or changes more than about a fifth of its words. Each batch is
   saved in `transcripts_draft.cleaned_json`, so a retry carries on from there.
   `transcripts.cleaned_by` names the model; it's null for sermons transcribed
-  before cleanup existed, which aren't cleaned.
+  before cleanup existed, which aren't cleaned. A `transcripts_draft` table
+  made outside the app before migration 11 lacked `cleaned_json`; migration 13
+  adds it wherever it's missing (`columns` in `src/schema.ts` adds a column
+  only when a table doesn't have it yet).
 - **Main texts:** the summary step asks the answers AI for the passage a
   sermon preaches from (`summaries.main_scripture`) as well as every
   reference it mentions. Sermons summarized before that are caught up by

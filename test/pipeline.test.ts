@@ -9,7 +9,7 @@ import { batchEnd, mergeCleaned } from "../src/cleanup.ts";
 import { decodeMp3 } from "../src/mp3.ts";
 import { MUSE_SAMPLE_RATE, quietestSplit, turnsToSegments, wavFile } from "../src/muse.ts";
 import { buildChunks, parseSummary, summarize, type PipelineStep, runEpisode } from "../src/pipeline.ts";
-import { ensureSchema } from "../src/schema.ts";
+import { ensureSchema, resetSchemaCache } from "../src/schema.ts";
 import { isDue, localSlot, type Schedule } from "../src/schedule.ts";
 import { getSetting, putSetting } from "../src/settings.ts";
 import { AUDIO_BYTES, completeSetup, createApp, fakeProviders, type MuseUpload, ORIGIN, PROVIDERS, readMuseUpload, SCHEDULE_FORM, type TestApp, TONES_MP3 } from "./helpers.ts";
@@ -281,6 +281,34 @@ test("dispatch runs two at once by default, fails stale runs and keeps episodes 
   const rows = await episodes(app);
   assert.deepEqual(rows.map((row) => row.status), ["failed", "failed", "queued", "queued", "queued"]);
   assert.match(rows[0]!.error ?? "", /stopped reporting progress/);
+});
+
+test("a transcripts_draft table made before the app's migrations gets the review's column", async () => {
+  const app = createApp();
+  // As the owner's local tools made it, before version 11 existed.
+  await app.env.DB.prepare(`CREATE TABLE transcripts_draft (
+    episode_id TEXT PRIMARY KEY REFERENCES episodes(id) ON DELETE CASCADE,
+    text TEXT NOT NULL, segments_json TEXT NOT NULL CHECK (json_valid(segments_json)), model TEXT NOT NULL, created_at TEXT NOT NULL)`).run();
+  const columns = async () => (await app.env.DB.prepare("SELECT name FROM pragma_table_info('transcripts_draft')").all<{ name: string }>()).results.map((row) => row.name);
+  const providers = fakeProviders();
+  try {
+    await completeSetup(app, { count: 1 });
+    assert.deepEqual(await columns(), ["episode_id", "text", "segments_json", "model", "created_at", "cleaned_json"]);
+    const [episode] = await episodes(app);
+    await runEpisode(app.env, inlineStep, episode!.id);
+    assert.equal((await episodes(app))[0]!.status, "done", "the transcript review saves its progress and finishes");
+    const transcript = await app.env.DB.prepare("SELECT cleaned_by FROM transcripts WHERE episode_id = ?").bind(episode!.id).first<{ cleaned_by: string }>();
+    assert.equal(transcript?.cleaned_by, "gpt-test");
+
+    // Production had the column added by hand first: running version 13 there adds nothing and still records it.
+    await app.env.DB.prepare("DELETE FROM schema_migrations WHERE version = 13").run();
+    resetSchemaCache();
+    await ensureSchema(app.env.DB);
+    assert.equal((await columns()).filter((name) => name === "cleaned_json").length, 1);
+    assert.ok(await app.env.DB.prepare("SELECT 1 FROM schema_migrations WHERE version = 13").first());
+  } finally {
+    providers.restore();
+  }
 });
 
 test("checking the feed only queues episodes it hasn't seen", async () => {
