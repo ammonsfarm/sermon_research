@@ -1,7 +1,9 @@
 import { askBox, OUTPUTS } from "./ask.ts";
 import { chrome, type Context, clientIp, redirect, requireAdmin } from "./context.ts";
 import { fileName } from "./documents.ts";
+import { dispatchQueued, isRedoStep, REDO_LABELS, REDO_STEPS, type RedoStep, requestRedo } from "./episodes.ts";
 import { html, type Html, page } from "./html.ts";
+import { rememberOrigin } from "./imports.ts";
 import type { Segment } from "./pipeline.ts";
 import { formatTime, gate, nearest, SEARCHES_PER_HOUR } from "./research.ts";
 import { catalog, seriesList, seriesOf, titleWithoutSeries } from "./scope.ts";
@@ -125,9 +127,13 @@ export async function sermonPage(context: Context, id: string): Promise<Response
   if (blocked) return blocked;
   const { db } = context;
   const episode = await db.prepare(
-    `SELECT e.id, e.title, e.published_at, e.audio_url, e.audio_key, e.speaker, s.summary, s.main_scripture, s.topics_json, s.scriptures_json
+    `SELECT e.id, e.title, e.published_at, e.audio_url, e.audio_key, e.speaker, e.redo, e.stage, e.detail, e.error, s.summary, s.main_scripture, s.topics_json, s.scriptures_json
      FROM episodes e JOIN summaries s ON s.episode_id = e.id WHERE e.id = ? AND e.status = 'done'`,
-  ).bind(id).first<{ id: string; title: string; published_at: string | null; audio_url: string | null; audio_key: string | null; speaker: string | null; summary: string; main_scripture: string | null; topics_json: string; scriptures_json: string }>();
+  ).bind(id).first<{
+    id: string; title: string; published_at: string | null; audio_url: string | null; audio_key: string | null; speaker: string | null;
+    redo: RedoStep | null; stage: string | null; detail: string | null; error: string | null;
+    summary: string; main_scripture: string | null; topics_json: string; scriptures_json: string;
+  }>();
   if (!episode) return page("Not found", html`<h1>Sermon not found</h1><p><a href="/episodes">All sermons</a></p>`, { status: 404, ...chrome(context) });
   const [chunkRows, transcript, entries] = await Promise.all([
     db.prepare("SELECT seq, text, start_seconds FROM chunks WHERE episode_id = ? AND kind = 'transcript' ORDER BY seq")
@@ -169,7 +175,8 @@ ${context.session?.user.role === "admin" ? html`<form class="row" method="post" 
 <datalist id="speakers">${speakerList(entries).map((name) => html`<option value="${name}"></option>`)}</datalist>
 <button class="quiet" type="submit">Save</button>
 <span class="hint">Only admins see this. Leave it blank if it isn't known.</span>
-</form>` : ""}
+</form>
+${reprocessControl(episode)}` : ""}
 </section>
 <section role="tabpanel" id="panel-ask" aria-labelledby="tab-ask"><h2 class="panel-heading">Ask about this sermon</h2>
 <p class="hint">Answers come only from this sermon.</p>
@@ -243,6 +250,36 @@ export async function transcriptDownload(context: Context, id: string, format: "
       "X-Content-Type-Options": "nosniff",
     },
   });
+}
+
+/** Where an admin redoes part of a finished sermon, or sees how a redo is going. */
+function reprocessControl(episode: { id: string; redo: RedoStep | null; stage: string | null; detail: string | null; error: string | null }): Html {
+  const progress = html`<a href="/admin/episodes?status=reprocessing">Admin → Episodes</a>`;
+  if (episode.redo && episode.stage) return html`<p class="hint">Re-processing now: ${episode.detail ?? "Starting"}. Follow it in ${progress}.</p>`;
+  return html`${episode.redo ? html`<p class="hint">${episode.error ? html`Re-processing failed: ${episode.error} Retry it in ${progress}, or start again below.` : html`Waiting to re-process from: ${REDO_LABELS[episode.redo]}.`}</p>` : ""}
+<form method="post" action="/episodes/${episode.id}/reprocess" data-busy="Starting…">
+<label for="f-redo">Re-process</label>
+<p class="hint">Each choice also redoes the ones after it in this list, since each is made from the one before. The sermon keeps its current version until each new part is ready.</p>
+<select id="f-redo" name="from" required><option value="" selected disabled>Choose what to redo</option>${REDO_STEPS.map((step) => html`<option value="${step}">${REDO_LABELS[step]}</option>`)}</select>
+<p><button class="quiet" type="submit">Start</button></p>
+</form>`;
+}
+
+/** POST /episodes/:id/reprocess : an admin redoes a finished sermon from one step on. */
+export async function reprocessEpisode(context: Context, id: string): Promise<Response> {
+  const denied = requireAdmin(context);
+  if (denied) return denied;
+  const from = (await context.request.formData()).get("from");
+  if (!isRedoStep(from)) return redirect(`/episodes/${id}`);
+  const episode = await context.db.prepare("SELECT title FROM episodes WHERE id = ?").bind(id).first<{ title: string }>();
+  if (!episode) return redirect("/admin/episodes");
+  await rememberOrigin(context);
+  const started = await requestRedo(context.db, id, from);
+  if (started) await dispatchQueued(context.env);
+  const notice = started
+    ? `Re-processing “${episode.title}” from: ${REDO_LABELS[from]}. It keeps its current version until each new part is ready.`
+    : `“${episode.title}” can't be re-processed right now: it's either still being processed or not finished yet.`;
+  return redirect(`/admin/episodes?status=reprocessing&notice=${encodeURIComponent(notice)}`);
 }
 
 /** POST /episodes/:id/speaker : an admin sets or clears who preached. The AI never changes it afterwards. */

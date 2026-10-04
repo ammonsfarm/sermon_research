@@ -237,6 +237,13 @@ export const MIGRATIONS: readonly Migration[] = [
     // without the column the transcript review saves its progress in.
     columns: [{ table: "transcripts_draft", name: "cleaned_json", definition: "TEXT CHECK (cleaned_json IS NULL OR json_valid(cleaned_json))" }],
   },
+  {
+    version: 14,
+    statements: [],
+    // The earliest step an admin asked to redo for a finished episode. It moves on as each
+    // step is redone and clears when the run finishes; the episode stays 'done' throughout.
+    columns: [{ table: "episodes", name: "redo", definition: "TEXT CHECK (redo IS NULL OR redo IN ('transcribe', 'rewrite', 'summary', 'index'))" }],
+  },
 ];
 
 let applied: Promise<void> | undefined;

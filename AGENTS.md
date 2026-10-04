@@ -19,9 +19,9 @@ before anything in the "Ask first" list below.
 | `src/providers.ts` | Live checks and calls to OpenAI-compatible APIs, OpenAI embeddings, Mistral, Muse transcription (with its error messages) and Resend |
 | `src/keys.ts` | API keys stored AES-GCM encrypted in `provider_keys` |
 | `src/links.ts` | Emailed sign-in links |
-| `src/imports.ts` | Import step with cost estimate, episodes dashboard, schedule page, hourly cron logic |
+| `src/imports.ts` | Import step with cost estimate, episodes dashboard (filtered by text and status, 200 a page), schedule page, hourly cron logic |
 | `src/audio.ts` | Copies episode audio into the `AUDIO` R2 bucket, signs short-lived links for the transcription service, serves `/audio/:id` with ranges |
-| `src/episodes.ts` | Episode rows from the feed, the queue, and starting workflow runs (up to the admin's "episodes at once" setting) |
+| `src/episodes.ts` | Episode rows from the feed, the queue, re-processing requests (`requestRedo`), the dashboard's filter, and starting workflow runs (up to the admin's "episodes at once" setting) |
 | `src/pipeline.ts` | The per-episode steps: transcribe (Mistral in one step, or Muse a part at a time) into `transcripts_draft`, clean up into `transcripts`, summarize and identify the speaker (answers AI), chunk, embed and write to Vectorize |
 | `src/mp3.ts`, `src/mp3.wasm` | Decodes the stored MP3 to 16 kHz mono for Muse, inside the Worker. The `.wasm` is minimp3 (public domain, `vendor/minimp3`) with the small wrapper in `wasm/mp3.c`; it's committed, and `scripts/build-mp3-wasm.sh` rebuilds it with Zig |
 | `src/muse.ts` | Muse's side of transcription: WAV files, ending each part at a pause, and turning Muse's turns into timed segments |
@@ -32,7 +32,7 @@ before anything in the "Ask first" list below.
 | `src/scope.ts` | Question scope: series (taken from the " - Series" end of a title), speaker, date range and specific sermons |
 | `src/scriptures.ts` | Each sermon's main passage (`summaries.main_scripture`): the hourly catch-up for sermons summarized before it was kept, and reference cleanup |
 | `src/speakers.ts` | Who preached each sermon: the answers AI reads the feed's description and author and the start of the transcript (pipeline step for new sermons, hourly for older ones); name cleanup; spotting a speaker named in a question |
-| `src/sermons.ts` | Sermons grid with search and filters, and the sermon page (player, read-along, Summary / Ask / Create panel) |
+| `src/sermons.ts` | Sermons grid with search and filters, and the sermon page (player, read-along, Summary / Ask / Create panel, and the admin's speaker and Re-process controls) |
 | `src/research.ts` | Retrieval (Vectorize, filtered to a scope), cited answers, sources, question limits and research access settings |
 | `src/documents.ts`, `src/markdown.ts` | Markdown documents written from the sermons (outline, study questions, custom): starting one, its page (live progress while it's written, Try again if it failed) and `.md` download; a small Markdown renderer that escapes everything it doesn't handle |
 | `src/writing.ts` | How a document is written, in the background: the answers AI picks the sermons from a catalog (titles, dates, scripture, topics) and splits long requests into parts, then each part is written from the full transcripts of its sermons, and the parts are joined with their citations renumbered |
@@ -190,6 +190,23 @@ first request after each deploy.
   doesn't return JSON (pick a stronger model). Fix the cause, then press Retry.
   Workflow runs are listed under Workers & Pages → Workflows →
   `sermon-research-episode`.
+- **Re-process a sermon:** on its page (Summary tab, admins only), choose the
+  transcript from the audio, the transcript rewrite (grammar, names,
+  capitals), the summary or the search vectors. Each also redoes the ones
+  after it, since each is made from the one before. The episode keeps status
+  `done` and its current transcript, summary and passages until each new one
+  replaces it, so it never leaves the site; `episodes.redo` holds the earliest
+  step still to redo, moves on as each step is redone, and clears when the run
+  finishes. Re-transcribing uses the audio copy in R2 when there is one (so a
+  hand-converted MP3 stays), and downloads from the feed otherwise. A rewrite
+  starts again from the draft, or from the current transcript for sermons
+  without one. Re-processing takes a place under "Episodes at once", goes
+  ahead of the queue, and shows in Admin → Episodes (filter "Re-processing");
+  a failed one keeps the earlier version and has a Retry button.
+- **Find an episode in Admin → Episodes:** the list shows 200 at a time with
+  Previous/Next links; the search box matches the title (which ends with the
+  series), the speaker or the start of the date (2024-10), and the status
+  menu shows how many each status has.
 - **An episode is stuck on "Working":** runs that report nothing for 6 hours
   are marked failed by the next hourly tick, and can then be retried.
 - **Process more or fewer episodes at once:** Admin → Episodes → "Episodes

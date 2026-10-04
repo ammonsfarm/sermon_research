@@ -1,6 +1,7 @@
 import { NonRetryableError } from "cloudflare:workflows";
 import { downloadAudio, formatBytes, signedAudioUrl } from "./audio.ts";
 import { batchEnd, cleanSegments } from "./cleanup.ts";
+import { REDO_STEPS, type RedoStep } from "./episodes.ts";
 import { decodeMp3 } from "./mp3.ts";
 import { MUSE_LIMITS, MUSE_PART_SETTING, MUSE_SAMPLE_RATE, MUSE_TOO_LONG, type MuseLimits, quietestSplit, turnsToSegments, WAV_HEADER_BYTES, writeWavHeader } from "./muse.ts";
 import type { AppEnv } from "./env.ts";
@@ -67,7 +68,7 @@ export async function runEpisode(env: AppEnv, step: PipelineStep, episodeId: str
   const secret = env.APP_SECRET ?? "";
   try {
     await step.do("download audio", DOWNLOAD, tracked(db, episodeId, "transcribe", "Downloading the audio", async () => {
-      if (await hasTranscript(db, episodeId)) return;
+      if (!(await redoing(db, episodeId, "transcribe")) && await hasTranscript(db, episodeId)) return;
       const episode = await db.prepare("SELECT audio_url, audio_key FROM episodes WHERE id = ?").bind(episodeId).first<{ audio_url: string | null; audio_key: string | null }>();
       if (episode?.audio_key && await env.AUDIO.head(episode.audio_key)) return;
       if (!episode?.audio_url) throw new ProviderError("This episode has no audio file in the feed.");
@@ -83,7 +84,7 @@ export async function runEpisode(env: AppEnv, step: PipelineStep, episodeId: str
         if (part >= MAX_MUSE_PARTS) throw new ProviderError("This recording is too long for Muse transcription.");
       }
     } else await step.do("transcribe", TRANSCRIBE, tracked(db, episodeId, "transcribe", "Transcribing with Mistral (often 2 to 10 minutes)", async () => {
-      if (await hasTranscript(db, episodeId)) return;
+      if (!(await redoing(db, episodeId, "transcribe")) && await hasTranscript(db, episodeId)) return;
       const [episode, origin] = await Promise.all([
         db.prepare("SELECT audio_bytes FROM episodes WHERE id = ?").bind(episodeId).first<{ audio_bytes: number | null }>(),
         getSetting<string>(db, "site_origin"),
@@ -93,12 +94,15 @@ export async function runEpisode(env: AppEnv, step: PipelineStep, episodeId: str
       const apiKey = await requireKey(env, "transcription");
       // Mistral fetches our own copy through a short-lived signed link.
       const segments = await transcribe(await signedAudioUrl(secret, origin, episodeId), apiKey);
-      await db.prepare("INSERT OR REPLACE INTO transcripts_draft (episode_id, text, segments_json, model, created_at) VALUES (?, ?, ?, ?, ?)")
-        .bind(episodeId, joined(segments), JSON.stringify(segments), MISTRAL_TRANSCRIPTION_MODEL, new Date().toISOString()).run();
+      await db.batch([
+        db.prepare("INSERT OR REPLACE INTO transcripts_draft (episode_id, text, segments_json, model, created_at) VALUES (?, ?, ?, ?, ?)")
+          .bind(episodeId, joined(segments), JSON.stringify(segments), MISTRAL_TRANSCRIPTION_MODEL, new Date().toISOString()),
+        redone(db, episodeId, "transcribe"),
+      ]);
     }));
 
     await step.do("clean transcript", CLEAN, tracked(db, episodeId, "transcribe", "Cleaning up the transcript", async () => {
-      if (await db.prepare("SELECT 1 FROM transcripts WHERE episode_id = ?").bind(episodeId).first()) return;
+      if (!(await redoing(db, episodeId, "rewrite")) && await db.prepare("SELECT 1 FROM transcripts WHERE episode_id = ?").bind(episodeId).first()) return;
       const [llm, ministry, draft] = await Promise.all([
         getSetting<LlmSettingsRecord>(db, "llm"),
         getSetting<Ministry>(db, "ministry"),
@@ -116,12 +120,15 @@ export async function runEpisode(env: AppEnv, step: PipelineStep, episodeId: str
         await db.prepare("UPDATE transcripts_draft SET cleaned_json = ? WHERE episode_id = ?").bind(JSON.stringify(cleaned), episodeId).run();
       }
       const clean = segments.map((segment, index) => ({ ...segment, text: cleaned[index] ?? segment.text }));
-      await db.prepare("INSERT OR REPLACE INTO transcripts (episode_id, text, segments_json, model, created_at, cleaned_by) VALUES (?, ?, ?, ?, ?, ?)")
-        .bind(episodeId, joined(clean), JSON.stringify(clean), draft.model, new Date().toISOString(), llm.model).run();
+      await db.batch([
+        db.prepare("INSERT OR REPLACE INTO transcripts (episode_id, text, segments_json, model, created_at, cleaned_by) VALUES (?, ?, ?, ?, ?, ?)")
+          .bind(episodeId, joined(clean), JSON.stringify(clean), draft.model, new Date().toISOString(), llm.model),
+        redone(db, episodeId, "rewrite"),
+      ]);
     }));
 
     await step.do("summarize", SUMMARIZE, tracked(db, episodeId, "summarize", "Writing the summary", async () => {
-      if (await db.prepare("SELECT 1 FROM summaries WHERE episode_id = ?").bind(episodeId).first()) return;
+      if (!(await redoing(db, episodeId, "summary")) && await db.prepare("SELECT 1 FROM summaries WHERE episode_id = ?").bind(episodeId).first()) return;
       const [llm, ministry, row] = await Promise.all([
         getSetting<LlmSettingsRecord>(db, "llm"),
         getSetting<Ministry>(db, "ministry"),
@@ -133,8 +140,11 @@ export async function runEpisode(env: AppEnv, step: PipelineStep, episodeId: str
       const apiKey = await requireKey(env, "llm");
       const result = await summarize({ llm, apiKey, ministry, title: row.title, publishedAt: row.published_at, transcript: row.text });
       // A null main passage is left for the hourly catch-up to look at again, which records an empty one if there truly isn't one.
-      await db.prepare("INSERT OR REPLACE INTO summaries (episode_id, summary, topics_json, scriptures_json, model, created_at, main_scripture) VALUES (?, ?, ?, ?, ?, ?, ?)")
-        .bind(episodeId, result.summary, JSON.stringify(result.topics), JSON.stringify(result.scriptures), llm.model, new Date().toISOString(), result.mainScripture).run();
+      await db.batch([
+        db.prepare("INSERT OR REPLACE INTO summaries (episode_id, summary, topics_json, scriptures_json, model, created_at, main_scripture) VALUES (?, ?, ?, ?, ?, ?, ?)")
+          .bind(episodeId, result.summary, JSON.stringify(result.topics), JSON.stringify(result.scriptures), llm.model, new Date().toISOString(), result.mainScripture),
+        redone(db, episodeId, "summary"),
+      ]);
     }));
 
     await step.do("identify speaker", SUMMARIZE, tracked(db, episodeId, "summarize", "Identifying the speaker", async () => {
@@ -173,16 +183,18 @@ export async function runEpisode(env: AppEnv, step: PipelineStep, episodeId: str
         db.prepare("DELETE FROM chunks WHERE episode_id = ?").bind(episodeId),
         ...chunks.map((chunk, index) => db.prepare("INSERT INTO chunks (id, episode_id, kind, seq, text, start_seconds, end_seconds) VALUES (?, ?, ?, ?, ?, ?, ?)")
           .bind(ids[index]!, episodeId, chunk.kind, chunk.seq, chunk.text, chunk.start, chunk.end)),
+        redone(db, episodeId, "index"),
       ]);
     }));
 
     await step.do("finish", FINISH, async () => {
       const now = new Date().toISOString();
-      await db.prepare("UPDATE episodes SET status = 'done', stage = NULL, detail = NULL, last_error = NULL, error = NULL, completed_at = ?, updated_at = ? WHERE id = ?").bind(now, now, episodeId).run();
+      await db.prepare("UPDATE episodes SET status = 'done', stage = NULL, detail = NULL, last_error = NULL, error = NULL, redo = NULL, completed_at = ?, updated_at = ? WHERE id = ?").bind(now, now, episodeId).run();
     });
   } catch (error) {
     await step.do("record failure", FINISH, async () => {
-      await db.prepare("UPDATE episodes SET status = 'failed', detail = NULL, last_error = NULL, error = ?, updated_at = ? WHERE id = ?")
+      // A finished episode being re-processed stays up, with its error showing in Admin → Episodes.
+      await db.prepare("UPDATE episodes SET status = CASE WHEN status = 'done' THEN 'done' ELSE 'failed' END, stage = CASE WHEN status = 'done' THEN NULL ELSE stage END, detail = NULL, last_error = NULL, error = ?, updated_at = ? WHERE id = ?")
         .bind(describeError(error), new Date().toISOString(), episodeId).run();
     });
   }
@@ -194,7 +206,7 @@ export async function runEpisode(env: AppEnv, step: PipelineStep, episodeId: str
  */
 async function transcribeMusePart(env: AppEnv, episodeId: string, limits: MuseLimits): Promise<boolean> {
   const db = env.DB;
-  if (await hasTranscript(db, episodeId)) return true;
+  if (!(await redoing(db, episodeId, "transcribe")) && await hasTranscript(db, episodeId)) return true;
   const [episode, progress] = await Promise.all([
     db.prepare("SELECT audio_key, duration_seconds FROM episodes WHERE id = ?").bind(episodeId).first<{ audio_key: string | null; duration_seconds: number | null }>(),
     db.prepare("SELECT done_samples, segments_json FROM transcription_progress WHERE episode_id = ?").bind(episodeId).first<{ done_samples: number; segments_json: string }>(),
@@ -247,8 +259,20 @@ async function transcribeMusePart(env: AppEnv, episodeId: string, limits: MuseLi
     db.prepare("INSERT OR REPLACE INTO transcripts_draft (episode_id, text, segments_json, model, created_at) VALUES (?, ?, ?, ?, ?)")
       .bind(episodeId, joined(segments), JSON.stringify(segments), MUSE_TRANSCRIPTION_MODEL, now),
     db.prepare("DELETE FROM transcription_progress WHERE episode_id = ?").bind(episodeId),
+    redone(db, episodeId, "transcribe"),
   ]);
   return true;
+}
+
+/** Whether an admin asked to redo this step, or one before it, for a finished episode. */
+async function redoing(db: D1Database, episodeId: string, step: RedoStep): Promise<boolean> {
+  const row = await db.prepare("SELECT redo FROM episodes WHERE id = ?").bind(episodeId).first<{ redo: RedoStep | null }>();
+  return row?.redo != null && REDO_STEPS.indexOf(row.redo) <= REDO_STEPS.indexOf(step);
+}
+
+/** Moves an admin's redo on past a step once it's redone, so a retry carries on from the next one. */
+function redone(db: D1Database, episodeId: string, step: RedoStep): D1PreparedStatement {
+  return db.prepare("UPDATE episodes SET redo = ? WHERE id = ? AND redo = ?").bind(REDO_STEPS[REDO_STEPS.indexOf(step) + 1] ?? null, episodeId, step);
 }
 
 /** True once Mistral's draft or the cleaned transcript is saved, so the audio needn't be fetched or transcribed again. */
