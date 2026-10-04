@@ -1,6 +1,24 @@
 import { type Context, redirect, requireAdmin, chrome } from "./context.ts";
 import { formatBytes } from "./audio.ts";
-import { concurrency, dispatchQueued, type EpisodeRow, listEpisodes, MAX_CONCURRENCY, type ProcessingSettings, queueAllFailed, queueAllNotImported, queueEpisodes, recordFeed, statusCounts } from "./episodes.ts";
+import {
+  concurrency,
+  dispatchQueued,
+  EPISODE_FILTERS,
+  type EpisodeQuery,
+  type EpisodeRow,
+  EPISODES_PER_PAGE,
+  isEpisodeFilter,
+  listEpisodes,
+  MAX_CONCURRENCY,
+  type ProcessingSettings,
+  queueAllFailed,
+  queueAllNotImported,
+  queueEpisodes,
+  recordFeed,
+  REDO_LABELS,
+  statusCounts,
+  type StatusCounts,
+} from "./episodes.ts";
 import { type Feed, FeedError, fetchFeed } from "./feed.ts";
 import { html, page, type Html } from "./html.ts";
 import { DEFAULT_SCHEDULE, describeSchedule, isDue, isValidTimeZone, localSlot, parseSchedule, type Schedule, WEEKDAYS } from "./schedule.ts";
@@ -146,6 +164,14 @@ export async function rememberOrigin(context: Context): Promise<void> {
 
 function episodeStatus(episode: EpisodeRow): Html {
   const label = STATUS_LABELS[episode.status];
+  if (episode.status === "done" && episode.redo) {
+    if (episode.stage) {
+      return html`<strong>Re-processing</strong> · attempt ${episode.attempts}<br><span class="hint">${episode.detail ?? "Starting"} · updated ${ago(episode.updated_at)}</span>
+${episode.last_error ? html`<br><span class="error">Last error: ${episode.last_error}</span>` : ""}`;
+    }
+    if (episode.error) return html`<strong>Re-processing failed</strong> · ${ago(episode.updated_at)}<br><span class="error">${episode.error}</span><br><span class="hint">The sermon still shows its earlier version.</span>`;
+    return html`${label} · <strong>waiting to re-process</strong><br><span class="hint">From: ${REDO_LABELS[episode.redo]}</span>`;
+  }
   if (episode.status === "running") {
     return html`<strong>${label}</strong> · attempt ${episode.attempts}<br><span class="hint">${episode.detail ?? "Starting"} · updated ${ago(episode.updated_at)}</span>
 ${episode.last_error ? html`<br><span class="error">Last error: ${episode.last_error}</span>` : ""}`;
@@ -155,6 +181,46 @@ ${episode.last_error ? html`<br><span class="error">Last error: ${episode.last_e
   return html`${label}`;
 }
 
+/** The filter from the episode list's query string. */
+function episodeQuery(url: URL): EpisodeQuery {
+  const status = url.searchParams.get("status");
+  const page = Number(url.searchParams.get("page"));
+  return {
+    q: (url.searchParams.get("q") ?? "").replace(/\s+/gu, " ").trim().slice(0, 100),
+    status: isEpisodeFilter(status) ? status : "all",
+    page: Number.isInteger(page) && page > 1 ? page : 1,
+  };
+}
+
+function episodesUrl(query: EpisodeQuery): string {
+  const params = new URLSearchParams();
+  if (query.q) params.set("q", query.q);
+  if (query.status !== "all") params.set("status", query.status);
+  if (query.page > 1) params.set("page", String(query.page));
+  const search = params.toString();
+  return `/admin/episodes${search ? `?${search}` : ""}`;
+}
+
+/** The search box and status choice above the episode list, with how many each status has. */
+function episodeFilter(query: EpisodeQuery, counts: StatusCounts, total: number): Html {
+  const reprocessing = counts.redo.running + counts.redo.waiting + counts.redo.failed;
+  const sizes: Record<keyof typeof EPISODE_FILTERS, number> = {
+    all: counts.done + counts.running + counts.queued + counts.failed + counts.not_imported,
+    done: counts.done, running: counts.running, queued: counts.queued, failed: counts.failed, not_imported: counts.not_imported, reprocessing,
+  };
+  const filtered = query.q !== "" || query.status !== "all";
+  const first = total === 0 ? 0 : (query.page - 1) * EPISODES_PER_PAGE + 1;
+  const last = Math.min(total, query.page * EPISODES_PER_PAGE);
+  const pages = Math.ceil(total / EPISODES_PER_PAGE);
+  return html`<form class="row filters" method="get" action="/admin/episodes">
+<input id="f-q" name="q" type="search" value="${query.q}" class="grow" maxlength="100" aria-label="Find episodes" placeholder="Title, series, speaker or date like 2024-10">
+<select name="status" aria-label="Status">${(Object.keys(EPISODE_FILTERS) as (keyof typeof EPISODE_FILTERS)[]).map((value) => html`<option value="${value}"${value === query.status ? html` selected` : ""}>${EPISODE_FILTERS[value]} (${sizes[value]})</option>`)}</select>
+<button class="quiet" type="submit">Filter</button>
+${filtered ? html`<a href="/admin/episodes">Clear</a>` : ""}
+</form>
+<p class="hint">${total === 0 ? "No episodes match." : `Showing ${first}–${last} of ${total}${filtered ? " matching" : ""} episode${total === 1 ? "" : "s"}.`}${pages > 1 ? html`${query.page > 1 ? html` <a href="${episodesUrl({ ...query, page: query.page - 1 })}">Previous ${EPISODES_PER_PAGE}</a>` : ""}${query.page < pages ? html` <a href="${episodesUrl({ ...query, page: query.page + 1 })}">Next ${Math.min(EPISODES_PER_PAGE, total - last)}</a>` : ""}` : ""}</p>`;
+}
+
 /** GET /admin/episodes */
 export async function episodesDashboard(context: Context): Promise<Response> {
   const denied = requireAdmin(context);
@@ -162,9 +228,10 @@ export async function episodesDashboard(context: Context): Promise<Response> {
   const current = await getSetupStep(context.db);
   if (current !== "complete") return redirect(`/setup/${current}`);
   await rememberOrigin(context);
-  const [counts, episodes, schedule, lastCheck, lastTick, atOnce, speakers, mainTexts] = await Promise.all([
+  const query = episodeQuery(context.url);
+  const [counts, { rows: episodes, total }, schedule, lastCheck, lastTick, atOnce, speakers, mainTexts] = await Promise.all([
     statusCounts(context.db),
-    listEpisodes(context.db),
+    listEpisodes(context.db, query),
     getSetting<Schedule>(context.db, "schedule"),
     getSetting<{ at: string; queued: number; error?: string }>(context.db, "last_check"),
     getSetting<string>(context.db, "last_tick"),
@@ -176,11 +243,13 @@ export async function episodesDashboard(context: Context): Promise<Response> {
   const waitingMainTexts = mainTexts?.waiting ?? 0;
   const waitingSpeakers = speakers?.waiting ?? 0;
   const notice = context.url.searchParams.get("notice");
-  const live = counts.running + counts.queued > 0;
+  const live = counts.running + counts.queued + counts.redo.running + counts.redo.waiting > 0;
+  const reprocessing = counts.redo.running + counts.redo.waiting;
+  const failed = counts.failed + counts.redo.failed;
   return page("Episodes", html`<h1>Episodes</h1>
 ${notice ? html`<p class="alert-ok">${notice}</p>` : ""}
 <p class="${live ? "live" : "hint"}">${live
-    ? `Processing: ${counts.running} working, ${counts.queued} waiting. This page updates every ${LIVE_REFRESH_SECONDS} seconds.`
+    ? `Processing: ${counts.running} working, ${counts.queued} waiting${reprocessing ? `, ${reprocessing} re-processing` : ""}. This page updates every ${LIVE_REFRESH_SECONDS} seconds.`
     : "Nothing is processing right now."}</p>
 <dl>
 <dt>Done</dt><dd>${counts.done}</dd>
@@ -188,6 +257,7 @@ ${notice ? html`<p class="alert-ok">${notice}</p>` : ""}
 <dt>Waiting</dt><dd>${counts.queued}</dd>
 <dt>Failed</dt><dd>${counts.failed}</dd>
 <dt>Not imported</dt><dd>${counts.not_imported}</dd>
+${reprocessing + counts.redo.failed ? html`<dt>Re-processing</dt><dd>${counts.redo.running} working, ${counts.redo.waiting} waiting${counts.redo.failed ? `, ${counts.redo.failed} failed` : ""} · <a href="/admin/episodes?status=reprocessing">Show</a></dd>` : ""}
 <dt>Schedule</dt><dd>${schedule ? describeSchedule(schedule) : "Not set"} · <a href="/admin/schedule">Change</a></dd>
 <dt>Last feed check</dt><dd>${lastCheck ? `${ago(lastCheck.at)} · ${lastCheck.error ?? `${lastCheck.queued} new`}` : "Not yet"}</dd>
 <dt>Speakers</dt><dd>${speakers?.named ?? 0} named${waitingSpeakers ? html` · ${waitingSpeakers} waiting for the AI, which checks hourly <form class="inline" method="post" action="/admin/episodes/speakers" data-busy="Identifying speakers… this can take a minute."><button class="link" type="submit">Identify now</button></form>` : ""} · fix one on its sermon page</dd>
@@ -202,17 +272,18 @@ ${notice ? html`<p class="alert-ok">${notice}</p>` : ""}
 </form>
 <div class="row">
 <form class="inline" method="post" action="/admin/episodes/check"><button class="quiet" type="submit">Check for new episodes now</button></form>
-${counts.failed > 0 ? html`<form class="inline" method="post" action="/admin/episodes/queue"><input type="hidden" name="failed" value="1"><button class="quiet" type="submit">Retry all ${counts.failed} failed</button></form>` : ""}
+${failed > 0 ? html`<form class="inline" method="post" action="/admin/episodes/queue"><input type="hidden" name="failed" value="1"><button class="quiet" type="submit">Retry all ${failed} failed</button></form>` : ""}
 ${counts.not_imported > 0 ? html`<form class="inline" method="post" action="/admin/episodes/queue"><input type="hidden" name="all" value="1"><button class="quiet" type="submit">Import all ${counts.not_imported} older episodes</button></form>` : ""}
 </div>
+${episodeFilter(query, counts, total)}
 <table class="episodes">
 <thead><tr><th>Episode</th><th>Status</th><th></th></tr></thead>
 <tbody>
 ${episodes.map((episode) => html`<tr>
 <td>${episode.status === "done" ? html`<a href="/episodes/${episode.id}">${episode.title}</a>` : episode.title}<br><span class="hint">${episode.published_at?.slice(0, 10) ?? ""}${episode.speaker ? ` · ${episode.speaker}` : ""}</span></td>
 <td>${episodeStatus(episode)}</td>
-<td>${episode.status === "failed" || episode.status === "not_imported"
-    ? html`<form method="post" action="/admin/episodes/queue"><input type="hidden" name="id" value="${episode.id}"><button class="quiet" type="submit">${episode.status === "failed" ? "Retry" : "Import"}</button></form>`
+<td>${episode.status === "failed" || episode.status === "not_imported" || (episode.redo && !episode.stage && episode.error)
+    ? html`<form method="post" action="/admin/episodes/queue"><input type="hidden" name="id" value="${episode.id}"><button class="quiet" type="submit">${episode.status === "not_imported" ? "Import" : "Retry"}</button></form>`
     : ""}</td>
 </tr>`)}
 </tbody>

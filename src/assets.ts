@@ -107,7 +107,7 @@ button:disabled { opacity: .6; cursor: progress; }
 .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 form.inline { display: inline; }
 label.inline-label { display: inline; margin: 0; }
-.row select, .row input[type="date"] { width: auto; }
+.row select, .row input[type="date"] { width: auto; max-width: 100%; }
 fieldset.choices { border: 0; padding: 0; margin: 0 0 16px; }
 fieldset.choices legend { font-weight: 600; margin-bottom: 8px; }
 label.choice { display: flex; gap: 10px; align-items: flex-start; font-weight: 400; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; margin-bottom: 8px; background: var(--surface); }
