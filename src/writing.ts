@@ -106,7 +106,7 @@ async function candidates(env: AppEnv, scope: Scope, request: string): Promise<C
 }
 
 /** Chooses the sermons and splits the document into parts. */
-export async function planDocument(env: AppEnv, ministry: Ministry | null, kind: DocumentKind, request: string, scope: Scope): Promise<Plan> {
+export async function planDocument(env: AppEnv, ministry: Ministry | null, kind: DocumentKind, request: string, scope: Scope, who: Who = {}): Promise<Plan> {
   const sermons = await candidates(env, scope, request);
   if (sermons.length === 0) throw new ProviderError("No indexed sermons match this document's scope.");
   if (kind !== "custom" && scope.episodes?.length) {
@@ -116,7 +116,7 @@ export async function planDocument(env: AppEnv, ministry: Ministry | null, kind:
   }
   const list = sermons.map((sermon, index) => `${index + 1}. "${sermon.title}" (${sermon.publishedAt?.slice(0, 10) ?? "undated"})${sermon.speaker ? `. Speaker: ${sermon.speaker}` : ""}${sermon.mainScripture ? `. Main text: ${sermon.mainScripture}` : ""}`
     + `${sermon.scriptures.length ? `. Scripture: ${sermon.scriptures.join(", ")}` : ""}${sermon.topics.length ? `. Topics: ${sermon.topics.join(", ")}` : ""}`).join("\n");
-  const reply = await chat(env, planPrompt(kind, ministry), `Sermons:\n${list}\n\nRequest: ${request}`, { maxTokens: PLAN_MAX_TOKENS, timeoutMs: PLAN_TIMEOUT_MS });
+  const reply = await chat(env, planPrompt(kind, ministry), `Sermons:\n${list}\n\nRequest: ${request}`, { maxTokens: PLAN_MAX_TOKENS, timeoutMs: PLAN_TIMEOUT_MS, action: "document", ...who });
   return parsePlan(reply, sermons);
 }
 
@@ -261,13 +261,18 @@ interface Job {
   readonly request: string;
   readonly title: string;
   readonly scope: Scope;
+  /** Whose model limit applies, and the model they asked for. */
+  readonly who: Who;
 }
 
+/** The person a document is written for and the model they chose ("provider/model"); the site default if none. */
+interface Who { readonly userId?: string | null; readonly model?: string | null }
+
 async function loadJob(db: D1Database, documentId: string): Promise<Job> {
-  const row = await db.prepare("SELECT kind, request, title, scope_json FROM documents WHERE id = ?").bind(documentId)
-    .first<{ kind: DocumentKind; request: string; title: string; scope_json: string | null }>();
+  const row = await db.prepare("SELECT kind, request, title, scope_json, user_id, model FROM documents WHERE id = ?").bind(documentId)
+    .first<{ kind: DocumentKind; request: string; title: string; scope_json: string | null; user_id: string | null; model: string | null }>();
   if (!row) throw new ProviderError("The document was deleted.");
-  return { kind: row.kind, request: row.request, title: row.title, scope: JSON.parse(row.scope_json ?? "{}") as Scope };
+  return { kind: row.kind, request: row.request, title: row.title, scope: JSON.parse(row.scope_json ?? "{}") as Scope, who: { userId: row.user_id, model: row.model } };
 }
 
 async function writePart(env: AppEnv, ministry: Ministry | null, job: Job, plan: Plan, index: number, previous: string): Promise<WrittenPart> {
@@ -276,7 +281,7 @@ async function writePart(env: AppEnv, ministry: Ministry | null, job: Job, plan:
   if (passages.length === 0) throw new ProviderError("The chosen sermons have no indexed passages. Retry them in Admin → Episodes.");
   const sources = `Sources:\n\n${sourcesPrompt(passages)}`;
   const length = part.words ? `Aim for about ${part.words.toLocaleString("en-US")} words.` : "";
-  const options = { maxTokens: PART_MAX_TOKENS, timeoutMs: PART_TIMEOUT_MS };
+  const options = { maxTokens: PART_MAX_TOKENS, timeoutMs: PART_TIMEOUT_MS, action: "document" as const, ...job.who };
   if (plan.parts.length === 1) {
     const reply = await chat(env, documentPrompt(job.kind, ministry), [sources, `Request: ${job.request}`, length].filter(Boolean).join("\n\n"), options);
     return toPlaceholders(unfence(reply), passages);
@@ -323,7 +328,7 @@ export async function writeDocument(env: AppEnv, step: PipelineStep, documentId:
   try {
     const plan = await step.do("plan", PLAN, tracked(db, documentId, "Choosing the sermons and planning the parts", async () => {
       const [job, ministry] = await Promise.all([loadJob(db, documentId), getSetting<Ministry>(db, "ministry")]);
-      const planned = await planDocument(env, ministry, job.kind, job.request, job.scope);
+      const planned = await planDocument(env, ministry, job.kind, job.request, job.scope, job.who);
       if (planned.title) await db.prepare("UPDATE documents SET title = ? WHERE id = ?").bind(planned.title, documentId).run();
       return planned;
     }));

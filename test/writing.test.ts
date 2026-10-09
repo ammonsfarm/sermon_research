@@ -61,7 +61,7 @@ test("a document that can't be written shows why and can be tried again; stalled
     const id = location.split("/").at(-1)!;
     await runDocuments(site.app);
     const failed = await (await site.app.request(location, { cookie: site.cookie })).text();
-    assert.match(failed, /This document couldn't be written: The answers AI returned HTTP 500\./);
+    assert.match(failed, /This document couldn't be written: OpenAI returned HTTP 500 for gpt-test\./);
     assert.match(failed, new RegExp(`<form class="inline" method="post" action="/documents/${id}/retry"><button type="submit">Try again</button></form>`));
     assert.doesNotMatch(failed, /http-equiv="refresh"/);
     assert.match(await (await site.app.request("/library", { cookie: site.cookie })).text(), /Couldn&#39;t be written/);

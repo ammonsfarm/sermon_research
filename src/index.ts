@@ -37,7 +37,6 @@ import {
   type EmailSettings,
   getSetting,
   getSetupStep,
-  type LlmSettingsRecord,
   type Ministry,
   nextStep,
   parseMinistry,
@@ -46,6 +45,8 @@ import {
   type TranscriptionSettings,
 } from "./settings.ts";
 import { isProviderStep, stepForm, stepSubmit } from "./steps.ts";
+import { llmAdmin } from "./llm-admin.ts";
+import { llmSummary } from "./llm.ts";
 import {
   adminView,
   loginView,
@@ -153,6 +154,7 @@ async function route(context: Context): Promise<Response> {
       if (document && request.method === "POST" && document[2] === "/retry") return retryDocument(context, document[1]!);
       const audio = /^\/audio\/([0-9a-f-]{36})$/u.exec(url.pathname);
       if (audio && (request.method === "GET" || request.method === "HEAD")) return serveAudio(context, audio[1]!, () => canViewResearch(context));
+      if (url.pathname === "/admin/llm" || url.pathname.startsWith("/admin/llm/")) return llmAdmin(context);
       const match = /^\/(setup|admin)\/([a-z]+)$/u.exec(url.pathname);
       if (match && isProviderStep(match[2]!) && (request.method === "GET" || request.method === "POST")) {
         const wizard = match[1] === "setup";
@@ -240,7 +242,7 @@ async function admin(context: Context): Promise<Response> {
   const { db } = context;
   const [podcast, llm, embeddings, transcription, email, keys, research] = await Promise.all([
     getSetting<PodcastSettings>(db, "podcast"),
-    getSetting<LlmSettingsRecord>(db, "llm"),
+    llmSummary(db),
     getSetting<CheckedSettings>(db, "embeddings"),
     getSetting<TranscriptionSettings>(db, "transcription"),
     getSetting<EmailSettings>(db, "email"),

@@ -1,7 +1,7 @@
 import { seal, unseal } from "./crypto.ts";
 
 /** Where each provider's API key is stored. */
-export type KeySlot = "llm" | "embeddings" | "transcription" | "email";
+export type KeySlot = "llm" | "embeddings" | "transcription" | "email" | `llm:${string}`;
 
 export interface StoredKeyInfo {
   readonly last4: string;

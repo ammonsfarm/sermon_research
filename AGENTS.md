@@ -14,7 +14,9 @@ before anything in the "Ask first" list below.
 | `src/crypto.ts` | PBKDF2 password hashing, tokens, constant-time compare |
 | `src/schema.ts` | Database migrations; the Worker applies them itself on first request |
 | `src/settings.ts` | Key-value settings stored in D1 (ministry details, provider choices, wizard progress) |
-| `src/steps.ts` | Wizard and admin pages for the podcast feed, answers AI, embeddings, transcription and email |
+| `src/steps.ts` | Wizard and admin pages for the podcast feed, embeddings, transcription and email, and the wizard's first answers-AI step |
+| `src/llm.ts` | Answers-AI providers and models: the five built-in providers, how each one's chat request differs (`chatBody`), listing a provider's models and working out their reasoning levels (`fetchCatalog`), site defaults per job, per-person limits, and `resolveTarget`, which picks the model for a call |
+| `src/llm-admin.ts` | Admin → Answers AI (`/admin/llm/*`): providers and keys, pulling and adding models, the model and effort for each job, and models per person |
 | `src/feed.ts` | Podcast RSS fetch and parse, including each episode's description and author |
 | `src/providers.ts` | Live checks and calls to OpenAI-compatible APIs, OpenAI embeddings, Mistral, Muse transcription (with its error messages) and Resend |
 | `src/keys.ts` | API keys stored AES-GCM encrypted in `provider_keys` |
@@ -131,8 +133,8 @@ first request after each deploy.
   `transcripts_draft`. The answers AI then corrects it (`CLEANUP_PROMPT` in
   `src/cleanup.ts`: proper nouns, stray periods at pauses, capitals) about
   8,000 characters at a time, sending the segments as JSON with IDs, and the
-  result goes to `transcripts` with the original timings. It uses the "Summary
-  reasoning effort" from Admin → Answers AI. Everything after that
+  result goes to `transcripts` with the original timings. It uses the
+  "Summaries and sermon processing" model and effort from Admin → Answers AI. Everything after that
   (summary, speaker, main text, search, read-along, documents) reads the
   cleaned one. A segment keeps its draft text when the reply leaves it out,
   isn't JSON, or changes more than about a fifth of its words. Each batch is
@@ -165,15 +167,34 @@ first request after each deploy.
   and per email, and it clears on its own. To clear it now:
   `npx wrangler d1 execute sermon-research --remote --command "DELETE FROM login_attempts"`.
 - **Change a provider or rotate a key:** have the person use Admin →
-  Connections. A blank key field keeps the saved key. Keys can't be read back
-  out of the database in plain text by design.
-- **Muse and reasoning effort:** when the answers AI's base address is on
-  `api.meta.ai`, every chat call sends `reasoning_effort`. Admin → Answers AI
-  has two, both Low by default: "Summary" for sermon processing (the
-  full-text transcript review, summaries, speakers, main texts) and "Chat" for answers and documents. A new `chat()`
-  caller picks one with its `effort` option; the connection check always uses
-  Low. Other providers never get the field, since some reject unknown fields
-  with a 400.
+  Answers AI (or Connections for the others). A blank key field keeps the
+  saved key. Keys can't be read back out of the database in plain text by design.
+- **Answers-AI providers, models and reasoning effort:** Admin → Answers AI
+  holds Meta (Muse), Google Gemini, OpenAI, Anthropic and OpenRouter by
+  default (rows in `llm_providers`; usable once a key is saved in
+  `provider_keys` under `llm:<id>`) and lets an admin add any OpenAI-compatible
+  address. "Pull the list of models" asks the provider (`fetchCatalog`) and the
+  admin adds all or some to `llm_models`, each with the reasoning levels it
+  takes (editable per model). Then one model and effort is chosen for each
+  job (the `llm_defaults` setting): summaries and sermon processing, chat,
+  and document creation. A person can be limited to some models
+  (`user_llm_models`; none means the site list); the Ask box shows a Model
+  picker when someone has two or more, and a document keeps the choice in
+  `documents.model`. Code calls `chat(env, ..., { action, userId, model })` or
+  `resolveTarget` + `chatCompletion`; never build a chat request by hand.
+  The providers differ, and `chatBody` handles it: OpenAI wants
+  `max_completion_tokens` and `reasoning_effort` (its model list has only ids,
+  so levels are inferred from names: o-series low to high, GPT-5 minimal to
+  high, GPT-5.1 and later none to high, 5.2 and later also xhigh); Gemini takes
+  `reasoning_effort` minimal to high, and only 2.5 Flash can use none; Anthropic's
+  OpenAI-compatible endpoint ignores `reasoning_effort`, so an effort becomes
+  `thinking: {type: "enabled", budget_tokens}` with `max_tokens` raised to
+  cover it; OpenRouter takes `reasoning: {effort}` and reports each model's
+  efforts; Muse takes `reasoning_effort` none to max; any other gateway gets no
+  reasoning field unless an admin gives the model levels (some reject unknown
+  fields with a 400). A site that had the single "llm" connection before
+  migration 15 keeps its key (`key_slot = 'llm'`), model and efforts as the
+  matching provider's first model and the defaults.
 - **Sign-in link emails don't arrive:** the sender address must be on a domain
   verified in Resend (resend.com → Domains, which needs DNS records). Check
   the Resend dashboard's logs, then `npx wrangler tail` for

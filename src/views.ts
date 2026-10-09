@@ -3,8 +3,8 @@ import type { ResearchSettings } from "./research.ts";
 import type { User } from "./auth.ts";
 import type { keyInfo } from "./keys.ts";
 import { field, html, type Html } from "./html.ts";
-import { DEFAULT_REASONING_EFFORT, isMetaApi } from "./providers.ts";
-import type { CheckedSettings, EmailSettings, LlmSettingsRecord, Ministry, PodcastSettings, TranscriptionSettings } from "./settings.ts";
+import type { LlmSummary } from "./llm.ts";
+import type { CheckedSettings, EmailSettings, Ministry, PodcastSettings, TranscriptionSettings } from "./settings.ts";
 
 type Errors = Readonly<Record<string, string>>;
 type Values = Readonly<Record<string, string>>;
@@ -96,7 +96,7 @@ export interface AdminOverview {
   readonly ministry: Ministry;
   readonly saved: boolean;
   readonly podcast: PodcastSettings | null;
-  readonly llm: LlmSettingsRecord | null;
+  readonly llm: LlmSummary;
   readonly embeddings: CheckedSettings | null;
   readonly transcription: TranscriptionSettings | null;
   readonly email: EmailSettings | null;
@@ -123,7 +123,7 @@ ${overview.saved ? html`<p>Saved.</p>` : ""}
 <h2>Connections</h2>
 <dl>
 <dt><a href="/admin/podcast">Podcast</a></dt><dd>${podcast ? `${podcast.title} · ${podcast.episodeCount} episodes` : "Not set"}</dd>
-<dt><a href="/admin/llm">Answers AI</a></dt><dd>${llm ? `${llm.model} at ${new URL(llm.baseUrl).host}${isMetaApi(llm.baseUrl) ? ` · reasoning effort: summaries ${llm.summaryEffort ?? DEFAULT_REASONING_EFFORT}, chat ${llm.chatEffort ?? DEFAULT_REASONING_EFFORT}` : ""}${keyLabel(keys.llm)}` : "Not set"}</dd>
+<dt><a href="/admin/llm">Answers AI</a></dt><dd>${llm.defaults.length ? html`${llm.models} model${llm.models === 1 ? "" : "s"} from ${llm.providers.join(", ")}<br>${llm.defaults.map((line) => html`${line}<br>`)}` : "Not set"}</dd>
 <dt><a href="/admin/embeddings">Embeddings</a></dt><dd>${embeddings ? `${embeddings.model}${keyLabel(keys.embeddings)}` : "Not set"}</dd>
 <dt><a href="/admin/transcription">Transcription</a></dt><dd>${transcription ? `${transcription.provider === "muse" ? "Muse" : "Mistral"} ${transcription.model}${keyLabel(keys.transcription)}` : "Not set"}</dd>
 <dt><a href="/admin/email">Email</a></dt><dd>${email && "from" in email ? `Resend from ${email.from}${keyLabel(keys.email)}` : "Off (password sign-in only)"}</dd>

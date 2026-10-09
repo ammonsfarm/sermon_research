@@ -83,7 +83,7 @@ test("after the whole wizard, the admin overview shows every connection", async 
   assert.match(body, /jane@example\.org/);
   assert.match(body, /Pastor Jane Doe, John Smith/);
   assert.match(body, /Grace Church Sermons · 2 episodes/);
-  assert.match(body, /gpt-test at api\.openai\.com · key ending 1234/);
+  assert.match(body, /1 model from OpenAI<br>Summaries: OpenAI · gpt-test<br>Chat: OpenAI · gpt-test/);
   assert.match(body, /Off \(password sign-in only\)/);
   assert.equal((await app.request("/setup/ministry", { cookie })).headers.get("Location"), "/admin");
 });

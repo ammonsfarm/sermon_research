@@ -6,6 +6,7 @@ import {
   answer, canViewResearch, type Exchange, gate, type Passage, QUESTION_MAX, renderAnswer, retrieve, sourcesList, type StoredSource, toStored, useQuota,
 } from "./research.ts";
 import { type CatalogEntry, catalog, describeScope, isAll, parseScope, type Scope, scopeControls, scopeFields, scopeIds, titleWithoutSeries } from "./scope.ts";
+import { type ModelChoice, modelChoices, parseModelKey } from "./llm.ts";
 import { getSetupStep } from "./settings.ts";
 import { mentionedSpeaker, speakerList } from "./speakers.ts";
 import { homeView } from "./views.ts";
@@ -39,6 +40,8 @@ interface AskBoxOptions {
   readonly autofocus?: boolean;
   /** Keep the scope as given, without the scope controls (sermon pages). */
   readonly fixedScope?: boolean;
+  /** Models this person can choose between; none shown when there's no real choice. */
+  readonly models?: readonly ModelChoice[];
 }
 
 /** The question box with its output choice and scope, used on Ask, conversations and sermon pages. */
@@ -52,6 +55,8 @@ export function askBox(context: Context, options: AskBoxOptions): Html {
 <div class="controls">
 ${options.fixedScope ? html`<input type="hidden" name="kind" value="answer">` : html`<label for="f-kind" class="inline-label hint">Create</label>
 <select id="f-kind" name="kind">${Object.entries(OUTPUTS).map(([value, label]) => html`<option value="${value}"${value === kind ? html` selected` : ""}${value !== "answer" && !signedIn ? html` disabled` : ""}>${label}</option>`)}</select>`}
+${options.models?.length ? html`<label for="f-model" class="inline-label hint">Model</label>
+<select id="f-model" name="model"><option value="">Site default</option>${options.models.map((model) => html`<option value="${model.key}">${model.label}</option>`)}</select>` : ""}
 ${options.thread ? html`<input type="hidden" name="thread" value="${options.thread}">` : ""}${options.thread || options.fixedScope ? scopeFields(scope) : scopeControls(scope, options.entries)}
 <span class="spacer"></span>
 <button type="submit">${options.thread ? "Ask follow-up" : "Ask"}</button>
@@ -110,13 +115,13 @@ export async function home(context: Context): Promise<Response> {
 
 async function askPage(context: Context, options: { question?: string; kind?: OutputKind; scope?: Scope; result?: Html; status?: number } = {}): Promise<Response> {
   const entries = await catalog(context.db);
-  const [threads, documents] = await Promise.all([recentThreads(context, 5), recentDocuments(context, 5)]);
+  const [threads, documents, models] = await Promise.all([recentThreads(context, 5), recentDocuments(context, 5), modelChoices(context.db, context.session?.user.id ?? null)]);
   const church = context.ministry?.churchName;
   const latest = entries.slice(0, 4);
   return page("Ask", html`<section class="ask-hero">
 <h1>Ask the sermons</h1>
 <p class="lead">${entries.length} sermon${entries.length === 1 ? "" : "s"}${church ? ` from ${church}` : ""}. Answers quote the exact passages they come from.</p>
-${askBox(context, { question: options.question ?? "", kind: options.kind ?? "answer", scope: options.scope ?? {}, entries, autofocus: !options.result })}
+${askBox(context, { question: options.question ?? "", kind: options.kind ?? "answer", scope: options.scope ?? {}, entries, models, autofocus: !options.result })}
 </section>
 ${options.result ?? ""}
 ${context.session && !options.result ? html`<div class="two-col">
@@ -148,6 +153,8 @@ export async function ask(context: Context): Promise<Response> {
   const question = String(form.get("question") ?? "").trim().slice(0, QUESTION_MAX);
   const kind = parseOutput(form.get("kind"));
   const threadId = String(form.get("thread") ?? "");
+  // The model the person picked; resolveTarget ignores it unless they're allowed it.
+  const model = parseModelKey(form.get("model")) ? String(form.get("model")) : null;
   let scope = parseScope(form);
   const entries = await catalog(context.db);
 
@@ -174,7 +181,7 @@ export async function ask(context: Context): Promise<Response> {
   const limited = await useQuota(context);
   if (limited) return fail(limited, 429);
   if (kind !== "answer") {
-    return createDocument(context, kind, question, scope, (message, status) => fail(message, status));
+    return createDocument(context, kind, question, scope, model, (message, status) => fail(message, status));
   }
 
   let passages: Passage[];
@@ -185,7 +192,7 @@ export async function ask(context: Context): Promise<Response> {
     passages = await retrieve(context.env, searchText, undefined, ids);
     if (passages.length === 0) return fail("No sermons have been indexed yet, so there's nothing to answer from.", 200);
     const exchanges: Exchange[] = history.map((turn) => ({ question: turn.question, answer: turn.answer }));
-    text = await answer(context.env, context.ministry, question, passages, exchanges);
+    text = await answer(context.env, context.ministry, question, passages, exchanges, { userId: context.session?.user.id ?? null, model });
   } catch (error) {
     console.error("research answer failed", error);
     return fail("The answer couldn't be written right now. Try again in a minute.", 502);
@@ -221,6 +228,7 @@ async function conversationPage(context: Context, threadId: string, options: { q
   if (!turns) return page("Not found", html`<h1>Conversation not found</h1><p><a href="/library">Your library</a></p>`, { status: 404, ...chrome(context) });
   const entries = await catalog(context.db);
   const scope = JSON.parse(turns[0]!.scope_json) as Scope;
+  const models = await modelChoices(context.db, context.session?.user.id ?? null);
   return page(turns[0]!.question.slice(0, 80), html`<h1 class="visually-hidden">Conversation: ${turns[0]!.question}</h1>
 <p class="meta"><a href="/library">Library</a> · Conversation started ${turns[0]!.created_at.slice(0, 10)}</p>
 <p class="scope-note">Scope: <strong>${describeScope(scope, entries)}</strong></p>
@@ -234,7 +242,7 @@ ${sourcesList(sources, { prefix, collapsed: true })}</section>`;
 <p class="hint">AI answers can be wrong. Check the sources before quoting them.</p>
 <div class="follow-up">
 ${options.alert ? html`<p class="alert">${options.alert}</p>` : ""}
-${askBox(context, { question: options.question ?? "", scope, entries, thread: threadId, label: "Ask a follow-up question" })}
+${askBox(context, { question: options.question ?? "", scope, entries, models, thread: threadId, label: "Ask a follow-up question" })}
 </div>
 <form method="post" action="/ask/${threadId}/delete"><button class="link" type="submit">Delete this conversation</button></form>`, { status: options.status ?? 200, ...chrome(context) });
 }

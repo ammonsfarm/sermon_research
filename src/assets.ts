@@ -120,6 +120,10 @@ table { width: 100%; border-collapse: collapse; margin-top: 16px; }
 th, td { text-align: left; vertical-align: top; padding: 8px 6px; border-bottom: 1px solid var(--line); }
 th { color: var(--muted); font-weight: 600; font-size: .9rem; }
 .live { color: var(--accent); font-weight: 600; margin: 0 0 12px; }
+section.provider { border: 1px solid var(--line); border-radius: var(--radius); padding: 2px 16px 14px; margin: 0 0 12px; background: var(--surface); }
+section.provider h3 { margin-top: 12px; }
+details.add-provider { margin: 16px 0; }
+details.add-provider summary { cursor: pointer; font-weight: 600; color: var(--accent); }
 .busy-note { color: var(--muted); font-size: .9rem; margin: 8px 0 0; }
 .busy-note::before { content: ""; display: inline-block; width: .8em; height: .8em; margin-right: 8px; border: 2px solid var(--accent); border-right-color: transparent; border-radius: 50%; animation: spin .8s linear infinite; vertical-align: -1px; }
 @keyframes spin { to { transform: rotate(360deg); } }
@@ -268,6 +272,19 @@ export const APP_SCRIPT = `(() => {
         form.append(note);
       }
     });
+  }
+
+  // Admin → Answers AI: only offer the reasoning efforts the chosen model takes.
+  for (const model of document.querySelectorAll("select[data-effort-select]")) {
+    const effort = document.getElementById(model.dataset.effortSelect);
+    if (!effort) continue;
+    const sync = () => {
+      const allowed = (model.selectedOptions[0]?.dataset.efforts ?? "").split(",").filter(Boolean);
+      for (const option of effort.options) option.hidden = option.disabled = option.value !== "" && allowed.length > 0 && !allowed.includes(option.value);
+      if (effort.selectedOptions[0]?.disabled) effort.value = "";
+    };
+    model.addEventListener("change", sync);
+    sync();
   }
 
   // Citations can point into collapsed source lists; open them first.

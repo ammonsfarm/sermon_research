@@ -49,7 +49,7 @@ export async function chooseMainScriptures(env: AppEnv, episodeIds: readonly str
         row.opening ? `Transcript start: ${row.opening}…` : "",
       ].filter(Boolean).join("\n");
     }).join("\n\n");
-    const reply = await chat(env, PROMPT, sermons, { maxTokens: MAX_TOKENS, timeoutMs: TIMEOUT_MS, effort: "summaryEffort" });
+    const reply = await chat(env, PROMPT, sermons, { maxTokens: MAX_TOKENS, timeoutMs: TIMEOUT_MS, action: "summary" });
     const passages = parseNumbered(reply, results.length, normalizeReference, "main passages");
     await db.batch(results.map((row, index) => db.prepare("UPDATE summaries SET main_scripture = ? WHERE episode_id = ? AND main_scripture IS NULL").bind(passages[index] ?? "", row.id)));
     checked += results.length;

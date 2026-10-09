@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { getKey } from "../src/keys.ts";
-import { isMetaApi, MuseTranscribeError, museTranscribe, providerMessage, reasoningFields, sendEmail } from "../src/providers.ts";
-import { getSetting, type LlmSettingsRecord, type TranscriptionSettings } from "../src/settings.ts";
+import { getDefaults, listModels } from "../src/llm.ts";
+import { MuseTranscribeError, museTranscribe, providerMessage, sendEmail } from "../src/providers.ts";
+import { getSetting, type TranscriptionSettings } from "../src/settings.ts";
 import { ADMIN, completeSetup, cookieFrom, createApp, fakeProviders, FEED_URL, MINISTRY, type MuseUpload, PROVIDERS, SECRET } from "./helpers.ts";
 
 async function atStep(step: string) {
@@ -39,53 +40,51 @@ test("the podcast step previews the feed before saving it", async () => {
   }
 });
 
-test("the answers AI step sends a real test request and stores the key encrypted", async () => {
+test("the answers AI step tests the model, stores the key encrypted and makes it the choice for every job", async () => {
   const { app, cookie } = await atStep("llm");
   const providers = fakeProviders();
   try {
-    const saved = await app.request("/setup/llm", { form: { ...PROVIDERS.llm, baseUrl: "https://gateway.example/v1/" }, cookie });
+    const saved = await app.request("/setup/llm", { form: PROVIDERS.llm, cookie });
     assert.equal(saved.headers.get("Location"), "/setup/embeddings");
-    const call = providers.calls.at(-1)!;
-    assert.equal(call.url, "https://gateway.example/v1/chat/completions");
+    const call = providers.calls.find((each) => each.url.endsWith("/chat/completions"))!;
+    assert.equal(call.url, "https://api.openai.com/v1/chat/completions");
     assert.equal(call.authorization, "Bearer sk-llm-key-1234");
     assert.equal((call.body as { model: string }).model, "gpt-test");
-    assert.equal("reasoning_effort" in (call.body as object), false, "other providers get no reasoning field");
-    const llm = await getSetting<LlmSettingsRecord>(app.env.DB, "llm");
-    assert.deepEqual([llm?.summaryEffort, llm?.chatEffort], ["low", "low"], "a missing choice means low");
-    const row = await app.env.DB.prepare("SELECT ciphertext, last4 FROM provider_keys WHERE slot = 'llm'").first<{ ciphertext: string; last4: string }>();
+    assert.equal((call.body as { max_completion_tokens?: number }).max_completion_tokens, 64, "OpenAI takes max_completion_tokens");
+    assert.equal("max_tokens" in (call.body as object), false);
+    assert.equal("reasoning_effort" in (call.body as object), false, "the check sends no reasoning field");
+    const models = await listModels(app.env.DB);
+    assert.deepEqual(models.map((model) => [model.providerId, model.modelId, model.enabled]), [["openai", "gpt-test", true]]);
+    const choice = { provider: "openai", model: "gpt-test", effort: null };
+    assert.deepEqual(await getDefaults(app.env.DB), { summary: choice, chat: choice, document: choice });
+    const row = await app.env.DB.prepare("SELECT ciphertext, last4 FROM provider_keys WHERE slot = 'llm:openai'").first<{ ciphertext: string; last4: string }>();
     assert.equal(row?.last4, "1234");
     assert.doesNotMatch(row?.ciphertext ?? "", /sk-llm/u);
-    assert.equal(await getKey(app.env.DB, SECRET, "llm"), "sk-llm-key-1234");
+    assert.equal(await getKey(app.env.DB, SECRET, "llm:openai"), "sk-llm-key-1234");
   } finally {
     providers.restore();
   }
 });
 
-test("Meta's API gets reasoning efforts: low for the check, the admin's two choices once saved", async () => {
+test("the wizard takes Meta's Muse and any other OpenAI-compatible address", async () => {
   const { app, cookie } = await atStep("llm");
   const providers = fakeProviders();
-  const muse = { ...PROVIDERS.llm, baseUrl: "https://api.meta.ai/v1", model: "muse-test" };
-  const select = (page: string, name: string) => new RegExp(`<select id="f-${name}" name="${name}">.*?</select>`, "su").exec(page)?.[0] ?? "";
   try {
-    const invalid = await app.request("/setup/llm", { form: { ...muse, summaryEffort: "high", chatEffort: "extreme" }, cookie });
-    assert.equal(invalid.status, 400);
-    const page = await invalid.text();
-    assert.match(page, /<div class="field invalid"><label for="f-chatEffort">Chat reasoning effort<\/label>[\s\S]*?Choose a reasoning effort from the list/);
-    assert.doesNotMatch(page, /<div class="field invalid"><label for="f-summaryEffort">/);
-    assert.match(select(page, "summaryEffort"), /<option value="high" selected>/, "the valid choice is kept");
-    assert.equal(providers.calls.length, 0, "nothing is sent with an unknown effort");
+    const muse = await app.request("/setup/llm", { form: { ...PROVIDERS.llm, provider: "meta", model: "muse-test" }, cookie });
+    assert.equal(muse.headers.get("Location"), "/setup/embeddings");
+    const [model] = await listModels(app.env.DB, "meta");
+    assert.deepEqual(model?.efforts, ["none", "minimal", "low", "medium", "high", "xhigh", "max"]);
+    assert.equal((await getDefaults(app.env.DB)).chat?.effort, "low", "Muse starts at low effort");
+    assert.equal((providers.calls.find((each) => each.url.endsWith("/chat/completions"))!.body as { reasoning_effort?: string }).reasoning_effort, undefined);
 
-    const saved = await app.request("/setup/llm", { form: { ...muse, summaryEffort: "high", chatEffort: "minimal" }, cookie });
-    assert.equal(saved.headers.get("Location"), "/setup/embeddings");
-    const call = providers.calls.at(-1)!;
-    assert.equal(call.url, "https://api.meta.ai/v1/chat/completions");
-    assert.equal((call.body as { reasoning_effort?: string }).reasoning_effort, "low", "the 16-token check doesn't need more");
-    const llm = await getSetting<LlmSettingsRecord>(app.env.DB, "llm");
-    assert.deepEqual([llm?.summaryEffort, llm?.chatEffort], ["high", "minimal"]);
-    const form = await (await app.request("/setup/llm", { cookie })).text();
-    assert.match(select(form, "summaryEffort"), /<option value="low">Low \(default\)<\/option>.*<option value="high" selected>High<\/option>/su);
-    assert.match(select(form, "chatEffort"), /<option value="minimal" selected>Minimal<\/option>/);
-    assert.match(form, /<label for="f-summaryEffort">Summary reasoning effort<\/label>\n<p class="hint">For each new sermon: the full-text review of its transcript \(spelling of names and places, capital letters, stray periods\), its summary/);
+    const gateway = await app.request("/setup/llm", { form: { ...PROVIDERS.llm, provider: "custom", baseUrl: "https://gateway.example/v1/", model: "house-model" }, cookie });
+    assert.equal(gateway.headers.get("Location"), "/setup/embeddings");
+    assert.equal(providers.calls.findLast((each) => each.url.endsWith("/chat/completions"))!.url, "https://gateway.example/v1/chat/completions");
+    assert.deepEqual((await listModels(app.env.DB, "custom")).map((each) => [each.modelId, each.efforts]), [["house-model", []]], "no reasoning field for an unknown gateway");
+    const insecure = await app.request("/setup/llm", { form: { ...PROVIDERS.llm, provider: "custom", baseUrl: "http://gateway.example/v1" }, cookie });
+    assert.match(await insecure.text(), /Use an https:\/\/ address/);
+    const unknown = await app.request("/setup/llm", { form: { ...PROVIDERS.llm, provider: "nope" }, cookie });
+    assert.match(await unknown.text(), /Choose a provider from the list/);
   } finally {
     providers.restore();
   }
@@ -98,10 +97,8 @@ test("a rejected key or bad address is explained and nothing is saved", async ()
     const rejected = await app.request("/setup/llm", { form: PROVIDERS.llm, cookie });
     assert.equal(rejected.status, 400);
     const body = await rejected.text();
-    assert.match(body, /refused the request \(HTTP 401\)\. It said: &quot;nope&quot;/);
+    assert.match(body, /OpenAI returned HTTP 401 for gpt-test\. It said: &quot;nope&quot;/);
     assert.doesNotMatch(body, /sk-llm-key-1234/, "the key is never echoed back");
-    const insecure = await app.request("/setup/llm", { form: { ...PROVIDERS.llm, baseUrl: "http://gateway.example/v1" }, cookie });
-    assert.match(await insecure.text(), /Use an https:\/\/ address/);
     assert.equal(await app.env.DB.prepare("SELECT count(*) AS n FROM provider_keys").first<{ n: number }>().then((row) => row?.n), 0);
   } finally {
     providers.restore();
@@ -268,15 +265,4 @@ test("every provider call identifies itself, and a password in the Resend key fi
   } finally {
     providers.restore();
   }
-});
-
-test("only Meta's API addresses get a reasoning field", () => {
-  assert.equal(isMetaApi("https://api.meta.ai/v1"), true);
-  assert.equal(isMetaApi("https://eu.api.meta.ai/v1"), true);
-  assert.equal(isMetaApi("https://api.openai.com/v1"), false);
-  assert.equal(isMetaApi("https://gateway.example/api.meta.ai/v1"), false, "a path mentioning it isn't Meta's API");
-  assert.equal(isMetaApi("not a url"), false);
-  assert.deepEqual(reasoningFields("https://api.meta.ai/v1"), { reasoning_effort: "low" });
-  assert.deepEqual(reasoningFields("https://api.meta.ai/v1", "xhigh"), { reasoning_effort: "xhigh" });
-  assert.deepEqual(reasoningFields("https://generativelanguage.googleapis.com/v1beta/openai", "high"), {});
 });
