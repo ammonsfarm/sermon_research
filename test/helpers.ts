@@ -5,6 +5,9 @@ import type { AppEnv } from "../src/env.ts";
 import { type PipelineStep, runEpisode } from "../src/pipeline.ts";
 import { resetSchemaCache } from "../src/schema.ts";
 import { writeDocument } from "../src/writing.ts";
+import { putKey } from "../src/keys.ts";
+import { saveDefaults, saveModel } from "../src/llm.ts";
+import type { ReasoningEffort } from "../src/providers.ts";
 import { createTestD1 } from "./d1-sqlite.ts";
 
 export const ORIGIN = "https://sermons.example.org";
@@ -36,7 +39,7 @@ export interface TestApp {
   readonly documentRuns: FakeDocumentWorkflow;
   /** Objects in the fake AUDIO bucket, by key. */
   readonly audio: Map<string, { bytes: Uint8Array; contentType: string | undefined }>;
-  request(path: string, init?: { method?: string; form?: Record<string, string>; cookie?: string; headers?: Record<string, string> }): Promise<Response>;
+  request(path: string, init?: { method?: string; form?: Record<string, string | string[]>; cookie?: string; headers?: Record<string, string> }): Promise<Response>;
 }
 
 export function createApp(overrides: Partial<AppEnv> = {}): TestApp {
@@ -110,7 +113,7 @@ export function createApp(overrides: Partial<AppEnv> = {}): TestApp {
       if (init.cookie) headers.set("Cookie", init.cookie);
       const method = init.method ?? (init.form ? "POST" : "GET");
       if (method === "POST" && !headers.has("Origin")) headers.set("Origin", ORIGIN);
-      const body = init.form ? new URLSearchParams(init.form) : undefined;
+      const body = init.form ? new URLSearchParams(Object.entries(init.form).flatMap(([name, value]) => (Array.isArray(value) ? value : [value]).map((each): [string, string] => [name, each]))) : undefined;
       return worker.fetch(new Request(ORIGIN + path, { method, headers, ...(body ? { body } : {}) }), env);
     },
   };
@@ -260,6 +263,8 @@ export function fakeProviders(fail: Record<string, number> = {}): { calls: FakeC
     if (url === "https://api.mistral.ai/v1/audio/transcriptions") return Response.json({ text: "full", segments: TRANSCRIPT_SEGMENTS });
     if (url === "https://api.meta.ai/v1/asr/transcribe") return Response.json(museReply(body as MuseUpload));
     if (url === "https://api.mistral.ai/v1/models") return Response.json({ data: [] });
+    if (url === "https://api.openai.com/v1/models") return Response.json({ data: ["gpt-test", "gpt-5-mini", "o3", "text-embedding-3-small", "gpt-4o-transcribe"].map((id) => ({ id })) });
+    if (url === "https://api.meta.ai/v1/models") return Response.json({ data: [{ id: "muse-test" }, { id: "muse-two" }] });
     if (url === "https://api.resend.com/emails") return Response.json({ id: "email-1" });
     return new Response("not found", { status: 404 });
   }) as typeof fetch;
@@ -267,7 +272,7 @@ export function fakeProviders(fail: Record<string, number> = {}): { calls: FakeC
 }
 
 export const PROVIDERS = {
-  llm: { baseUrl: "https://api.openai.com/v1", model: "gpt-test", apiKey: "sk-llm-key-1234" },
+  llm: { provider: "openai", model: "gpt-test", apiKey: "sk-llm-key-1234" },
   embeddings: { apiKey: "" },
   transcription: { apiKey: "mistral-key-5678" },
   muse: { provider: "muse", apiKey: "muse-key-4321" },
@@ -319,4 +324,18 @@ export async function indexedSite(): Promise<{ app: TestApp; cookie: string; ids
   const ids = results.map((row) => row.id);
   for (const id of ids) await runEpisode(app.env, inlineStep, id);
   return { app, cookie, ids, providers, restore: providers.restore };
+}
+
+/**
+ * Adds a model to a built-in provider (with a key) and makes it the choice for every job,
+ * as the setup wizard does for the first one.
+ */
+export async function configureLlm(env: AppEnv, options: { provider?: string; model?: string; efforts?: readonly ReasoningEffort[]; effort?: ReasoningEffort | null } = {}): Promise<void> {
+  const provider = options.provider ?? "meta";
+  const model = options.model ?? "muse";
+  const efforts = options.efforts ?? ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+  await putKey(env.DB, SECRET, `llm:${provider}`, "test-key-0000");
+  await saveModel(env.DB, { providerId: provider, modelId: model, label: model, efforts, defaultEffort: efforts.includes("low") ? "low" : null, contextWindow: null, enabled: true });
+  const choice = { provider, model, effort: options.effort ?? null };
+  await saveDefaults(env.DB, { summary: choice, chat: choice, document: choice });
 }

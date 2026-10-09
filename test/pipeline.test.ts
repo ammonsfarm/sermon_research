@@ -11,8 +11,13 @@ import { MUSE_SAMPLE_RATE, quietestSplit, turnsToSegments, wavFile } from "../sr
 import { buildChunks, parseSummary, summarize, type PipelineStep, runEpisode } from "../src/pipeline.ts";
 import { ensureSchema, resetSchemaCache } from "../src/schema.ts";
 import { isDue, localSlot, type Schedule } from "../src/schedule.ts";
+import type { LlmTarget } from "../src/llm.ts";
 import { getSetting, putSetting } from "../src/settings.ts";
-import { AUDIO_BYTES, completeSetup, createApp, fakeProviders, type MuseUpload, ORIGIN, PROVIDERS, readMuseUpload, SCHEDULE_FORM, type TestApp, TONES_MP3 } from "./helpers.ts";
+import { AUDIO_BYTES, completeSetup, configureLlm, createApp, fakeProviders, type MuseUpload, ORIGIN, PROVIDERS, readMuseUpload, SCHEDULE_FORM, type TestApp, TONES_MP3 } from "./helpers.ts";
+
+function target(overrides: Partial<LlmTarget> = {}): LlmTarget {
+  return { kind: "custom", providerName: "Test AI", baseUrl: "https://llm.example", apiKey: "k", model: "m", effort: null, ...overrides };
+}
 
 /** Runs workflow steps inline, like a Workflow run with no retries. */
 const inlineStep: PipelineStep = { do: (_name, _config, callback) => callback() };
@@ -180,7 +185,7 @@ test("a long transcript is cleaned a batch at a time, and a retry carries on fro
     await runEpisode(app.env, inlineStep, episode!.id);
     const failed = (await episodes(app))[0]!;
     assert.equal(failed.status, "failed");
-    assert.match(failed.error ?? "", /The answers AI returned HTTP 503/);
+    assert.match(failed.error ?? "", /OpenAI returned HTTP 503 for gpt-test/);
     const saved = await app.env.DB.prepare("SELECT cleaned_json FROM transcripts_draft WHERE episode_id = ?").bind(episode!.id).first<{ cleaned_json: string }>();
     const progress = JSON.parse(saved!.cleaned_json) as string[];
     assert.ok(progress.length > 0 && progress.length < long.length, "the first batches are saved");
@@ -405,7 +410,7 @@ test("a summary cut off by the length limit gets a clear error", async () => {
   globalThis.fetch = (async () => Response.json({ choices: [{ finish_reason: "length", message: { content: "{\"summary\": \"Grace is" } }] })) as typeof fetch;
   try {
     await assert.rejects(
-      summarize({ llm: { baseUrl: "https://llm.example", model: "m", checkedAt: "" }, apiKey: "k", ministry: null, title: "T", publishedAt: null, transcript: "words" }),
+      summarize({ target: target(), ministry: null, title: "T", publishedAt: null, transcript: "words" }),
       /ran out of room/,
     );
   } finally {
@@ -413,7 +418,7 @@ test("a summary cut off by the length limit gets a clear error", async () => {
   }
 });
 
-test("summaries send the summary reasoning effort to Meta's API and to no one else", async () => {
+test("summaries send the model's reasoning effort in the provider's own form", async () => {
   const original = globalThis.fetch;
   const bodies: Record<string, unknown>[] = [];
   globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
@@ -421,24 +426,24 @@ test("summaries send the summary reasoning effort to Meta's API and to no one el
     return Response.json({ choices: [{ message: { content: "{\"summary\": \"Grace is a gift.\"}" } }] });
   }) as typeof fetch;
   try {
-    const input = { apiKey: "k", ministry: null, title: "T", publishedAt: null, transcript: "words" };
-    await summarize({ ...input, llm: { baseUrl: "https://llm.example", model: "m", summaryEffort: "high", checkedAt: "" } });
-    await summarize({ ...input, llm: { baseUrl: "https://api.meta.ai/v1", model: "muse", checkedAt: "" } });
-    await summarize({ ...input, llm: { baseUrl: "https://api.meta.ai/v1", model: "muse", summaryEffort: "medium", chatEffort: "max", checkedAt: "" } });
-    assert.equal("reasoning_effort" in bodies[0]!, false);
-    assert.equal(bodies[1]!.reasoning_effort, "low", "sites saved before the setting existed get low");
-    assert.equal(bodies[2]!.reasoning_effort, "medium", "the summary effort, not the chat one");
+    const input = { ministry: null, title: "T", publishedAt: null, transcript: "words" };
+    await summarize({ ...input, target: target() });
+    await summarize({ ...input, target: target({ kind: "meta", effort: "medium" }) });
+    await summarize({ ...input, target: target({ kind: "openrouter", effort: "high" }) });
+    assert.equal("reasoning_effort" in bodies[0]! || "reasoning" in bodies[0]!, false);
+    assert.equal(bodies[1]!.reasoning_effort, "medium");
+    assert.deepEqual(bodies[2]!.reasoning, { effort: "high" });
   } finally {
     globalThis.fetch = original;
   }
 });
 
-test("processing a sermon uses the summary reasoning effort for every answers-AI call, speaker included", async () => {
+test("processing a sermon uses the summary model and effort for every answers-AI call, speaker included", async () => {
   const app = createApp();
   const providers = fakeProviders();
   try {
     await completeSetup(app, { count: 1 });
-    await putSetting(app.env.DB, "llm", { baseUrl: "https://api.meta.ai/v1", model: "muse", summaryEffort: "high", chatEffort: "minimal", checkedAt: "" });
+    await configureLlm(app.env, { effort: "high" });
     const [episode] = await episodes(app);
     await runEpisode(app.env, inlineStep, episode!.id);
     const chats = providers.calls.filter((call) => call.url === "https://api.meta.ai/v1/chat/completions");

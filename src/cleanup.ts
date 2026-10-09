@@ -37,7 +37,7 @@ export async function cleanSegments(env: AppEnv, ministry: Ministry | null, titl
     ministry?.churchName ? `Church: ${ministry.churchName}` : "",
     ministry?.speakerNames.length ? `Speakers at this church include: ${ministry.speakerNames.join(", ")}` : "",
   ].filter(Boolean).join("\n");
-  const reply = await chat(env, CLEANUP_PROMPT, `${context}\n\nSegments:\n${JSON.stringify(items)}`, { maxTokens: MAX_TOKENS, timeoutMs: TIMEOUT_MS, effort: "summaryEffort" });
+  const reply = await chat(env, CLEANUP_PROMPT, `${context}\n\nSegments:\n${JSON.stringify(items)}`, { maxTokens: MAX_TOKENS, timeoutMs: TIMEOUT_MS, action: "summary" });
   return mergeCleaned(items, reply);
 }
 

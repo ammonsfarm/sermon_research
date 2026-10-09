@@ -244,7 +244,79 @@ export const MIGRATIONS: readonly Migration[] = [
     // step is redone and clears when the run finishes; the episode stays 'done' throughout.
     columns: [{ table: "episodes", name: "redo", definition: "TEXT CHECK (redo IS NULL OR redo IN ('transcribe', 'rewrite', 'summary', 'index'))" }],
   },
+  {
+    version: 15,
+    statements: [
+      // Several answers-AI providers, the models an admin has added from each, and per-person limits on which they may use.
+      // key_slot names the provider_keys row holding the key; a site that had the single "llm" connection keeps its key there.
+      `CREATE TABLE IF NOT EXISTS llm_providers (
+        id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        name TEXT NOT NULL,
+        base_url TEXT NOT NULL,
+        key_slot TEXT NOT NULL,
+        position INTEGER NOT NULL,
+        created_at TEXT NOT NULL
+      )`,
+      `CREATE TABLE IF NOT EXISTS llm_models (
+        provider_id TEXT NOT NULL REFERENCES llm_providers(id) ON DELETE CASCADE,
+        model_id TEXT NOT NULL,
+        label TEXT NOT NULL,
+        efforts_json TEXT NOT NULL CHECK (json_valid(efforts_json)),
+        default_effort TEXT,
+        context_window INTEGER,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        added_at TEXT NOT NULL,
+        PRIMARY KEY (provider_id, model_id)
+      )`,
+      `CREATE TABLE IF NOT EXISTS user_llm_models (
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        provider_id TEXT NOT NULL,
+        model_id TEXT NOT NULL,
+        PRIMARY KEY (user_id, provider_id, model_id)
+      )`,
+      // The model a document was asked to be written with ("provider/model"); null follows the site default.
+      `ALTER TABLE documents ADD COLUMN model TEXT`,
+      ...legacyAnswersAi(),
+    ],
+  },
 ];
+
+/**
+ * Statements that turn the single "llm" setting of earlier versions into a provider, a model
+ * and the site defaults. A site with none just gets the five built-in providers.
+ */
+function legacyAnswersAi(): string[] {
+  const now = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')";
+  const base = "json_extract(value_json, '$.baseUrl')";
+  const known: [string, string][] = [
+    ["meta", "https://api.meta.ai"], ["google", "https://generativelanguage.googleapis.com"], ["openai", "https://api.openai.com"],
+    ["anthropic", "https://api.anthropic.com"], ["openrouter", "https://openrouter.ai"],
+  ];
+  const provider = `CASE ${known.map(([id, prefix]) => `WHEN ${base} LIKE '${prefix}%' THEN '${id}'`).join(" ")} ELSE 'custom' END`;
+  const seeds: [string, string, string, string][] = [
+    ["meta", "meta", "Meta (Muse)", "https://api.meta.ai/v1"],
+    ["google", "google", "Google Gemini", "https://generativelanguage.googleapis.com/v1beta/openai"],
+    ["openai", "openai", "OpenAI", "https://api.openai.com/v1"],
+    ["anthropic", "anthropic", "Anthropic", "https://api.anthropic.com/v1"],
+    ["openrouter", "openrouter", "OpenRouter", "https://openrouter.ai/api/v1"],
+  ];
+  const effort = (field: string) => `coalesce(json_extract(value_json, '$.${field}'), 'low')`;
+  const choice = (field: string) => `json_object('provider', ${provider}, 'model', json_extract(value_json, '$.model'), 'effort', ${effort(field)})`;
+  return [
+    ...seeds.map(([id, kind, name, url], index) =>
+      `INSERT OR IGNORE INTO llm_providers (id, kind, name, base_url, key_slot, position, created_at) VALUES ('${id}', '${kind}', '${name}', '${url}', 'llm:${id}', ${index}, ${now})`),
+    `INSERT OR IGNORE INTO llm_providers (id, kind, name, base_url, key_slot, position, created_at)
+       SELECT 'custom', 'custom', 'Custom provider', rtrim(${base}, '/'), 'llm', 10, ${now} FROM settings WHERE key = 'llm' AND ${provider} = 'custom'`,
+    `UPDATE llm_providers SET key_slot = 'llm' WHERE id = (SELECT ${provider} FROM settings WHERE key = 'llm')`,
+    `INSERT OR IGNORE INTO llm_models (provider_id, model_id, label, efforts_json, default_effort, enabled, added_at)
+       SELECT ${provider}, json_extract(value_json, '$.model'), json_extract(value_json, '$.model'),
+         CASE WHEN ${provider} = 'meta' THEN '["none","minimal","low","medium","high","xhigh","max"]' ELSE '[]' END,
+         CASE WHEN ${provider} = 'meta' THEN 'low' END, 1, ${now} FROM settings WHERE key = 'llm'`,
+    `INSERT OR IGNORE INTO settings (key, value_json, updated_at)
+       SELECT 'llm_defaults', json_object('summary', ${choice("summaryEffort")}, 'chat', ${choice("chatEffort")}, 'document', ${choice("chatEffort")}), ${now} FROM settings WHERE key = 'llm'`,
+  ];
+}
 
 let applied: Promise<void> | undefined;
 

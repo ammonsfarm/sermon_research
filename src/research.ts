@@ -1,9 +1,10 @@
 import { type Context, clientIp, redirect, requireAdmin, chrome } from "./context.ts";
 import { html, type Html, page } from "./html.ts";
 import { renderMarkdown } from "./markdown.ts";
-import { ProviderError, reasoningFields, withUserAgent } from "./providers.ts";
+import { ProviderError } from "./providers.ts";
 import { embed, requireKey, type Segment } from "./pipeline.ts";
-import { type EffortSetting, getSetting, getSetupStep, type LlmSettingsRecord, type Ministry, putSetting } from "./settings.ts";
+import { chatCompletion, type LlmAction, resolveTarget } from "./llm.ts";
+import { getSetting, getSetupStep, type Ministry, putSetting } from "./settings.ts";
 import { HOUR_MS, recordUse, startOfUtcDay, usedSince } from "./usage.ts";
 import type { AppEnv } from "./env.ts";
 
@@ -172,25 +173,15 @@ export function parseNumbered<T>(content: string, count: number, read: (value: u
   return Array.from({ length: count }, (_unused, index) => read(parsed[String(index + 1)]));
 }
 
-/** One chat completion from the configured answers AI. Sermon processing passes `effort: "summaryEffort"`; the rest use the chat effort. */
-export async function chat(env: AppEnv, system: string, user: string, options: { maxTokens: number; timeoutMs: number; effort?: EffortSetting }): Promise<string> {
-  const llm = await getSetting<LlmSettingsRecord>(env.DB, "llm");
-  if (!llm) throw new ProviderError("The answers AI isn't set up.");
-  const apiKey = await requireKey(env, "llm");
-  const response = await fetch(`${llm.baseUrl}/chat/completions`, {
-    method: "POST",
-    headers: withUserAgent({ Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" }),
-    body: JSON.stringify({
-      model: llm.model,
-      messages: [{ role: "system", content: system }, { role: "user", content: user }],
-      max_tokens: options.maxTokens,
-      ...reasoningFields(llm.baseUrl, llm[options.effort ?? "chatEffort"]),
-    }),
-    signal: AbortSignal.timeout(options.timeoutMs),
-  });
-  if (!response.ok) throw new ProviderError(`The answers AI returned HTTP ${response.status}.`);
-  const content = ((await response.json()) as { choices?: { message?: { content?: unknown } }[] }).choices?.[0]?.message?.content;
-  if (typeof content !== "string" || !content.trim()) throw new ProviderError("The answers AI returned an empty answer.");
+/**
+ * One chat completion from the answers AI. Sermon processing passes `action: "summary"` and document
+ * writing `"document"`; the rest are chat. `userId` applies that person's limit on models, and `model`
+ * is the one they picked ("provider/model"), used when they're allowed it.
+ */
+export async function chat(env: AppEnv, system: string, user: string, options: { maxTokens: number; timeoutMs: number; action?: LlmAction; userId?: string | null; model?: string | null }): Promise<string> {
+  const target = await resolveTarget(env, { action: options.action ?? "chat", userId: options.userId ?? null, choice: options.model ?? null });
+  const { content } = await chatCompletion(target, [{ role: "system", content: system }, { role: "user", content: user }], options);
+  if (!content?.trim()) throw new ProviderError("The answers AI returned an empty answer.");
   return content.trim();
 }
 
@@ -199,10 +190,12 @@ export interface Exchange { readonly question: string; readonly answer: string }
 /** How many earlier exchanges a follow-up sees. */
 const HISTORY_TURNS = 3;
 
-export async function answer(env: AppEnv, ministry: Ministry | null, question: string, passages: readonly Passage[], history: readonly Exchange[] = []): Promise<string> {
+export async function answer(
+  env: AppEnv, ministry: Ministry | null, question: string, passages: readonly Passage[], history: readonly Exchange[] = [], who: { userId?: string | null; model?: string | null } = {},
+): Promise<string> {
   const system = `${preamble(ministry)} Answer only from the numbered sources, which are passages from sermon transcripts and summaries. Cite every claim with the source number in square brackets, like [2]. If the sources don't answer the question, say so plainly and don't guess. Keep answers under 250 words, in plain paragraphs.${history.length ? " This is a follow-up: use the earlier conversation to understand what the question refers to, but cite only the numbered sources below." : ""}`;
   const earlier = history.slice(-HISTORY_TURNS).map((turn) => `Q: ${turn.question}\nA: ${turn.answer}`).join("\n\n");
-  return chat(env, system, `${earlier ? `Earlier in this conversation:\n\n${earlier}\n\n` : ""}Sources:\n\n${sourcesPrompt(passages)}\n\nQuestion: ${question}`, { maxTokens: ANSWER_MAX_TOKENS, timeoutMs: 60_000 });
+  return chat(env, system, `${earlier ? `Earlier in this conversation:\n\n${earlier}\n\n` : ""}Sources:\n\n${sourcesPrompt(passages)}\n\nQuestion: ${question}`, { maxTokens: ANSWER_MAX_TOKENS, timeoutMs: 60_000, ...who });
 }
 
 /** The numbered list of sources under an answer or document, as cards. */

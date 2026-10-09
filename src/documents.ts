@@ -46,7 +46,7 @@ export function splitTitle(markdown: string, fallback: string): { title: string;
  * (see writing.ts), then shows its page, which follows the progress.
  */
 export async function createDocument(
-  context: Context, kind: DocumentKind, request: string, scope: Scope,
+  context: Context, kind: DocumentKind, request: string, scope: Scope, model: string | null,
   fail: (message: string, status: number) => Promise<Response>,
 ): Promise<Response> {
   if (!(await context.db.prepare("SELECT 1 FROM episodes WHERE status = 'done' LIMIT 1").first())) {
@@ -54,8 +54,8 @@ export async function createDocument(
   }
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
-  await context.db.prepare("INSERT INTO documents (id, user_id, kind, request, title, markdown, sources_json, scope_json, created_at, status, detail, updated_at) VALUES (?, ?, ?, ?, ?, '', '[]', ?, ?, 'writing', 'Starting', ?)")
-    .bind(id, context.session!.user.id, kind, request, `${OUTPUTS[kind]}: ${request.slice(0, 80)}`, JSON.stringify(scope), now, now).run();
+  await context.db.prepare("INSERT INTO documents (id, user_id, kind, request, title, markdown, sources_json, scope_json, created_at, status, detail, updated_at, model) VALUES (?, ?, ?, ?, ?, '', '[]', ?, ?, 'writing', 'Starting', ?, ?)")
+    .bind(id, context.session!.user.id, kind, request, `${OUTPUTS[kind]}: ${request.slice(0, 80)}`, JSON.stringify(scope), now, now, model).run();
   if (!(await startWriting(context.env, id))) {
     await context.db.prepare("DELETE FROM documents WHERE id = ?").bind(id).run();
     return fail("Writing couldn't start right now. Try again in a minute.", 503);

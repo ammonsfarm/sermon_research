@@ -7,7 +7,7 @@ import { renderMarkdown } from "../src/markdown.ts";
 import { formatTime, renderAnswer } from "../src/research.ts";
 import { describeScope, parseScope, scopeIds, seriesOf, titleWithoutSeries } from "../src/scope.ts";
 import { segmentsByChunk } from "../src/sermons.ts";
-import { AUDIO_BYTES, DOCUMENT_REPLY, completeSetup, cookieFrom, createApp, fakeProviders, indexedSite, ORIGIN, runDocuments, SECRET, type TestApp } from "./helpers.ts";
+import { AUDIO_BYTES, DOCUMENT_REPLY, completeSetup, configureLlm, cookieFrom, createApp, fakeProviders, indexedSite, ORIGIN, runDocuments, SECRET, type TestApp } from "./helpers.ts";
 
 /** Invites a member and returns their session cookie. */
 async function inviteMember(app: TestApp, adminCookie: string): Promise<string> {
@@ -83,18 +83,24 @@ test("a question gets a cited answer with linked sources", async () => {
   }
 });
 
-test("answers and documents send the chat reasoning effort once the answers AI is Meta's API", async () => {
+test("answers and documents use the model and effort chosen for chat and for documents", async () => {
   const site = await indexedSite();
   const isChat = (call: { url: string }) => call.url.endsWith("/chat/completions");
   try {
     await site.app.request("/research", { form: { question: "What is grace?" }, cookie: site.cookie });
     const before = site.providers.calls.filter(isChat);
     assert.ok(before.length > 0);
-    assert.ok(before.every((call) => !("reasoning_effort" in (call.body as object))), "OpenAI gets no reasoning field");
+    assert.ok(before.every((call) => call.url.startsWith("https://api.openai.com/") && !("reasoning_effort" in (call.body as object))), "OpenAI's gpt-test gets no reasoning field");
 
-    const saved = await site.app.request("/admin/llm", { form: { baseUrl: "https://api.meta.ai/v1", model: "muse-test", apiKey: "", summaryEffort: "high", chatEffort: "medium" }, cookie: site.cookie });
-    assert.equal(saved.headers.get("Location"), "/admin?saved=1");
-    assert.match(await (await site.app.request("/admin", { cookie: site.cookie })).text(), /muse-test at api\.meta\.ai · reasoning effort: summaries high, chat medium/);
+    await configureLlm(site.app.env, { model: "muse-test" });
+    const saved = await site.app.request("/admin/llm/defaults", {
+      form: { summaryModel: "meta/muse-test", summaryEffort: "high", chatModel: "meta/muse-test", chatEffort: "medium", documentModel: "meta/muse-test", documentEffort: "xhigh" },
+      cookie: site.cookie,
+    });
+    assert.equal(saved.headers.get("Location"), "/admin/llm?notice=saved#defaults");
+    const overview = await (await site.app.request("/admin", { cookie: site.cookie })).text();
+    assert.match(overview, /Chat: Meta \(Muse\) · muse-test, medium effort/);
+    assert.match(overview, /Document creation: Meta \(Muse\) · muse-test, extra high effort/);
     await site.app.request("/research", { form: { question: "And faith?" }, cookie: site.cookie });
     const answered = site.providers.calls.findLast(isChat)!;
     assert.equal(answered.url, "https://api.meta.ai/v1/chat/completions");
@@ -106,7 +112,7 @@ test("answers and documents send the chat reasoning effort once the answers AI i
     await runDocuments(site.app);
     const writing = site.providers.calls.slice(start).filter(isChat);
     assert.ok(writing.length > 0, "the document was written");
-    assert.ok(writing.every((call) => (call.body as { reasoning_effort?: string }).reasoning_effort === "medium"), "documents use the chat effort");
+    assert.ok(writing.every((call) => (call.body as { reasoning_effort?: string }).reasoning_effort === "xhigh"), "documents use the document effort");
   } finally {
     site.restore();
   }

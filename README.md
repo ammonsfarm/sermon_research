@@ -36,8 +36,12 @@ create the admin account. Then it walks through:
 
 1. Your ministry's name and speakers
 2. Your podcast's RSS feed. It shows the podcast title and episode count so you can confirm it's the right one.
-3. The **answers AI**: any OpenAI-compatible API (OpenAI, Gemini, OpenRouter,
-   Anthropic and others). Enter the base address, model and key.
+3. The **answers AI**: pick a provider (Meta's Muse, Google Gemini, OpenAI,
+   Anthropic, OpenRouter, or any other OpenAI-compatible address), then enter
+   a model and key. Afterwards, Admin → Answers AI connects more providers,
+   pulls each one's model list (with the reasoning levels each model takes),
+   chooses the model and reasoning effort for summaries, chat and document
+   creation, and can limit which models particular people may use.
 4. **Search embeddings**: an OpenAI key for `text-embedding-3-small`. If step 3 was OpenAI, you can reuse that key.
 5. **Transcription**: Mistral (Voxtral handles full-length sermon audio in any common format) or Meta's Muse (Muse only accepts WAV, so the Worker converts the feed's MP3s to WAV and sends them a few minutes at a time; feeds in other formats need Mistral), and its key
 6. **Email** (optional): a Resend key and sender address, so people can sign in with an emailed link

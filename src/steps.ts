@@ -2,21 +2,16 @@ import { type Context, redirect, requireAdmin, chrome } from "./context.ts";
 import { FeedError, fetchFeed, type Feed } from "./feed.ts";
 import { field, html, page, type Html } from "./html.ts";
 import { getKey, keyInfo, putKey, type KeySlot } from "./keys.ts";
+import { BUILTIN_PROVIDERS, checkTarget, describeModel, fitEffort, getProvider, getDefaults, KIND_NOTES, listProviders, type LlmProvider, saveDefaults, saveModel } from "./llm.ts";
 import {
   checkEmbeddings,
-  checkLlm,
   checkTranscription,
-  DEFAULT_REASONING_EFFORT,
   EMBEDDING_MODEL,
   isHttpsUrl,
-  isReasoningEffort,
   isTranscriptionProvider,
   MISTRAL_TRANSCRIPTION_MODEL,
   MUSE_TRANSCRIPTION_MODEL,
-  OPENAI_BASE_URL,
   ProviderError,
-  REASONING_EFFORTS,
-  type ReasoningEffort,
   sendEmail,
   TRANSCRIPTION_MODELS,
   TRANSCRIPTION_PROVIDERS,
@@ -24,11 +19,9 @@ import {
 } from "./providers.ts";
 import {
   type CheckedSettings,
-  type EffortSetting,
   type EmailSettings,
   getSetting,
   getSetupStep,
-  type LlmSettingsRecord,
   nextStep,
   type PodcastSettings,
   putSetting,
@@ -49,10 +42,6 @@ const TITLES: Record<ProviderStep, string> = {
   embeddings: "Search embeddings",
   transcription: "Transcription",
   email: "Email",
-};
-
-const EFFORT_LABELS: Record<ReasoningEffort, string> = {
-  none: "None", minimal: "Minimal", low: "Low", medium: "Medium", high: "High", xhigh: "Extra high", max: "Maximum",
 };
 
 type Errors = Record<string, string>;
@@ -112,26 +101,23 @@ function podcastPreview(state: StepState, feedUrl: string, feed: Feed): Html {
 </div>`;
 }
 
-function llmForm(state: StepState, errors: Errors = {}, values: Values = {}): Html {
+function llmForm(state: StepState, providers: readonly LlmProvider[], errors: Errors = {}, values: Values = {}): Html {
+  const choices = [...BUILTIN_PROVIDERS.map((builtin) => ({ id: builtin.id, name: builtin.name })), { id: "custom", name: "Other OpenAI-compatible service" }];
+  const selected = values.provider ?? "openai";
+  const saved = providers.find((provider) => provider.id === selected)?.keyLast4;
   return html`<h1>Answers AI</h1>
-<p class="lead">This AI writes episode summaries and answers research questions. Any provider with an OpenAI-compatible API works, such as OpenAI, Google Gemini, OpenRouter, Anthropic or Meta's Muse.</p>
+<p class="lead">This AI writes episode summaries and answers research questions. Start with one provider and model here; you can connect more providers, pull their model lists and choose a model for each job later in Admin → Answers AI.</p>
 ${errors.form ? html`<p class="alert">${errors.form}</p>` : ""}
 <form method="post" action="${action(state)}">
-${field({ name: "baseUrl", label: "API base address", type: "url", value: values.baseUrl ?? OPENAI_BASE_URL, error: errors.baseUrl, hint: "For OpenAI keep the default. Gemini: https://generativelanguage.googleapis.com/v1beta/openai", required: true })}
-${field({ name: "model", label: "Model", value: values.model ?? "", error: errors.model, hint: "For example gpt-5-mini or gemini-2.5-flash.", required: true })}
-${field({ name: "apiKey", label: "API key", type: "password", error: errors.apiKey, hint: keyHint(state, "llm", "Stored encrypted."), autocomplete: "new-password" })}
-${effortField("summaryEffort", "Summary reasoning effort", "For each new sermon: the full-text review of its transcript (spelling of names and places, capital letters, stray periods), its summary, and picking its speaker and main passage.", values, errors)}
-${effortField("chatEffort", "Chat reasoning effort", "For answering questions and writing documents.", values, errors)}
+<fieldset class="choices"><legend>Provider</legend>
+${choices.map((choice) => html`<label class="choice"><input type="radio" name="provider" value="${choice.id}"${choice.id === selected ? html` checked` : ""}><span><strong>${choice.name}</strong>${choice.id === "custom" ? "" : html`<br><span class="hint">${KIND_NOTES[BUILTIN_PROVIDERS.find((builtin) => builtin.id === choice.id)!.kind]}</span>`}</span></label>`)}
+${errors.provider ? html`<p class="error">${errors.provider}</p>` : ""}
+</fieldset>
+${field({ name: "baseUrl", label: "API base address (only for Other)", type: "url", value: values.baseUrl ?? "", error: errors.baseUrl, hint: "The service's OpenAI-compatible address, such as https://api.mistral.ai/v1." })}
+${field({ name: "model", label: "Model", value: values.model ?? "", error: errors.model, hint: "For example gpt-5-mini, gemini-2.5-flash or claude-sonnet-4-6.", required: true })}
+${field({ name: "apiKey", label: "API key", type: "password", error: errors.apiKey, hint: saved ? `Stored encrypted. A key ending in ${saved} is saved for the chosen provider; leave this blank to keep it.` : "Stored encrypted.", autocomplete: "new-password" })}
 <button type="submit">Test and save</button>
 </form>`;
-}
-
-function effortField(name: EffortSetting, label: string, use: string, values: Values, errors: Errors): Html {
-  const selected = values[name] ?? DEFAULT_REASONING_EFFORT;
-  return html`<div class="field${errors[name] ? " invalid" : ""}"><label for="f-${name}">${label}</label>
-<p class="hint">${use} Only sent to Meta's API (api.meta.ai), for Muse; other providers ignore it. More effort is slower and costs more.</p>
-<select id="f-${name}" name="${name}">${REASONING_EFFORTS.map((effort) => html`<option value="${effort}"${effort === selected ? html` selected` : ""}>${EFFORT_LABELS[effort]}${effort === DEFAULT_REASONING_EFFORT ? " (default)" : ""}</option>`)}</select>
-${errors[name] ? html`<p class="error">${errors[name]}</p>` : ""}</div>`;
 }
 
 function embeddingsForm(state: StepState, errors: Errors = {}, reuse = false): Html {
@@ -189,10 +175,10 @@ export async function stepForm(context: Context, step: ProviderStep, wizard: boo
   switch (step) {
     case "podcast": return render(state, podcastForm(state, {}, { feedUrl: (await getSetting<PodcastSettings>(db, "podcast"))?.feedUrl ?? "" }));
     case "llm": {
-      const llm = await getSetting<LlmSettingsRecord>(db, "llm");
-      return render(state, llmForm(state, {}, llm ? { baseUrl: llm.baseUrl, model: llm.model, summaryEffort: llm.summaryEffort ?? DEFAULT_REASONING_EFFORT, chatEffort: llm.chatEffort ?? DEFAULT_REASONING_EFFORT } : {}));
+      const [providers, defaults] = await Promise.all([listProviders(db), getDefaults(db)]);
+      return render(state, llmForm(state, providers, {}, defaults.chat ? { provider: defaults.chat.provider, model: defaults.chat.model } : {}));
     }
-    case "embeddings": return render(state, embeddingsForm(state, {}, await canReuseLlmKey(db)));
+    case "embeddings": return render(state, embeddingsForm(state, {}, await canReuseLlmKey(db, context.env.APP_SECRET ?? "")));
     case "transcription": return render(state, transcriptionForm(state, {}, (await getSetting<TranscriptionSettings>(db, "transcription"))?.provider ?? "mistral"));
     case "email": {
       const email = await getSetting<EmailSettings>(db, "email");
@@ -246,32 +232,46 @@ export async function stepSubmit(context: Context, step: ProviderStep, wizard: b
         return done();
       }
       case "llm": {
-        const values = { baseUrl: text("baseUrl").replace(/\/+$/u, ""), model: text("model", 200) };
-        const summaryEffort = text("summaryEffort", 20) || DEFAULT_REASONING_EFFORT;
-        const chatEffort = text("chatEffort", 20) || DEFAULT_REASONING_EFFORT;
+        const providers = await listProviders(db);
+        const values = { provider: text("provider", 60) || "openai", baseUrl: text("baseUrl").replace(/\/+$/u, ""), model: text("model", 200) };
         const errors: Errors = {};
-        if (!isHttpsUrl(values.baseUrl)) errors.baseUrl = "Use an https:// address.";
-        if (!values.model) errors.model = "Enter a model name.";
-        if (!isReasoningEffort(summaryEffort)) errors.summaryEffort = "Choose a reasoning effort from the list.";
-        if (!isReasoningEffort(chatEffort)) errors.chatEffort = "Choose a reasoning effort from the list.";
-        const apiKey = await keyOrStored("llm");
-        if (!apiKey) errors.apiKey = "Enter an API key.";
-        if (Object.keys(errors).length > 0 || !apiKey || !isReasoningEffort(summaryEffort) || !isReasoningEffort(chatEffort)) {
-          return render(state, llmForm(state, errors, { ...values, summaryEffort, chatEffort }), 400);
+        const fail = (extra: Errors = errors) => render(state, llmForm(state, providers, extra, values), 400);
+        let provider = providers.find((each) => each.id === values.provider) ?? null;
+        if (values.provider === "custom") {
+          if (!isHttpsUrl(values.baseUrl)) errors.baseUrl = "Use an https:// address.";
+        } else if (!provider) {
+          errors.provider = "Choose a provider from the list.";
         }
+        if (!values.model) errors.model = "Enter a model name.";
+        const apiKey = text("apiKey", 500) || (provider ? await getKey(db, secret, provider.keySlot) : null);
+        if (!apiKey) errors.apiKey = "Enter an API key.";
+        if (Object.keys(errors).length > 0 || !apiKey) return fail();
+        if (values.provider === "custom") {
+          await db.prepare(
+            `INSERT INTO llm_providers (id, kind, name, base_url, key_slot, position, created_at) VALUES ('custom', 'custom', 'Custom provider', ?, 'llm:custom', 10, ?)
+             ON CONFLICT(id) DO UPDATE SET base_url = excluded.base_url`,
+          ).bind(values.baseUrl, new Date().toISOString()).run();
+          provider = await getProvider(db, "custom");
+        }
+        if (!provider) return fail({ provider: "Choose a provider from the list." });
         try {
-          await checkLlm(values, apiKey);
+          await checkTarget({ kind: provider.kind, providerName: provider.name, baseUrl: provider.baseUrl.replace(/\/+$/u, ""), apiKey, model: values.model, effort: null });
         } catch (error) {
-          if (error instanceof ProviderError) return render(state, llmForm(state, { form: error.message }, { ...values, summaryEffort, chatEffort }), 400);
+          if (error instanceof ProviderError) return fail({ form: error.message });
           throw error;
         }
-        await putKey(db, secret, "llm", apiKey);
-        await putSetting(db, "llm", { ...values, summaryEffort, chatEffort, checkedAt: new Date().toISOString() } satisfies LlmSettingsRecord);
+        const details = await describeModel(provider, apiKey, values.model);
+        const model = { providerId: provider.id, modelId: values.model, label: details.label, efforts: details.efforts, defaultEffort: details.defaultEffort, contextWindow: details.contextWindow, enabled: true };
+        await putKey(db, secret, provider.keySlot, apiKey);
+        await saveModel(db, model);
+        // The first model does every job until an admin picks others.
+        const choice = { provider: provider.id, model: model.modelId, effort: fitEffort(model, "low") };
+        await saveDefaults(db, { summary: choice, chat: choice, document: choice });
         return done();
       }
       case "embeddings": {
-        const reuse = await canReuseLlmKey(db);
-        const apiKey = text("apiKey", 500) || await getKey(db, secret, "embeddings") || (reuse ? await getKey(db, secret, "llm") : null);
+        const reuse = await canReuseLlmKey(db, secret);
+        const apiKey = text("apiKey", 500) || await getKey(db, secret, "embeddings") || (reuse ? await openaiKey(db, secret) : null);
         if (!apiKey) return render(state, embeddingsForm(state, { apiKey: "Enter an OpenAI API key." }, reuse), 400);
         try {
           await checkEmbeddings(apiKey);
@@ -332,9 +332,14 @@ export async function stepSubmit(context: Context, step: ProviderStep, wizard: b
   }
 }
 
-async function canReuseLlmKey(db: D1Database): Promise<boolean> {
-  const llm = await getSetting<LlmSettingsRecord>(db, "llm");
-  return llm?.baseUrl === OPENAI_BASE_URL;
+/** The OpenAI provider's key, which embeddings can reuse. */
+async function openaiKey(db: D1Database, secret: string): Promise<string | null> {
+  const provider = await getProvider(db, "openai");
+  return provider ? getKey(db, secret, provider.keySlot) : null;
+}
+
+async function canReuseLlmKey(db: D1Database, secret: string): Promise<boolean> {
+  return (await openaiKey(db, secret)) !== null;
 }
 
 function newestEpisode(feed: Feed): Feed["episodes"][number] | undefined {

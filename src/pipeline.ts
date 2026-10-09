@@ -6,9 +6,10 @@ import { decodeMp3 } from "./mp3.ts";
 import { MUSE_LIMITS, MUSE_PART_SETTING, MUSE_SAMPLE_RATE, MUSE_TOO_LONG, type MuseLimits, quietestSplit, turnsToSegments, WAV_HEADER_BYTES, writeWavHeader } from "./muse.ts";
 import type { AppEnv } from "./env.ts";
 import { getKey } from "./keys.ts";
-import { EMBEDDING_MODEL, MISTRAL_TRANSCRIPTION_MODEL, MUSE_TRANSCRIPTION_MODEL, MuseTranscribeError, museTranscribe, ProviderError, reasoningFields, withUserAgent } from "./providers.ts";
+import { EMBEDDING_MODEL, MISTRAL_TRANSCRIPTION_MODEL, MUSE_TRANSCRIPTION_MODEL, MuseTranscribeError, museTranscribe, ProviderError, withUserAgent } from "./providers.ts";
 import { formatTime } from "./research.ts";
-import { getSetting, type LlmSettingsRecord, type Ministry, putSetting, type TranscriptionSettings } from "./settings.ts";
+import { chatCompletion, type LlmTarget, resolveTarget } from "./llm.ts";
+import { getSetting, type Ministry, putSetting, type TranscriptionSettings } from "./settings.ts";
 import { normalizeReference } from "./scriptures.ts";
 import { identifySpeakers } from "./speakers.ts";
 
@@ -103,13 +104,12 @@ export async function runEpisode(env: AppEnv, step: PipelineStep, episodeId: str
 
     await step.do("clean transcript", CLEAN, tracked(db, episodeId, "transcribe", "Cleaning up the transcript", async () => {
       if (!(await redoing(db, episodeId, "rewrite")) && await db.prepare("SELECT 1 FROM transcripts WHERE episode_id = ?").bind(episodeId).first()) return;
-      const [llm, ministry, draft] = await Promise.all([
-        getSetting<LlmSettingsRecord>(db, "llm"),
+      const [target, ministry, draft] = await Promise.all([
+        resolveTarget(env, { action: "summary" }),
         getSetting<Ministry>(db, "ministry"),
         db.prepare("SELECT e.title, d.segments_json, d.cleaned_json, d.model FROM transcripts_draft d JOIN episodes e ON e.id = d.episode_id WHERE d.episode_id = ?")
           .bind(episodeId).first<{ title: string; segments_json: string; cleaned_json: string | null; model: string }>(),
       ]);
-      if (!llm) throw new ProviderError("The answers AI isn't set up.");
       if (!draft) throw new ProviderError("The draft transcript is missing.");
       const segments = JSON.parse(draft.segments_json) as Segment[];
       const cleaned = draft.cleaned_json ? JSON.parse(draft.cleaned_json) as string[] : [];
@@ -122,27 +122,25 @@ export async function runEpisode(env: AppEnv, step: PipelineStep, episodeId: str
       const clean = segments.map((segment, index) => ({ ...segment, text: cleaned[index] ?? segment.text }));
       await db.batch([
         db.prepare("INSERT OR REPLACE INTO transcripts (episode_id, text, segments_json, model, created_at, cleaned_by) VALUES (?, ?, ?, ?, ?, ?)")
-          .bind(episodeId, joined(clean), JSON.stringify(clean), draft.model, new Date().toISOString(), llm.model),
+          .bind(episodeId, joined(clean), JSON.stringify(clean), draft.model, new Date().toISOString(), target.model),
         redone(db, episodeId, "rewrite"),
       ]);
     }));
 
     await step.do("summarize", SUMMARIZE, tracked(db, episodeId, "summarize", "Writing the summary", async () => {
       if (!(await redoing(db, episodeId, "summary")) && await db.prepare("SELECT 1 FROM summaries WHERE episode_id = ?").bind(episodeId).first()) return;
-      const [llm, ministry, row] = await Promise.all([
-        getSetting<LlmSettingsRecord>(db, "llm"),
+      const [target, ministry, row] = await Promise.all([
+        resolveTarget(env, { action: "summary" }),
         getSetting<Ministry>(db, "ministry"),
         db.prepare("SELECT e.title, e.published_at, t.text FROM episodes e JOIN transcripts t ON t.episode_id = e.id WHERE e.id = ?")
           .bind(episodeId).first<{ title: string; published_at: string | null; text: string }>(),
       ]);
-      if (!llm) throw new ProviderError("The answers AI isn't set up.");
       if (!row) throw new ProviderError("The transcript is missing.");
-      const apiKey = await requireKey(env, "llm");
-      const result = await summarize({ llm, apiKey, ministry, title: row.title, publishedAt: row.published_at, transcript: row.text });
+      const result = await summarize({ target, ministry, title: row.title, publishedAt: row.published_at, transcript: row.text });
       // A null main passage is left for the hourly catch-up to look at again, which records an empty one if there truly isn't one.
       await db.batch([
         db.prepare("INSERT OR REPLACE INTO summaries (episode_id, summary, topics_json, scriptures_json, model, created_at, main_scripture) VALUES (?, ?, ?, ?, ?, ?, ?)")
-          .bind(episodeId, result.summary, JSON.stringify(result.topics), JSON.stringify(result.scriptures), llm.model, new Date().toISOString(), result.mainScripture),
+          .bind(episodeId, result.summary, JSON.stringify(result.topics), JSON.stringify(result.scriptures), target.model, new Date().toISOString(), result.mainScripture),
         redone(db, episodeId, "summary"),
       ]);
     }));
@@ -311,9 +309,9 @@ function tracked<T>(db: D1Database, episodeId: string, stage: "transcribe" | "su
   };
 }
 
-export async function requireKey(env: AppEnv, slot: "llm" | "embeddings" | "transcription"): Promise<string> {
+export async function requireKey(env: AppEnv, slot: "embeddings" | "transcription"): Promise<string> {
   const key = await getKey(env.DB, env.APP_SECRET ?? "", slot);
-  if (!key) throw new ProviderError(`The ${slot === "llm" ? "answers AI" : slot} key is missing or unreadable. Re-enter it in Admin.`);
+  if (!key) throw new ProviderError(`The ${slot} key is missing or unreadable. Re-enter it in Admin.`);
   return key;
 }
 
@@ -344,35 +342,26 @@ export async function transcribe(audioUrl: string, apiKey: string): Promise<Segm
 }
 
 export async function summarize(input: {
-  llm: LlmSettingsRecord;
-  apiKey: string;
+  target: LlmTarget;
   ministry: Ministry | null;
   title: string;
   publishedAt: string | null;
   transcript: string;
+  fetcher?: typeof fetch;
 }): Promise<SermonSummary> {
   const speakers = input.ministry?.speakerNames.length ? ` Speakers include ${input.ministry.speakerNames.join(", ")}.` : "";
   const church = input.ministry?.churchName ?? "a church";
   const system = `You summarize sermons from ${church}.${speakers} Use only what the transcript says. Reply with only a JSON object: {"summary": "2 to 4 short paragraphs", "mainScripture": "the passage the sermon preaches from, as one reference like Matthew 5:21-26, or null for a topical sermon without one", "topics": ["3 to 8 short topics"], "scriptures": ["every Bible reference discussed, like John 3:16, with the main passage first"]}. The main passage is usually announced or read near the start ("turn with me to Matthew 5, verses 21 through 26"); a verse quoted in passing isn't it.`;
   const transcript = input.transcript.length > SUMMARY_INPUT_CHARS ? `${input.transcript.slice(0, SUMMARY_INPUT_CHARS)} [transcript truncated]` : input.transcript;
-  const result = await post(`${input.llm.baseUrl}/chat/completions`, {
-    headers: { Authorization: `Bearer ${input.apiKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: input.llm.model,
-      messages: [
-        { role: "system", content: system },
-        { role: "user", content: `Title: ${input.title}\nDate: ${input.publishedAt?.slice(0, 10) ?? "unknown"}\n\nTranscript:\n${transcript}` },
-      ],
-      // Generous because thinking models (Gemini 3.x, o-series) can spend part of this before replying.
-      max_tokens: SUMMARY_MAX_TOKENS,
-      ...reasoningFields(input.llm.baseUrl, input.llm.summaryEffort),
-    }),
-  }, "The answers AI", 4 * 60_000) as { choices?: { finish_reason?: unknown; message?: { content?: unknown } }[] };
-  const choice = result.choices?.[0];
-  if (choice?.finish_reason === "length" && !String(choice.message?.content ?? "").includes("}")) {
+  // Generous because thinking models (Gemini 3.x, o-series) can spend part of this before replying.
+  const result = await chatCompletion(input.target, [
+    { role: "system", content: system },
+    { role: "user", content: `Title: ${input.title}\nDate: ${input.publishedAt?.slice(0, 10) ?? "unknown"}\n\nTranscript:\n${transcript}` },
+  ], { maxTokens: SUMMARY_MAX_TOKENS, timeoutMs: 4 * 60_000, ...(input.fetcher ? { fetcher: input.fetcher } : {}) });
+  if (result.finishReason === "length" && !(result.content ?? "").includes("}")) {
     throw new ProviderError("The answers AI ran out of room before finishing the summary. Try a model that thinks less, or retry.");
   }
-  return parseSummary(choice?.message?.content);
+  return parseSummary(result.content);
 }
 
 /** Accepts JSON with or without Markdown fences or surrounding prose. */

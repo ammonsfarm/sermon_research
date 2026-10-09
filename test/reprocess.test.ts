@@ -176,10 +176,10 @@ test("a failed re-process keeps the sermon up, shows why, and can be retried", a
 
     const failed = await episode(site.app, id);
     assert.deepEqual([failed?.status, failed?.stage, failed?.redo], ["done", null, "summary"]);
-    assert.match(failed?.error ?? "", /The answers AI returned HTTP 500/);
+    assert.match(failed?.error ?? "", /OpenAI returned HTTP 500 for gpt-test/);
     const sermon = await site.app.request(`/episodes/${id}`, { cookie: site.cookie });
     assert.equal(sermon.status, 200, "still up, with its earlier summary");
-    assert.match(await sermon.text(), /Re-processing failed: The answers AI returned HTTP 500/);
+    assert.match(await sermon.text(), /Re-processing failed: OpenAI returned HTTP 500 for gpt-test/);
     const dashboard = await (await site.app.request("/admin/episodes", { cookie: site.cookie })).text();
     assert.match(dashboard, /<strong>Re-processing failed<\/strong>[\s\S]*?The sermon still shows its earlier version\.[\s\S]*?<button class="quiet" type="submit">Retry<\/button>/);
     assert.match(dashboard, /Retry all 1 failed/);
