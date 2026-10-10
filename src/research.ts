@@ -130,19 +130,80 @@ export async function nearest(env: AppEnv, text: string, topK: number, episodeId
     .map((match) => ({ id: match.id, score: match.score }));
 }
 
+/** Characters of full transcript sent for a narrow scope; roughly 35,000 tokens, well inside current models' windows. */
+export const SCOPED_FULL_CHARS = 140_000;
+/** Chunks on each side of a hit that go along with it. */
+const NEIGHBOURS = 2;
+/** Longest run of chunks shown as one numbered source. */
+const RUN_MAX = 4;
+
+type ChunkRow = { id: string; episode_id: string; kind: "summary" | "transcript"; seq: number; text: string; start_seconds: number | null; title: string; published_at: string | null; speaker: string | null };
+
+async function chunksOf(db: D1Database, ids: readonly string[], where: "episodes" | "ids"): Promise<ChunkRow[]> {
+  const rows: ChunkRow[] = [];
+  // D1 allows 100 bound parameters per statement.
+  for (let start = 0; start < ids.length; start += 50) {
+    const batch = ids.slice(start, start + 50);
+    const { results } = await db.prepare(
+      `SELECT c.id, c.episode_id, c.kind, c.seq, c.text, c.start_seconds, e.title, e.published_at, e.speaker
+       FROM chunks c JOIN episodes e ON e.id = c.episode_id
+       WHERE e.status = 'done' AND ${where === "episodes" ? "c.episode_id" : "c.id"} IN (${batch.map(() => "?").join(", ")})`,
+    ).bind(...batch).all<ChunkRow>();
+    rows.push(...results);
+  }
+  return rows;
+}
+
+/**
+ * Joins chunks into numbered sources, in reading order: neighbouring chunks of the same sermon become
+ * one source (at most RUN_MAX chunks each), cited at the time its first chunk starts. `rank` sorts the sources.
+ */
+function toPassages(rows: readonly ChunkRow[], rank: (run: readonly ChunkRow[]) => string): Passage[] {
+  const sorted = [...rows].sort((a, b) => a.episode_id.localeCompare(b.episode_id) || a.seq - b.seq);
+  const runs: ChunkRow[][] = [];
+  for (const row of sorted) {
+    const run = runs.at(-1);
+    const last = run?.at(-1);
+    if (run && last && last.episode_id === row.episode_id && row.seq === last.seq + 1 && last.kind === row.kind && row.kind === "transcript" && run.length < RUN_MAX) run.push(row);
+    else runs.push([row]);
+  }
+  return runs.sort((a, b) => rank(a).localeCompare(rank(b))).map((run, index) => {
+    const first = run[0]!;
+    return {
+      n: index + 1, chunkId: first.id, episodeId: first.episode_id, title: first.title, publishedAt: first.published_at, speaker: first.speaker,
+      kind: first.kind, seq: first.seq, start: first.start_seconds, text: run.map((row) => row.text).join("\n\n"),
+    };
+  });
+}
+
+/**
+ * Passages to answer a question from. A narrow scope whose sermons fit in SCOPED_FULL_CHARS sends them
+ * whole; otherwise each of the closest passages comes with the NEIGHBOURS chunks on either side, so a
+ * hit arrives with what the preacher said just before and after it.
+ */
 export async function retrieve(env: AppEnv, question: string, topK = SOURCES, episodeIds: readonly string[] | null = null): Promise<Passage[]> {
+  const readingOrder = (run: readonly ChunkRow[]) => `${run[0]!.published_at ?? ""}\u0000${run[0]!.episode_id}\u0000${String(run[0]!.seq).padStart(6, "0")}`;
+  if (episodeIds && episodeIds.length > 0 && episodeIds.length <= MAX_FILTER_IDS) {
+    const all = await chunksOf(env.DB, episodeIds, "episodes");
+    if (all.reduce((sum, row) => sum + row.text.length, 0) <= SCOPED_FULL_CHARS) return toPassages(all, readingOrder);
+  }
   const matches = await nearest(env, question, topK, episodeIds);
   if (matches.length === 0) return [];
-  const { results } = await env.DB.prepare(
-    `SELECT c.id, c.episode_id, c.kind, c.seq, c.text, c.start_seconds, e.title, e.published_at, e.speaker
-     FROM chunks c JOIN episodes e ON e.id = c.episode_id
-     WHERE e.status = 'done' AND c.id IN (${matches.map(() => "?").join(", ")})`,
-  ).bind(...matches.map((match) => match.id)).all<{ id: string; episode_id: string; kind: "summary" | "transcript"; seq: number; text: string; start_seconds: number | null; title: string; published_at: string | null; speaker: string | null }>();
-  const byId = new Map(results.map((row) => [row.id, row]));
-  return matches.flatMap((match) => byId.get(match.id) ?? []).map((row, index) => ({
-    n: index + 1, chunkId: row.id, episodeId: row.episode_id, title: row.title, publishedAt: row.published_at, speaker: row.speaker,
-    kind: row.kind, seq: row.seq, start: row.start_seconds, text: row.text,
-  }));
+  const wanted = new Set<string>();
+  for (const { id } of matches) {
+    const colon = id.lastIndexOf(":");
+    const episode = id.slice(0, colon);
+    const seq = Number(id.slice(colon + 1));
+    wanted.add(id);
+    if (Number.isFinite(seq)) for (let near = Math.max(1, seq - NEIGHBOURS); near <= seq + NEIGHBOURS; near++) wanted.add(`${episode}:${near}`);
+  }
+  const rows = await chunksOf(env.DB, [...wanted], "ids");
+  const matched = new Set(matches.map((match) => match.id));
+  // Neighbours are transcript chunks only (seq 0 is the summary), and only worth sending beside a hit.
+  const kept = rows.filter((row) => matched.has(row.id) || row.kind === "transcript");
+  // Closest first, as the matches came.
+  const best = (run: readonly ChunkRow[]) => String(Math.min(...run.map((row) => { const at = matches.findIndex((match) => match.id === row.id); return at < 0 ? matches.length : at; }))).padStart(6, "0");
+  return toPassages(kept, best);
 }
 
 /** Who the sermons come from, for the answers AI's instructions. */
