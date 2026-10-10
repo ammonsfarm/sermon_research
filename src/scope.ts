@@ -9,6 +9,10 @@ export interface Scope {
   readonly from?: string;
   readonly to?: string;
   readonly episodes?: readonly string[];
+  /** How sermon text reaches the answers AI: "full" sends every sermon in the scope whole, "search" only the closest passages. Unset means automatic. */
+  readonly text?: "full" | "search";
+  /** Sermons whose whole text always goes in, with the rest of the scope searched for related passages. */
+  readonly full?: readonly string[];
 }
 
 export interface CatalogEntry {
@@ -59,7 +63,11 @@ export function parseScope(values: FormData | URLSearchParams): Scope {
   const from = text("scope_from");
   const to = text("scope_to");
   const episodes = [...new Set(values.getAll("scope_episode").map(String).filter((id) => ID.test(id)))].slice(0, MAX_PICKED);
+  const mode = text("scope_text");
+  const full = [...new Set(values.getAll("scope_full").map(String).filter((id) => ID.test(id)))].slice(0, MAX_PICKED);
   return {
+    ...(mode === "full" || mode === "search" ? { text: mode } : {}),
+    ...(full.length ? { full } : {}),
     ...(series ? { series } : {}),
     ...(speaker ? { speaker } : {}),
     ...(DATE.test(from) ? { from } : {}),
@@ -105,7 +113,7 @@ export function describeScope(scope: Scope, entries: readonly CatalogEntry[]): s
 
 /** Hidden fields that carry a scope into a follow-up question. */
 export function scopeFields(scope: Scope): Html {
-  return html`${scope.series ? html`<input type="hidden" name="scope_series" value="${scope.series}">` : ""}${scope.speaker ? html`<input type="hidden" name="scope_speaker" value="${scope.speaker}">` : ""}${scope.from ? html`<input type="hidden" name="scope_from" value="${scope.from}">` : ""}${scope.to ? html`<input type="hidden" name="scope_to" value="${scope.to}">` : ""}${(scope.episodes ?? []).map((id) => html`<input type="hidden" name="scope_episode" value="${id}">`)}`;
+  return html`${scope.series ? html`<input type="hidden" name="scope_series" value="${scope.series}">` : ""}${scope.speaker ? html`<input type="hidden" name="scope_speaker" value="${scope.speaker}">` : ""}${scope.from ? html`<input type="hidden" name="scope_from" value="${scope.from}">` : ""}${scope.to ? html`<input type="hidden" name="scope_to" value="${scope.to}">` : ""}${(scope.episodes ?? []).map((id) => html`<input type="hidden" name="scope_episode" value="${id}">`)}${scope.text ? html`<input type="hidden" name="scope_text" value="${scope.text}">` : ""}${(scope.full ?? []).map((id) => html`<input type="hidden" name="scope_full" value="${id}">`)}`;
 }
 
 /** The "Scope" disclosure in the ask box: series, dates and specific sermons. */
@@ -113,7 +121,8 @@ export function scopeControls(scope: Scope, entries: readonly CatalogEntry[]): H
   const series = seriesList(entries);
   const speakers = speakerList(entries);
   const picked = new Set(scope.episodes ?? []);
-  return html`<details class="scope"${isAll(scope) ? "" : html` open`}>
+  const whole = new Set(scope.full ?? []);
+  return html`<details class="scope"${isAll(scope) && !scope.text && !scope.full?.length ? "" : html` open`}>
 <summary>Scope: ${describeScope(scope, entries)}</summary>
 <div class="scope-body">
 <div><label for="f-scope-series">Series</label>
@@ -125,6 +134,12 @@ ${speakers.length ? html`<div><label for="f-scope-speaker">Speaker</label>
 <div class="span"><label for="f-scope-episode">Only these sermons</label>
 <p class="hint">Optional. Hold Ctrl or ⌘ to pick several.</p>
 <select id="f-scope-episode" name="scope_episode" multiple>${entries.map((entry) => html`<option value="${entry.id}"${picked.has(entry.id) ? html` selected` : ""}>${entry.publishedAt?.slice(0, 10) ?? ""} · ${entry.title}${entry.speaker ? ` · ${entry.speaker}` : ""}</option>`)}</select></div>
+<div><label for="f-scope-text">Sermon text</label>
+<select id="f-scope-text" name="scope_text"><option value="">Automatic</option><option value="full"${scope.text === "full" ? html` selected` : ""}>Full sermons</option><option value="search"${scope.text === "search" ? html` selected` : ""}>Search only</option></select>
+<p class="hint">Automatic sends whole sermons when the scope is small enough, and otherwise the closest passages with the text around them.</p></div>
+<div class="span"><label for="f-scope-full">Always include in full</label>
+<p class="hint">Optional. These sermons go in whole, and the rest of the scope is searched for related passages.</p>
+<select id="f-scope-full" name="scope_full" multiple>${entries.map((entry) => html`<option value="${entry.id}"${whole.has(entry.id) ? html` selected` : ""}>${entry.publishedAt?.slice(0, 10) ?? ""} · ${entry.title}${entry.speaker ? ` · ${entry.speaker}` : ""}</option>`)}</select></div>
 </div>
 </details>`;
 }

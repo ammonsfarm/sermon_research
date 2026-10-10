@@ -3,7 +3,7 @@ import { chrome, type Context, redirect } from "./context.ts";
 import { createDocument, type DocumentSummary, recentDocuments } from "./documents.ts";
 import { html, type Html, page } from "./html.ts";
 import {
-  answer, canViewResearch, type Exchange, gate, type Passage, QUESTION_MAX, renderAnswer, retrieve, sourcesList, type StoredSource, toStored, useQuota,
+  answer, canViewResearch, type Exchange, gate, type Passage, QUESTION_MAX, renderAnswer, retrieve, sermonTextBudget, sourcesList, type StoredSource, toStored, useQuota,
 } from "./research.ts";
 import { type CatalogEntry, catalog, describeScope, isAll, parseScope, type Scope, scopeControls, scopeFields, scopeIds, titleWithoutSeries } from "./scope.ts";
 import { type ModelChoice, modelChoices, parseModelKey } from "./llm.ts";
@@ -189,10 +189,13 @@ export async function ask(context: Context): Promise<Response> {
   try {
     // A follow-up like "what about in Matthew?" searches better alongside the question it follows.
     const searchText = history.length ? `${history.at(-1)!.question}\n${question}` : question;
-    passages = await retrieve(context.env, searchText, undefined, ids);
+    const who = { userId: context.session?.user.id ?? null, model };
+    const found = await retrieve(context.env, searchText, { episodeIds: ids, mode: scope.text, fullIds: scope.full, budget: await sermonTextBudget(context.env, who) });
+    passages = found.passages;
     if (passages.length === 0) return fail("No sermons have been indexed yet, so there's nothing to answer from.", 200);
     const exchanges: Exchange[] = history.map((turn) => ({ question: turn.question, answer: turn.answer }));
-    text = await answer(context.env, context.ministry, question, passages, exchanges, { userId: context.session?.user.id ?? null, model });
+    text = await answer(context.env, context.ministry, question, passages, exchanges, who);
+    if (found.note) text = `${text}\n\nNote: ${found.note}`;
   } catch (error) {
     console.error("research answer failed", error);
     return fail("The answer couldn't be written right now. Try again in a minute.", 502);

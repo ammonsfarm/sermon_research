@@ -176,18 +176,79 @@ function toPassages(rows: readonly ChunkRow[], rank: (run: readonly ChunkRow[]) 
   });
 }
 
+/** Characters of sermon text a model can take: about half its context window at 3.5 characters a token, never less than SCOPED_FULL_CHARS or more than this cap. */
+const MAX_FULL_CHARS = 1_000_000;
+
+/** How much whole-sermon text to send to the model that will answer. */
+export async function sermonTextBudget(env: AppEnv, who: { userId?: string | null; model?: string | null }): Promise<number> {
+  const target = await resolveTarget(env, { action: "chat", userId: who.userId ?? null, choice: who.model ?? null });
+  const window = target.contextWindow;
+  return window ? Math.min(MAX_FULL_CHARS, Math.max(SCOPED_FULL_CHARS, Math.floor(window * 1.75))) : SCOPED_FULL_CHARS;
+}
+
+export interface Retrieval {
+  readonly passages: Passage[];
+  /** Set when what was asked for didn't fit and the closest passages were used instead. */
+  readonly note: string | null;
+}
+
+export interface RetrieveOptions {
+  readonly topK?: number;
+  /** The sermons the question is limited to; null for all. */
+  readonly episodeIds?: readonly string[] | null;
+  readonly mode?: "full" | "search" | undefined;
+  /** Sermons that always go in whole. */
+  readonly fullIds?: readonly string[] | undefined;
+  /** Characters of whole-sermon text allowed. */
+  readonly budget?: number;
+}
+
+const size = (rows: readonly ChunkRow[]) => rows.reduce((sum, row) => sum + row.text.length, 0);
+
 /**
- * Passages to answer a question from. A narrow scope whose sermons fit in SCOPED_FULL_CHARS sends them
- * whole; otherwise each of the closest passages comes with the NEIGHBOURS chunks on either side, so a
- * hit arrives with what the preacher said just before and after it.
+ * Passages to answer a question from. Sermons chosen to go in whole always do; a narrow scope whose
+ * sermons fit in the budget is sent whole too (always, when `mode` is "full"). Otherwise each of the
+ * closest passages comes with the NEIGHBOURS chunks on either side, so a hit arrives with what the
+ * preacher said just before and after it. When whole sermons were asked for and don't fit, the closest
+ * passages are used and `note` says so.
  */
-export async function retrieve(env: AppEnv, question: string, topK = SOURCES, episodeIds: readonly string[] | null = null): Promise<Passage[]> {
+export async function retrieve(env: AppEnv, question: string, options: RetrieveOptions = {}): Promise<Retrieval> {
+  const { topK = SOURCES, episodeIds = null, mode, budget = SCOPED_FULL_CHARS } = options;
   const readingOrder = (run: readonly ChunkRow[]) => `${run[0]!.published_at ?? ""}\u0000${run[0]!.episode_id}\u0000${String(run[0]!.seq).padStart(6, "0")}`;
-  if (episodeIds && episodeIds.length > 0 && episodeIds.length <= MAX_FILTER_IDS) {
-    const all = await chunksOf(env.DB, episodeIds, "episodes");
-    if (all.reduce((sum, row) => sum + row.text.length, 0) <= SCOPED_FULL_CHARS) return toPassages(all, readingOrder);
+  const number = (passages: readonly Passage[]) => passages.map((passage, index) => ({ ...passage, n: index + 1 }));
+  let note: string | null = null;
+
+  // Sermons chosen to go in whole, with the rest of the scope searched.
+  let whole: ChunkRow[] = [];
+  const picked = [...new Set(options.fullIds ?? [])];
+  if (picked.length > 0) {
+    const rows = await chunksOf(env.DB, picked, "episodes");
+    if (size(rows) <= budget) whole = rows;
+    else note = "The sermons you chose to include in full were too long to send whole, so the closest passages were used instead.";
   }
-  const matches = await nearest(env, question, topK, episodeIds);
+  if (whole.length > 0) {
+    const have = new Set(whole.map((row) => row.episode_id));
+    const found = await searched(env, question, topK, episodeIds, have);
+    return { passages: number([...toPassages(whole, readingOrder), ...found]), note };
+  }
+
+  if (mode !== "search" && episodeIds && episodeIds.length > 0 && episodeIds.length <= MAX_FILTER_IDS) {
+    const all = await chunksOf(env.DB, episodeIds, "episodes");
+    if (size(all) <= budget) return { passages: toPassages(all, readingOrder), note };
+    if (mode === "full") note = "The sermons in this scope were too long to send whole, so the closest passages were used instead.";
+  } else if (mode === "full" && !note) {
+    note = "That scope covers too many sermons to send whole, so the closest passages were used instead. Narrow the scope to read them in full.";
+  }
+  return { passages: await searched(env, question, topK, episodeIds, new Set()), note };
+}
+
+/** The closest passages with their neighbours, leaving out sermons already sent whole. */
+async function searched(
+  env: AppEnv, question: string, topK: number, episodeIds: readonly string[] | null,
+  skip: ReadonlySet<string>,
+): Promise<Passage[]> {
+  const found = await nearest(env, question, skip.size ? Math.min(MAX_TOP_K, topK * 3) : topK, episodeIds);
+  const matches = found.filter((match) => !skip.has(match.id.slice(0, match.id.lastIndexOf(":")))).slice(0, topK);
   if (matches.length === 0) return [];
   const wanted = new Set<string>();
   for (const { id } of matches) {
@@ -256,7 +317,7 @@ export async function answer(
 ): Promise<string> {
   const system = `${preamble(ministry)} Answer only from the numbered sources, which are passages from sermon transcripts and summaries. Cite every claim with the source number in square brackets, like [2]. If the sources don't answer the question, say so plainly and don't guess. Keep answers under 250 words, in plain paragraphs.${history.length ? " This is a follow-up: use the earlier conversation to understand what the question refers to, but cite only the numbered sources below." : ""}`;
   const earlier = history.slice(-HISTORY_TURNS).map((turn) => `Q: ${turn.question}\nA: ${turn.answer}`).join("\n\n");
-  return chat(env, system, `${earlier ? `Earlier in this conversation:\n\n${earlier}\n\n` : ""}Sources:\n\n${sourcesPrompt(passages)}\n\nQuestion: ${question}`, { maxTokens: ANSWER_MAX_TOKENS, timeoutMs: 60_000, ...who });
+  return chat(env, system, `${earlier ? `Earlier in this conversation:\n\n${earlier}\n\n` : ""}Sources:\n\n${sourcesPrompt(passages)}\n\nQuestion: ${question}`, { maxTokens: ANSWER_MAX_TOKENS, timeoutMs: passages.reduce((sum, passage) => sum + passage.text.length, 0) > SCOPED_FULL_CHARS ? 180_000 : 60_000, ...who });
 }
 
 /** The numbered list of sources under an answer or document, as cards. */
