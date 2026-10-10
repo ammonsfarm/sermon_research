@@ -52,7 +52,7 @@ test("a question that names one speaker searches only their sermons", async () =
     const asked = await site.app.request("/research", { form: { question: "What has Pastor Jane said about grace?" }, cookie: site.cookie });
     const thread = await (await site.app.request((asked.headers.get("Location") ?? "").split("#")[0]!, { cookie: site.cookie })).text();
     assert.match(thread, /Scope: <strong>Speaker: Jane Doe<\/strong>/);
-    assert.deepEqual((site.app.vectors.queries.at(-1) as { filter?: unknown }).filter, { episodeId: { $in: [older] } });
+    assert.equal(site.app.vectors.queries.length, 0, "a speaker's few sermons are sent whole, with no search");
     assert.match(JSON.stringify(site.providers.calls.filter(isChat).at(-1)!.body), /\[1\] \\"Grace Alone\\" \(2026-09-07, Jane Doe\), summary/, "the answers AI knows who said each passage");
     assert.match(thread, /<span class="hint">2026-09-07 · Jane Doe · summary<\/span>/);
 

@@ -410,12 +410,13 @@ test("questions and documents can be limited to a series, dates or chosen sermon
     const asked = await site.app.request("/research", { form: { question: "What is grace?", scope_episode: older }, cookie: site.cookie });
     const thread = await (await site.app.request((asked.headers.get("Location") ?? "").split("#")[0]!, { cookie: site.cookie })).text();
     assert.match(thread, /Scope: <strong>“Grace Alone”<\/strong>/);
-    assert.deepEqual((site.app.vectors.queries.at(-1) as { filter?: unknown }).filter, { episodeId: { $in: [older] } });
+    assert.equal(site.app.vectors.queries.length, 0, "a chosen sermon is sent whole, with no search");
     assert.doesNotMatch(thread, new RegExp(`/episodes/${newer}#`), "only the chosen sermon is cited");
 
     // Dates are inclusive and combine with other limits.
     await site.app.request("/research", { form: { question: "What is grace?", scope_from: "2026-09-10", scope_to: "2026-09-30" }, cookie: site.cookie });
-    assert.deepEqual((site.app.vectors.queries.at(-1) as { filter?: unknown }).filter, { episodeId: { $in: [newer] } });
+    assert.equal(site.app.vectors.queries.length, 0, "a date range of one sermon is sent whole, with no search");
+    assert.match(JSON.stringify(site.providers.calls.filter((call) => call.url.endsWith("/chat/completions")).at(-1)!.body), /Faith (&|\\u0026) Works/);
 
     const none = await site.app.request("/research", { form: { question: "What is grace?", scope_from: "2030-01-01" }, cookie: site.cookie });
     assert.equal(none.status, 400);
