@@ -31,11 +31,11 @@ before anything in the "Ask first" list below.
 | `src/workflow.ts` | The Cloudflare Workflow classes: one runs `pipeline.ts` for an episode, the other runs `writing.ts` for a document |
 | `src/schedule.ts` | Daily/weekly schedule in the church's time zone |
 | `src/ask.ts` | Ask home page, the ask box, conversations (the `turns` table, with follow-ups) and the Library |
-| `src/scope.ts` | Question scope: series (taken from the " - Series" end of a title), speaker, date range and specific sermons |
+| `src/scope.ts` | Question scope: series (taken from the " - Series" end of a title), speaker, date range and specific sermons, plus the "Sermon text" choice (automatic, full sermons, search only) and sermons always included in full |
 | `src/scriptures.ts` | Each sermon's main passage (`summaries.main_scripture`): the hourly catch-up for sermons summarized before it was kept, and reference cleanup |
 | `src/speakers.ts` | Who preached each sermon: the answers AI reads the feed's description and author and the start of the transcript (pipeline step for new sermons, hourly for older ones); name cleanup; spotting a speaker named in a question |
 | `src/sermons.ts` | Sermons grid with search and filters, and the sermon page (player, read-along, Summary / Ask / Create panel, and the admin's speaker and Re-process controls) |
-| `src/research.ts` | Retrieval (Vectorize, filtered to a scope), cited answers, sources, question limits and research access settings |
+| `src/research.ts` | Retrieval (whole sermons for a narrow scope or by choice, within a budget taken from the model's context window; otherwise Vectorize hits with the chunks around them, filtered to a scope), cited answers, sources, question limits and research access settings |
 | `src/documents.ts`, `src/markdown.ts` | Markdown documents written from the sermons (outline, study questions, custom): starting one, its page (live progress while it's written, Try again if it failed) and `.md` download; a small Markdown renderer that escapes everything it doesn't handle |
 | `src/writing.ts` | How a document is written, in the background: the answers AI picks the sermons from a catalog (titles, dates, scripture, topics) and splits long requests into parts, then each part is written from the full transcripts of its sermons, and the parts are joined with their citations renumbered |
 | `src/members.ts` | Member invites, invite acceptance, removing members |

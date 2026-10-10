@@ -238,6 +238,8 @@ export interface LlmTarget {
   readonly apiKey: string;
   readonly model: string;
   readonly effort: ReasoningEffort | null;
+  /** The model's context window in tokens, when it is known. */
+  readonly contextWindow?: number | null;
 }
 
 export interface ResolveOptions {
@@ -273,7 +275,7 @@ export async function resolveTarget(env: AppEnv, options: ResolveOptions): Promi
   const provider = providers.find((each) => each.id === model!.providerId);
   const apiKey = provider ? await getKey(db, env.APP_SECRET ?? "", provider.keySlot) : null;
   if (!provider || !apiKey) throw new ProviderError(`The ${provider?.name ?? "answers AI"} key is missing or unreadable. Re-enter it in Admin → Answers AI.`);
-  return { kind: provider.kind, providerName: provider.name, baseUrl: provider.baseUrl.replace(/\/+$/u, ""), apiKey, model: model.modelId, effort: fitEffort(model, effort) };
+  return { kind: provider.kind, providerName: provider.name, baseUrl: provider.baseUrl.replace(/\/+$/u, ""), apiKey, model: model.modelId, effort: fitEffort(model, effort), contextWindow: model.contextWindow };
 }
 
 // ---------------------------------------------------------------- calling a model

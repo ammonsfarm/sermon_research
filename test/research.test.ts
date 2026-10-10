@@ -4,7 +4,7 @@ import test from "node:test";
 import { signedAudioUrl } from "../src/audio.ts";
 import { fileName, splitTitle } from "../src/documents.ts";
 import { renderMarkdown } from "../src/markdown.ts";
-import { formatTime, renderAnswer } from "../src/research.ts";
+import { formatTime, renderAnswer, retrieve } from "../src/research.ts";
 import { describeScope, parseScope, scopeIds, seriesOf, titleWithoutSeries } from "../src/scope.ts";
 import { segmentsByChunk } from "../src/sermons.ts";
 import { AUDIO_BYTES, DOCUMENT_REPLY, completeSetup, configureLlm, cookieFrom, createApp, fakeProviders, indexedSite, ORIGIN, runDocuments, SECRET, type TestApp } from "./helpers.ts";
@@ -477,6 +477,34 @@ test("full transcripts download as Markdown or plain text, for people who can vi
     const txt = await (await site.app.request(`/episodes/${id}/transcript.txt`, { cookie: site.cookie })).text();
     assert.match(txt, /^Faith & Works\n2026-09-14 · John Smith · Grace Church\n\n\[0:00\] Welcome, church\./u);
     assert.equal((await site.app.request("/episodes/00000000-0000-0000-0000-000000000000/transcript.txt", { cookie: site.cookie })).status, 404);
+  } finally {
+    site.restore();
+  }
+});
+
+test("the Sermon text choices: search only, sermons always included in full, and a note when whole sermons don't fit", async () => {
+  const site = await indexedSite();
+  try {
+    const [newer, older] = site.ids as [string, string];
+    const lastChat = () => JSON.stringify(site.providers.calls.filter((call) => call.url.endsWith("/chat/completions")).at(-1)!.body);
+
+    // "Search only" searches even when the chosen sermon is small enough to send whole.
+    await site.app.request("/research", { form: { question: "What is grace?", scope_episode: older, scope_text: "search" }, cookie: site.cookie });
+    assert.deepEqual((site.app.vectors.queries.at(-1) as { filter?: unknown }).filter, { episodeId: { $in: [older] } });
+
+    // A sermon picked to go in whole arrives with the rest of the scope searched alongside it.
+    const before = site.app.vectors.queries.length;
+    await site.app.request("/research", { form: { question: "What is grace?", scope_full: older }, cookie: site.cookie });
+    assert.equal(site.app.vectors.queries.length, before + 1, "the other sermons are still searched");
+    assert.match(lastChat(), /Grace Alone/);
+    assert.match(lastChat(), /Faith (&|\\u0026) Works/);
+
+    // Too long to send whole: the closest passages are used and the note says so.
+    const found = await retrieve(site.app.env, "What is grace?", { episodeIds: [older], mode: "full", budget: 10 });
+    assert.ok(found.passages.length > 0);
+    assert.match(found.note ?? "", /too long to send whole/);
+    const picked = await retrieve(site.app.env, "What is grace?", { fullIds: [newer], budget: 10 });
+    assert.match(picked.note ?? "", /chose to include in full/);
   } finally {
     site.restore();
   }
