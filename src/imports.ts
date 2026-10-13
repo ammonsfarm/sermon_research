@@ -16,6 +16,7 @@ import {
   queueEpisodes,
   recordFeed,
   REDO_LABELS,
+  restartEpisode,
   statusCounts,
   type StatusCounts,
 } from "./episodes.ts";
@@ -181,6 +182,15 @@ ${episode.last_error ? html`<br><span class="error">Last error: ${episode.last_e
   return html`${label}`;
 }
 
+/** A run quiet this long may be stuck, so it can be restarted even without an error. */
+const QUIET_RUN_MS = 20 * 60_000;
+
+/** A working episode that hit an error (and is waiting to retry it) or has gone quiet. */
+function canRetryNow(episode: EpisodeRow, now = Date.now()): boolean {
+  const working = episode.status === "running" || (episode.status === "done" && episode.redo !== null && episode.stage !== null);
+  return working && (episode.last_error !== null || now - Date.parse(episode.updated_at) > QUIET_RUN_MS);
+}
+
 /** The filter from the episode list's query string. */
 function episodeQuery(url: URL): EpisodeQuery {
   const status = url.searchParams.get("status");
@@ -284,7 +294,9 @@ ${episodes.map((episode) => html`<tr>
 <td>${episodeStatus(episode)}</td>
 <td>${episode.status === "failed" || episode.status === "not_imported" || (episode.redo && !episode.stage && episode.error)
     ? html`<form method="post" action="/admin/episodes/queue"><input type="hidden" name="id" value="${episode.id}"><button class="quiet" type="submit">${episode.status === "not_imported" ? "Import" : "Retry"}</button></form>`
-    : ""}</td>
+    : canRetryNow(episode)
+      ? html`<form method="post" action="/admin/episodes/restart"><input type="hidden" name="id" value="${episode.id}"><button class="quiet" type="submit" title="Stop waiting for the automatic retry and start again now. Finished steps are kept.">Retry now</button></form>`
+      : ""}</td>
 </tr>`)}
 </tbody>
 </table>`, { ...chrome(context), ...(live ? { refreshSeconds: LIVE_REFRESH_SECONDS } : {}) });
@@ -367,6 +379,15 @@ export async function queueFromDashboard(context: Context): Promise<Response> {
   else await queueEpisodes(context.db, [String(form.get("id") ?? "")]);
   await dispatchQueued(context.env);
   return redirect("/admin/episodes");
+}
+
+/** POST /admin/episodes/restart : retries a working episode now instead of waiting for its automatic retry. */
+export async function restartFromDashboard(context: Context): Promise<Response> {
+  const denied = requireAdmin(context);
+  if (denied) return denied;
+  await rememberOrigin(context);
+  const restarted = await restartEpisode(context.env, String((await context.request.formData()).get("id") ?? ""));
+  return redirect(`/admin/episodes?notice=${encodeURIComponent(restarted ? "Retrying now with the current settings. Finished steps are kept." : "That episode isn't working any more; it may have just finished or failed.")}`);
 }
 
 /** GET/POST /admin/schedule */

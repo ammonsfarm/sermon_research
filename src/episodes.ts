@@ -175,25 +175,59 @@ export async function dispatchQueued(env: AppEnv, now = Date.now()): Promise<num
   ).bind(slots).all<{ id: string; attempts: number; status: EpisodeStatus }>();
   let started = 0;
   for (const episode of results) {
-    const attempt = episode.attempts + 1;
-    const redo = episode.status === "done";
-    const claimed = await db.prepare(redo
-      ? `UPDATE episodes SET stage = 'transcribe', detail = 'Starting', last_error = NULL, attempts = ?, updated_at = ? WHERE id = ? AND ${REDO_WAITING}`
-      : "UPDATE episodes SET status = 'running', stage = 'transcribe', detail = 'Starting', last_error = NULL, attempts = ?, error = NULL, updated_at = ? WHERE id = ? AND status = 'queued'",
-    ).bind(attempt, at, episode.id).run();
-    if (claimed.meta.changes !== 1) continue;
-    try {
-      await env.EPISODE_WORKFLOW.create({ id: `${episode.id}-${attempt}`, params: { episodeId: episode.id } });
-      started += 1;
-    } catch (error) {
-      console.error("could not start episode workflow", episode.id, error);
-      await db.prepare(redo
-        ? "UPDATE episodes SET stage = NULL, detail = NULL, updated_at = ? WHERE id = ?"
-        : "UPDATE episodes SET status = 'queued', stage = NULL, detail = NULL, updated_at = ? WHERE id = ?").bind(at, episode.id).run();
-      break;
-    }
+    const outcome = await startRun(env, episode, at);
+    if (outcome === "unavailable") break;
+    if (outcome === "started") started += 1;
   }
   return started;
+}
+
+/** Claims a queued episode (or waiting re-processing) and starts its workflow run. */
+async function startRun(env: AppEnv, episode: { id: string; attempts: number; status: EpisodeStatus }, at: string): Promise<"started" | "taken" | "unavailable"> {
+  const db = env.DB;
+  const attempt = episode.attempts + 1;
+  const redo = episode.status === "done";
+  const claimed = await db.prepare(redo
+    ? `UPDATE episodes SET stage = 'transcribe', detail = 'Starting', last_error = NULL, attempts = ?, updated_at = ? WHERE id = ? AND ${REDO_WAITING}`
+    : "UPDATE episodes SET status = 'running', stage = 'transcribe', detail = 'Starting', last_error = NULL, attempts = ?, error = NULL, updated_at = ? WHERE id = ? AND status = 'queued'",
+  ).bind(attempt, at, episode.id).run();
+  if (claimed.meta.changes !== 1) return "taken";
+  try {
+    await env.EPISODE_WORKFLOW.create({ id: `${episode.id}-${attempt}`, params: { episodeId: episode.id } });
+    return "started";
+  } catch (error) {
+    console.error("could not start episode workflow", episode.id, error);
+    await db.prepare(redo
+      ? "UPDATE episodes SET stage = NULL, detail = NULL, updated_at = ? WHERE id = ?"
+      : "UPDATE episodes SET status = 'queued', stage = NULL, detail = NULL, updated_at = ? WHERE id = ?").bind(at, episode.id).run();
+    return "unavailable";
+  }
+}
+
+/**
+ * Stops an episode's current run, which may be waiting minutes to retry a failed step, and starts a
+ * new one straight away. Each step saved its progress, so the new run carries on where that one was,
+ * with whatever model or key an admin has changed since. Returns false when it isn't running.
+ */
+export async function restartEpisode(env: AppEnv, id: string, now = Date.now()): Promise<boolean> {
+  const db = env.DB;
+  const row = await db.prepare(`SELECT attempts, status FROM episodes WHERE id = ? AND (status = 'running' OR (${REDO_RUNNING}))`).bind(id).first<{ attempts: number; status: EpisodeStatus }>();
+  if (!row) return false;
+  try {
+    await (await env.EPISODE_WORKFLOW.get(`${id}-${row.attempts}`)).terminate();
+  } catch (error) {
+    // Already finished, failed or lost; the episode is requeued either way.
+    console.error("could not stop episode workflow", id, error);
+  }
+  const at = new Date(now).toISOString();
+  const requeued = await db.prepare(row.status === "done"
+    ? `UPDATE episodes SET stage = NULL, detail = NULL, last_error = NULL, error = NULL, updated_at = ? WHERE id = ? AND attempts = ? AND ${REDO_RUNNING}`
+    : "UPDATE episodes SET status = 'queued', stage = NULL, detail = NULL, last_error = NULL, error = NULL, updated_at = ? WHERE id = ? AND attempts = ? AND status = 'running'",
+  ).bind(at, id, row.attempts).run();
+  if (requeued.meta.changes !== 1) return false;
+  // Its place under "Episodes at once" is free again, so it takes it rather than waiting its turn.
+  await startRun(env, { id, attempts: row.attempts, status: row.status }, at);
+  return true;
 }
 
 export interface StatusCounts extends Record<EpisodeStatus, number> {

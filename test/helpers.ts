@@ -22,6 +22,8 @@ export interface FakeVectors {
 
 export interface FakeWorkflow {
   readonly created: { id: string; params: { episodeId: string } }[];
+  /** Instance ids stopped with terminate(). */
+  readonly terminated: string[];
   /** Set to make create() throw, as when Workflows is unavailable. */
   failing: boolean;
 }
@@ -45,7 +47,7 @@ export interface TestApp {
 export function createApp(overrides: Partial<AppEnv> = {}): TestApp {
   resetSchemaCache();
   const vectors: FakeVectors = { stored: new Map(), deleted: [], queries: [] };
-  const workflow: FakeWorkflow = { created: [], failing: false };
+  const workflow: FakeWorkflow = { created: [], terminated: [], failing: false };
   const documentRuns: FakeDocumentWorkflow = { created: [], failing: false };
   const VECTORS = {
     async upsert(items: VectorizeVector[]) {
@@ -68,6 +70,9 @@ export function createApp(overrides: Partial<AppEnv> = {}): TestApp {
       if (workflow.failing) throw new Error("Workflows unavailable");
       workflow.created.push(options);
       return { id: options.id };
+    },
+    async get(id: string) {
+      return { id, async terminate() { workflow.terminated.push(id); } };
     },
   };
   const DOCUMENT_WORKFLOW = {

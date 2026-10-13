@@ -80,7 +80,11 @@ export const LLM_ACTIONS = [
 ] as const;
 export type LlmAction = (typeof LLM_ACTIONS)[number]["key"];
 
-export interface LlmChoice { readonly provider: string; readonly model: string; readonly effort: ReasoningEffort | null }
+export interface ModelPick { readonly provider: string; readonly model: string; readonly effort: ReasoningEffort | null }
+/** A job's model, and the models tried in order when it fails (out of quota, down, or refusing the key). */
+export interface LlmChoice extends ModelPick { readonly fallbacks?: readonly ModelPick[] }
+/** How many fallback models each job can have. */
+export const MAX_FALLBACKS = 3;
 export type LlmDefaults = Partial<Record<LlmAction, LlmChoice>>;
 
 /** "provider/model", the form value and document column for one model. Provider ids never contain a slash. */
@@ -149,14 +153,20 @@ export async function removeModel(db: D1Database, providerId: string, modelId: s
   ]);
 }
 
+function toPick(entry: unknown): ModelPick | null {
+  const { provider, model, effort } = (typeof entry === "object" && entry !== null ? entry : {}) as Record<string, unknown>;
+  return typeof provider === "string" && typeof model === "string" ? { provider, model, effort: isReasoningEffort(effort) ? effort : null } : null;
+}
+
 export async function getDefaults(db: D1Database): Promise<LlmDefaults> {
-  const stored = await getSetting<Record<string, { provider?: unknown; model?: unknown; effort?: unknown }>>(db, "llm_defaults");
+  const stored = await getSetting<Record<string, { fallbacks?: unknown }>>(db, "llm_defaults");
   const defaults: Record<string, LlmChoice> = {};
   for (const { key } of LLM_ACTIONS) {
-    const entry = stored?.[key];
-    if (entry && typeof entry.provider === "string" && typeof entry.model === "string") {
-      defaults[key] = { provider: entry.provider, model: entry.model, effort: isReasoningEffort(entry.effort) ? entry.effort : null };
-    }
+    const pick = toPick(stored?.[key]);
+    if (!pick) continue;
+    const listed = stored?.[key]?.fallbacks;
+    const fallbacks = (Array.isArray(listed) ? listed : []).map(toPick).filter((each): each is ModelPick => each !== null).slice(0, MAX_FALLBACKS);
+    defaults[key] = fallbacks.length ? { ...pick, fallbacks } : pick;
   }
   return defaults;
 }
@@ -215,7 +225,8 @@ export async function llmSummary(db: D1Database): Promise<LlmSummary> {
     models: models.filter((model) => model.enabled).length,
     defaults: LLM_ACTIONS.flatMap(({ key, label }) => {
       const choice = defaults[key];
-      return choice ? [`${label.split(" and ")[0]}: ${names.get(choice.provider) ?? choice.provider} · ${choice.model}${choice.effort ? `, ${EFFORT_LABELS[choice.effort].toLowerCase()} effort` : ""}`] : [];
+      const fallbacks = choice?.fallbacks?.length ? `, then ${choice.fallbacks.map((each) => each.model).join(", then ")} if it fails` : "";
+      return choice ? [`${label.split(" and ")[0]}: ${names.get(choice.provider) ?? choice.provider} · ${choice.model}${choice.effort ? `, ${EFFORT_LABELS[choice.effort].toLowerCase()} effort` : ""}${fallbacks}`] : [];
     }),
   };
 }
@@ -252,6 +263,15 @@ export interface ResolveOptions {
 
 /** Picks the model and effort for a call: the person's choice, else the site default, else (for a limited person) their first model. */
 export async function resolveTarget(env: AppEnv, options: ResolveOptions): Promise<LlmTarget> {
+  return (await resolveTargets(env, { ...options, fallbacks: false }))[0]!;
+}
+
+/**
+ * The model for a call (as `resolveTarget` picks it) followed by the job's fallback models, in order,
+ * leaving out any this person may not use or whose provider has no key. If the main model can't be
+ * used at all, the fallbacks are tried; only when none can be does this throw.
+ */
+export async function resolveTargets(env: AppEnv, options: ResolveOptions & { fallbacks?: boolean }): Promise<LlmTarget[]> {
   const db = env.DB;
   const userId = options.userId ?? null;
   const [defaults, available, providers] = await Promise.all([getDefaults(db), availableModels(db, userId), listProviders(db)]);
@@ -266,16 +286,35 @@ export async function resolveTarget(env: AppEnv, options: ResolveOptions): Promi
     model = byKey.get(modelKey({ providerId: wanted.provider, modelId: wanted.model }));
     effort = wanted.effort;
   }
+  let problem: string | null = null;
   if (!model) {
     const limited = userId ? await userModelKeys(db, userId) : null;
     if (limited && available[0]) model = available[0];
     else if (!wanted) throw new ProviderError("The answers AI isn't set up.");
-    else throw new ProviderError(`The model chosen for ${LLM_ACTIONS.find((each) => each.key === options.action)?.label.toLowerCase() ?? "this"} (${wanted.model}) isn't available. Check Admin → Answers AI.`);
+    else problem = `The model chosen for ${LLM_ACTIONS.find((each) => each.key === options.action)?.label.toLowerCase() ?? "this"} (${wanted.model}) isn't available. Check Admin → Answers AI.`;
   }
-  const provider = providers.find((each) => each.id === model!.providerId);
-  const apiKey = provider ? await getKey(db, env.APP_SECRET ?? "", provider.keySlot) : null;
-  if (!provider || !apiKey) throw new ProviderError(`The ${provider?.name ?? "answers AI"} key is missing or unreadable. Re-enter it in Admin → Answers AI.`);
-  return { kind: provider.kind, providerName: provider.name, baseUrl: provider.baseUrl.replace(/\/+$/u, ""), apiKey, model: model.modelId, effort: fitEffort(model, effort), contextWindow: model.contextWindow };
+  const picks: { model: LlmModel; effort: ReasoningEffort | null }[] = model ? [{ model, effort }] : [];
+  if (options.fallbacks !== false) {
+    for (const fallback of wanted?.fallbacks ?? []) {
+      const found = byKey.get(modelKey({ providerId: fallback.provider, modelId: fallback.model }));
+      if (found && !picks.some((pick) => pick.model === found)) picks.push({ model: found, effort: fallback.effort });
+    }
+  }
+  const targets: LlmTarget[] = [];
+  for (const pick of picks) {
+    const provider = providers.find((each) => each.id === pick.model.providerId);
+    const apiKey = provider ? await getKey(db, env.APP_SECRET ?? "", provider.keySlot) : null;
+    if (!provider || !apiKey) {
+      problem ??= `The ${provider?.name ?? "answers AI"} key is missing or unreadable. Re-enter it in Admin → Answers AI.`;
+      continue;
+    }
+    targets.push({
+      kind: provider.kind, providerName: provider.name, baseUrl: provider.baseUrl.replace(/\/+$/u, ""), apiKey,
+      model: pick.model.modelId, effort: fitEffort(pick.model, pick.effort), contextWindow: pick.model.contextWindow,
+    });
+  }
+  if (targets.length === 0) throw new ProviderError(problem ?? "The answers AI isn't set up.");
+  return targets;
 }
 
 // ---------------------------------------------------------------- calling a model
@@ -340,6 +379,29 @@ export async function chatCompletion(
   if (!Array.isArray(body?.choices)) throw new ProviderError(`${target.providerName} replied, but not in the OpenAI chat format.`);
   const choice = body.choices[0];
   return { content: typeof choice?.message?.content === "string" ? choice.message.content : null, finishReason: typeof choice?.finish_reason === "string" ? choice.finish_reason : null };
+}
+
+/**
+ * One chat completion from the first model that answers: each target in turn, moving on when one
+ * fails (out of quota, rate limited, down, or refusing the key). Returns the reply and the model that
+ * gave it. When all fail, the error names each model's failure.
+ */
+export async function chatWithFallback(
+  targets: readonly LlmTarget[], messages: readonly ChatMessage[], options: { maxTokens: number; timeoutMs: number; fetcher?: typeof fetch },
+): Promise<ChatResult & { target: LlmTarget }> {
+  const failures: string[] = [];
+  for (const target of targets) {
+    try {
+      return { ...await chatCompletion(target, messages, options), target };
+    } catch (error) {
+      if (!(error instanceof ProviderError)) throw error;
+      failures.push(error.message);
+      if (target !== targets.at(-1)) console.error("answers AI failed; trying the next model", target.model, error.message);
+    }
+  }
+  if (failures.length <= 1) throw new ProviderError(failures[0] ?? "The answers AI isn't set up.");
+  // The main model's error first, then the fallbacks', kept short enough to show whole on the dashboard.
+  throw new ProviderError(`Every model failed. ${failures.map((failure) => failure.length > 220 ? `${failure.slice(0, 219)}…` : failure).join(" Then: ")}`);
 }
 
 /** Sends one tiny request to confirm the endpoint, key and model work together. */

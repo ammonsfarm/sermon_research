@@ -3,8 +3,9 @@ import test from "node:test";
 
 import { putKey } from "../src/keys.ts";
 import {
-  availableModels, chatBody, fetchCatalog, getDefaults, listModels, listProviders, modelChoices, resolveTarget, saveUserModels,
+  availableModels, chatBody, fetchCatalog, getDefaults, listModels, listProviders, modelChoices, resolveTarget, resolveTargets, saveUserModels,
 } from "../src/llm.ts";
+import { chat } from "../src/research.ts";
 import { ensureSchema, MIGRATIONS, resetSchemaCache } from "../src/schema.ts";
 import { putSetting } from "../src/settings.ts";
 import { completeSetup, configureLlm, createApp, fakeProviders, indexedSite, runDocuments, SECRET } from "./helpers.ts";
@@ -252,6 +253,50 @@ test("the Ask box offers a model choice when there is one, and a document rememb
     assert.equal(site.providers.calls.findLast((call) => call.url.endsWith("/chat/completions"))!.url, "https://api.openai.com/v1/chat/completions", "an unknown choice falls back to the site default");
   } finally {
     site.restore();
+  }
+});
+
+test("when a job's model fails, its fallbacks are tried in order", async () => {
+  const app = createApp();
+  const cookie = await completeSetup(app);
+  await configureLlm(app.env, { provider: "meta", model: "muse-a" });
+  await configureLlm(app.env, { provider: "openai", model: "gpt-test", efforts: ["low", "high"] });
+  await configureLlm(app.env, { provider: "meta", model: "muse-b" });
+
+  const form = { summaryModel: "meta/muse-a", chatModel: "meta/muse-a", documentModel: "meta/muse-b" };
+  const bad = await app.request("/admin/llm/defaults", { form: { ...form, chatFallback1Model: "openai/gpt-test", chatFallback1Effort: "max" }, cookie });
+  assert.equal(bad.status, 400);
+  assert.match(await bad.text(), /Fallback 1: gpt-test doesn&#39;t take maximum effort/);
+  const saved = await app.request("/admin/llm/defaults", { form: {
+    ...form, summaryFallback1Model: "meta/muse-a", summaryFallback2Model: "openai/gpt-test", summaryFallback2Effort: "high", summaryFallback3Model: "openai/gpt-test",
+    chatFallback1Model: "", chatFallback2Model: "meta/muse-b",
+  }, cookie });
+  assert.equal(saved.headers.get("Location"), "/admin/llm?notice=saved#defaults");
+  assert.deepEqual(await getDefaults(app.env.DB), {
+    summary: { provider: "meta", model: "muse-a", effort: "low", fallbacks: [{ provider: "openai", model: "gpt-test", effort: "high" }] },
+    chat: { provider: "meta", model: "muse-a", effort: "low", fallbacks: [{ provider: "meta", model: "muse-b", effort: "low" }] },
+    document: { provider: "meta", model: "muse-b", effort: "low" },
+  }, "the main model and repeats are dropped, and a blank slot is skipped");
+  const page = await (await app.request("/admin/llm", { cookie })).text();
+  assert.match(page, /<select id="f-summary-fallback1-model" name="summaryFallback1Model"[^>]*><option value="">No fallback<\/option>[^]*?<option value="openai\/gpt-test"[^>]* selected>/);
+
+  const providers = fakeProviders({ "https://api.meta.ai/v1/chat/completions": 429 });
+  try {
+    assert.match(await chat(app.env, "You are a test.", "hi", { maxTokens: 10, timeoutMs: 1_000, action: "summary" }), /Grace is a gift/);
+    const tried = providers.calls.filter((call) => call.url.endsWith("/chat/completions"));
+    assert.deepEqual(tried.map((call) => (call.body as { model: string }).model), ["muse-a", "gpt-test"]);
+    assert.equal((tried[1]!.body as { reasoning_effort?: string }).reasoning_effort, "high", "the fallback's own effort");
+
+    await assert.rejects(chat(app.env, "You are a test.", "hi", { maxTokens: 10, timeoutMs: 1_000, action: "chat" }),
+      /^Error: Every model failed\. Meta \(Muse\) returned HTTP 429 for muse-a\.[^]* Then: Meta \(Muse\) returned HTTP 429 for muse-b\./);
+    assert.equal((await resolveTarget(app.env, { action: "summary" })).model, "muse-a", "the main model is still first");
+
+    // A main model that can't be used at all hands the job to its fallbacks.
+    await app.request("/admin/llm/model/toggle", { form: { key: "meta/muse-a" }, cookie });
+    assert.deepEqual((await resolveTargets(app.env, { action: "summary" })).map((target) => target.model), ["gpt-test"]);
+    await assert.rejects(resolveTarget(app.env, { action: "summary" }), /isn't available/);
+  } finally {
+    providers.restore();
   }
 });
 
