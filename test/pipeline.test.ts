@@ -257,6 +257,36 @@ test("a failed episode records the provider's error and can be retried from the 
   assert.equal(app.workflow.created.at(-1)?.id, `${episode!.id}-2`, "each attempt gets its own workflow id");
 });
 
+test("a working episode stuck retrying an error can be retried now, keeping its place", async () => {
+  const app = createApp();
+  const providers = fakeProviders();
+  try {
+    const cookie = await completeSetup(app, { count: 1 });
+    const [episode] = await episodes(app);
+    assert.equal(episode!.status, "running");
+    const quiet = await (await app.request("/admin/episodes", { cookie })).text();
+    assert.doesNotMatch(quiet, /Retry now/, "a healthy run isn't offered a restart");
+
+    await app.env.DB.prepare("UPDATE episodes SET last_error = 'Meta (Muse) returned HTTP 429 for muse. It said: \"Subscription quota exhausted.\"' WHERE id = ?").bind(episode!.id).run();
+    assert.match(await (await app.request("/admin/episodes", { cookie })).text(), /Last error: Meta \(Muse\) returned HTTP 429[\s\S]*action="\/admin\/episodes\/restart"[\s\S]*Retry now/);
+
+    const restarted = await app.request("/admin/episodes/restart", { form: { id: episode!.id }, cookie });
+    assert.match(decodeURIComponent(restarted.headers.get("Location") ?? ""), /Retrying now/);
+    assert.deepEqual(app.workflow.terminated, [`${episode!.id}-1`], "the waiting run is stopped");
+    assert.equal(app.workflow.created.at(-1)?.id, `${episode!.id}-2`, "and a new one starts straight away");
+    const [running] = await episodes(app);
+    assert.deepEqual([running!.status, running!.attempts], ["running", 2]);
+    assert.doesNotMatch(await (await app.request("/admin/episodes", { cookie })).text(), /Last error/, "the old error is cleared");
+
+    await app.env.DB.prepare("UPDATE episodes SET status = 'done', stage = NULL WHERE id = ?").bind(episode!.id).run();
+    const late = await app.request("/admin/episodes/restart", { form: { id: episode!.id }, cookie });
+    assert.match(decodeURIComponent(late.headers.get("Location") ?? ""), /isn't working any more/);
+    assert.equal(app.workflow.created.length, 2, "a finished episode isn't run again");
+  } finally {
+    providers.restore();
+  }
+});
+
 test("importing older episodes from the dashboard queues them all", async () => {
   const app = createApp();
   const providers = fakeProviders();
@@ -410,7 +440,7 @@ test("a summary cut off by the length limit gets a clear error", async () => {
   globalThis.fetch = (async () => Response.json({ choices: [{ finish_reason: "length", message: { content: "{\"summary\": \"Grace is" } }] })) as typeof fetch;
   try {
     await assert.rejects(
-      summarize({ target: target(), ministry: null, title: "T", publishedAt: null, transcript: "words" }),
+      summarize({ targets: [target()], ministry: null, title: "T", publishedAt: null, transcript: "words" }),
       /ran out of room/,
     );
   } finally {
@@ -427,9 +457,9 @@ test("summaries send the model's reasoning effort in the provider's own form", a
   }) as typeof fetch;
   try {
     const input = { ministry: null, title: "T", publishedAt: null, transcript: "words" };
-    await summarize({ ...input, target: target() });
-    await summarize({ ...input, target: target({ kind: "meta", effort: "medium" }) });
-    await summarize({ ...input, target: target({ kind: "openrouter", effort: "high" }) });
+    await summarize({ ...input, targets: [target()] });
+    await summarize({ ...input, targets: [target({ kind: "meta", effort: "medium" })] });
+    await summarize({ ...input, targets: [target({ kind: "openrouter", effort: "high" })] });
     assert.equal("reasoning_effort" in bodies[0]! || "reasoning" in bodies[0]!, false);
     assert.equal(bodies[1]!.reasoning_effort, "medium");
     assert.deepEqual(bodies[2]!.reasoning, { effort: "high" });

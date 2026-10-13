@@ -3,7 +3,7 @@ import { html, type Html, page } from "./html.ts";
 import { renderMarkdown } from "./markdown.ts";
 import { ProviderError } from "./providers.ts";
 import { embed, requireKey, type Segment } from "./pipeline.ts";
-import { chatCompletion, type LlmAction, resolveTarget } from "./llm.ts";
+import { chatWithFallback, type LlmAction, resolveTargets } from "./llm.ts";
 import { getSetting, getSetupStep, type Ministry, putSetting } from "./settings.ts";
 import { HOUR_MS, recordUse, startOfUtcDay, usedSince } from "./usage.ts";
 import type { AppEnv } from "./env.ts";
@@ -179,11 +179,10 @@ function toPassages(rows: readonly ChunkRow[], rank: (run: readonly ChunkRow[]) 
 /** Characters of sermon text a model can take: about half its context window at 3.5 characters a token, never less than SCOPED_FULL_CHARS or more than this cap. */
 const MAX_FULL_CHARS = 1_000_000;
 
-/** How much whole-sermon text to send to the model that will answer. */
+/** How much whole-sermon text to send to the model that will answer, or to the smallest of its fallbacks, so any of them can take it. */
 export async function sermonTextBudget(env: AppEnv, who: { userId?: string | null; model?: string | null }): Promise<number> {
-  const target = await resolveTarget(env, { action: "chat", userId: who.userId ?? null, choice: who.model ?? null });
-  const window = target.contextWindow;
-  return window ? Math.min(MAX_FULL_CHARS, Math.max(SCOPED_FULL_CHARS, Math.floor(window * 1.75))) : SCOPED_FULL_CHARS;
+  const targets = await resolveTargets(env, { action: "chat", userId: who.userId ?? null, choice: who.model ?? null });
+  return Math.min(...targets.map(({ contextWindow: window }) => window ? Math.min(MAX_FULL_CHARS, Math.max(SCOPED_FULL_CHARS, Math.floor(window * 1.75))) : SCOPED_FULL_CHARS));
 }
 
 export interface Retrieval {
@@ -298,13 +297,21 @@ export function parseNumbered<T>(content: string, count: number, read: (value: u
 /**
  * One chat completion from the answers AI. Sermon processing passes `action: "summary"` and document
  * writing `"document"`; the rest are chat. `userId` applies that person's limit on models, and `model`
- * is the one they picked ("provider/model"), used when they're allowed it.
+ * is the one they picked ("provider/model"), used when they're allowed it. When that model fails, the
+ * job's fallback models are tried in turn.
  */
 export async function chat(env: AppEnv, system: string, user: string, options: { maxTokens: number; timeoutMs: number; action?: LlmAction; userId?: string | null; model?: string | null }): Promise<string> {
-  const target = await resolveTarget(env, { action: options.action ?? "chat", userId: options.userId ?? null, choice: options.model ?? null });
-  const { content } = await chatCompletion(target, [{ role: "system", content: system }, { role: "user", content: user }], options);
+  return (await chatWithModel(env, system, user, options)).content;
+}
+
+/** `chat`, also saying which model answered. */
+export async function chatWithModel(
+  env: AppEnv, system: string, user: string, options: { maxTokens: number; timeoutMs: number; action?: LlmAction; userId?: string | null; model?: string | null },
+): Promise<{ content: string; model: string }> {
+  const targets = await resolveTargets(env, { action: options.action ?? "chat", userId: options.userId ?? null, choice: options.model ?? null });
+  const { content, target } = await chatWithFallback(targets, [{ role: "system", content: system }, { role: "user", content: user }], options);
   if (!content?.trim()) throw new ProviderError("The answers AI returned an empty answer.");
-  return content.trim();
+  return { content: content.trim(), model: target.model };
 }
 
 /** Earlier questions and answers in a conversation, oldest first. */

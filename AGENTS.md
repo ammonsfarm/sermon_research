@@ -15,8 +15,8 @@ before anything in the "Ask first" list below.
 | `src/schema.ts` | Database migrations; the Worker applies them itself on first request |
 | `src/settings.ts` | Key-value settings stored in D1 (ministry details, provider choices, wizard progress) |
 | `src/steps.ts` | Wizard and admin pages for the podcast feed, embeddings, transcription and email, and the wizard's first answers-AI step |
-| `src/llm.ts` | Answers-AI providers and models: the five built-in providers, how each one's chat request differs (`chatBody`), listing a provider's models and working out their reasoning levels (`fetchCatalog`), site defaults per job, per-person limits, and `resolveTarget`, which picks the model for a call |
-| `src/llm-admin.ts` | Admin → Answers AI (`/admin/llm/*`): providers and keys, pulling and adding models, the model and effort for each job, and models per person |
+| `src/llm.ts` | Answers-AI providers and models: the five built-in providers, how each one's chat request differs (`chatBody`), listing a provider's models and working out their reasoning levels (`fetchCatalog`), site defaults and fallbacks per job, per-person limits, `resolveTargets`, which picks the models for a call, and `chatWithFallback`, which tries them in turn |
+| `src/llm-admin.ts` | Admin → Answers AI (`/admin/llm/*`): providers and keys, pulling and adding models, the model, effort and fallbacks for each job, and models per person |
 | `src/feed.ts` | Podcast RSS fetch and parse, including each episode's description and author |
 | `src/providers.ts` | Live checks and calls to OpenAI-compatible APIs, OpenAI embeddings, Mistral, Muse transcription (with its error messages) and Resend |
 | `src/keys.ts` | API keys stored AES-GCM encrypted in `provider_keys` |
@@ -177,11 +177,19 @@ first request after each deploy.
   admin adds all or some to `llm_models`, each with the reasoning levels it
   takes (editable per model). Then one model and effort is chosen for each
   job (the `llm_defaults` setting): summaries and sermon processing, chat,
-  and document creation. A person can be limited to some models
+  and document creation. Each job can also have up to three fallback models
+  (`fallbacks` in that setting, each with its own effort): when a call fails
+  for any reason the provider reports (out of quota, rate limited, down, a
+  refused key), `chatWithFallback` tries them in order, and only when every
+  one fails does the call fail, with each model's error in the message. A
+  person's own choice falls back to the same list. Fallbacks the person may
+  not use or whose provider has no key are skipped, and a main model that's
+  turned off hands the job to them. `transcripts.cleaned_by` and
+  `summaries.model` name the model that actually answered. A person can be limited to some models
   (`user_llm_models`; none means the site list); the Ask box shows a Model
   picker when someone has two or more, and a document keeps the choice in
   `documents.model`. Code calls `chat(env, ..., { action, userId, model })` or
-  `resolveTarget` + `chatCompletion`; never build a chat request by hand.
+  `resolveTargets` + `chatWithFallback`; never build a chat request by hand.
   The providers differ, and `chatBody` handles it: OpenAI wants
   `max_completion_tokens` and `reasoning_effort` (its model list has only ids,
   so levels are inferred from names: o-series low to high, GPT-5 minimal to
@@ -229,7 +237,12 @@ first request after each deploy.
   series), the speaker or the start of the date (2024-10), and the status
   menu shows how many each status has.
 - **An episode is stuck on "Working":** runs that report nothing for 6 hours
-  are marked failed by the next hourly tick, and can then be retried.
+  are marked failed by the next hourly tick, and can then be retried. A
+  working episode showing "Last error" (Workflows is waiting to retry the
+  step, up to several minutes) or quiet for 20 minutes has a "Retry now"
+  button: it terminates that workflow run and starts the next attempt
+  straight away (`restartEpisode`), which carries on from the saved progress
+  with the current model choices. Use it after changing a model or key.
 - **Process more or fewer episodes at once:** Admin → Episodes → "Episodes
   at once" (1 to 5, default 2). Use 1 for free or low-limit provider plans.
 - **Transcription service:** Admin → Transcription chooses Mistral (the

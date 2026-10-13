@@ -1,6 +1,6 @@
 import type { AppEnv } from "./env.ts";
 import type { Segment } from "./pipeline.ts";
-import { chat } from "./research.ts";
+import { chatWithModel } from "./research.ts";
 import type { Ministry } from "./settings.ts";
 
 /** What the answers AI is told. The segments follow in the user message as JSON with their IDs. */
@@ -29,16 +29,16 @@ export function batchEnd(segments: readonly Segment[], first: number, budget = B
   return Math.min(end, segments.length);
 }
 
-/** Cleans one batch of segments. IDs count from 1 across the whole transcript. */
-export async function cleanSegments(env: AppEnv, ministry: Ministry | null, title: string, segments: readonly Segment[], first: number): Promise<string[]> {
+/** Cleans one batch of segments, and says which model did it. IDs count from 1 across the whole transcript. */
+export async function cleanSegments(env: AppEnv, ministry: Ministry | null, title: string, segments: readonly Segment[], first: number): Promise<{ texts: string[]; model: string }> {
   const items: CleanupItem[] = segments.map((segment, offset) => ({ id: first + offset + 1, text: segment.text }));
   const context = [
     `Sermon: "${title}"`,
     ministry?.churchName ? `Church: ${ministry.churchName}` : "",
     ministry?.speakerNames.length ? `Speakers at this church include: ${ministry.speakerNames.join(", ")}` : "",
   ].filter(Boolean).join("\n");
-  const reply = await chat(env, CLEANUP_PROMPT, `${context}\n\nSegments:\n${JSON.stringify(items)}`, { maxTokens: MAX_TOKENS, timeoutMs: TIMEOUT_MS, action: "summary" });
-  return mergeCleaned(items, reply);
+  const reply = await chatWithModel(env, CLEANUP_PROMPT, `${context}\n\nSegments:\n${JSON.stringify(items)}`, { maxTokens: MAX_TOKENS, timeoutMs: TIMEOUT_MS, action: "summary" });
+  return { texts: mergeCleaned(items, reply.content), model: reply.model };
 }
 
 /**

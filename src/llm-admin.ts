@@ -3,7 +3,7 @@ import { field, html, type Html, page } from "./html.ts";
 import { getKey, putKey } from "./keys.ts";
 import {
   availableModels, type CatalogModel, checkTarget, describeModel, EFFORT_LABELS, fetchCatalog, fitEffort, getDefaults, getProvider, KIND_NAMES, KIND_NOTES,
-  LLM_ACTIONS, type LlmChoice, type LlmDefaults, type LlmModel, type LlmProvider, listModels, listProviders, modelKey, parseModelKey,
+  LLM_ACTIONS, type LlmChoice, type LlmDefaults, type LlmModel, type LlmProvider, listModels, listProviders, MAX_FALLBACKS, modelKey, type ModelPick, parseModelKey,
   removeModel, saveDefaults, saveModel, saveUserModels, userModelKeys,
 } from "./llm.ts";
 import { isHttpsUrl, isReasoningEffort, ProviderError, REASONING_EFFORTS, type ReasoningEffort } from "./providers.ts";
@@ -113,16 +113,28 @@ function providerNames(providers: readonly LlmProvider[]): Map<string, string> {
   return new Map(providers.map((provider) => [provider.id, provider.name]));
 }
 
+function modelSelect(id: string, name: string, usable: readonly LlmModel[], providers: Map<string, string>, current: ModelPick | undefined, none?: string): Html {
+  return html`<select id="${id}" name="${name}" data-effort-select="${id.replace(/-model$/u, "-effort")}"${none ? html` aria-label="Fallback model"` : ""}>${none ? html`<option value="">${none}</option>` : ""}${usable.map((model) => html`<option value="${modelKey(model)}" data-efforts="${model.efforts.join(",")}"${current && current.provider === model.providerId && current.model === model.modelId ? html` selected` : ""}>${providers.get(model.providerId) ?? model.providerId} · ${model.label}</option>`)}</select>`;
+}
+
 function defaultsForm(defaults: LlmDefaults, usable: readonly LlmModel[], providers: Map<string, string>, errors: Record<string, string> = {}): Html {
-  return html`<p class="hint">Reasoning effort only applies to models that take it; the options update when you pick a model.</p>
+  return html`<p class="hint">Reasoning effort only applies to models that take it; the options update when you pick a model.
+When a job's model fails (out of quota, rate limited, down, or refusing the key), its fallbacks are tried in order, so a sermon or an answer still gets done. Fallbacks from another provider cover that provider's outages too.</p>
 ${usable.length === 0 ? html`<p class="empty">Add at least one model first.</p>` : html`<form method="post" action="/admin/llm/defaults">
 ${LLM_ACTIONS.map(({ key, label, hint }) => {
     const current = defaults[key];
     const selectId = `f-${key}-model`;
     return html`<div class="field${errors[key] ? " invalid" : ""}"><label for="${selectId}">${label}</label>
 <p class="hint">${hint}</p>
-<div class="row"><select id="${selectId}" name="${key}Model" data-effort-select="f-${key}-effort">${usable.map((model) => html`<option value="${modelKey(model)}" data-efforts="${model.efforts.join(",")}"${current && current.provider === model.providerId && current.model === model.modelId ? html` selected` : ""}>${providers.get(model.providerId) ?? model.providerId} · ${model.label}</option>`)}</select>
+<div class="row">${modelSelect(selectId, `${key}Model`, usable, providers, current)}
 ${effortSelect(`f-${key}-effort`, `${key}Effort`, current?.effort ?? null, selectId)}</div>
+${Array.from({ length: MAX_FALLBACKS }, (_unused, index) => {
+      const fallback = current?.fallbacks?.[index];
+      const id = `f-${key}-fallback${index + 1}-model`;
+      return html`<div class="row"><span class="hint">${index === 0 ? "If it fails, try" : "then"}</span>
+${modelSelect(id, `${key}Fallback${index + 1}Model`, usable, providers, fallback, index === 0 ? "No fallback" : "Nothing else")}
+${effortSelect(`f-${key}-fallback${index + 1}-effort`, `${key}Fallback${index + 1}Effort`, fallback?.effort ?? null, id)}</div>`;
+    })}
 ${errors[key] ? html`<p class="error">${errors[key]}</p>` : ""}</div>`;
   })}
 <button type="submit">Save choices</button>
@@ -351,6 +363,20 @@ async function editModel(context: Context): Promise<Response> {
   return redirect("/admin/llm?notice=saved#models");
 }
 
+/** A model and effort from the form, or an error to show. A blank model is null when `optional`. */
+function pickFrom(form: FormData, prefix: string, byKey: Map<string, LlmModel>, optional: boolean): ModelPick | null | string {
+  const value = text(form, `${prefix}Model`, 300);
+  const wanted = text(form, `${prefix}Effort`, 20);
+  if (!value && optional) return null;
+  const model = byKey.get(value);
+  if (!model) return "Choose a model from the list.";
+  if (wanted && !isReasoningEffort(wanted)) return "Choose a reasoning effort from the list.";
+  if (wanted && model.efforts.length > 0 && !model.efforts.includes(wanted as ReasoningEffort)) {
+    return `${model.label} doesn't take ${EFFORT_LABELS[wanted as ReasoningEffort].toLowerCase()} effort. It takes ${model.efforts.map((effort) => EFFORT_LABELS[effort].toLowerCase()).join(", ")}.`;
+  }
+  return { provider: model.providerId, model: model.modelId, effort: fitEffort(model, wanted ? wanted as ReasoningEffort : null) };
+}
+
 async function saveChoices(context: Context): Promise<Response> {
   const form = await context.request.formData();
   const usable = await availableModels(context.db);
@@ -358,17 +384,19 @@ async function saveChoices(context: Context): Promise<Response> {
   const chosen: Record<string, LlmChoice> = {};
   const errors: Record<string, string> = {};
   for (const { key } of LLM_ACTIONS) {
-    const model = byKey.get(text(form, `${key}Model`, 300));
-    const wanted = text(form, `${key}Effort`, 20);
-    if (!model) {
-      errors[key] = "Choose a model from the list.";
-    } else if (wanted && !isReasoningEffort(wanted)) {
-      errors[key] = "Choose a reasoning effort from the list.";
-    } else if (wanted && model.efforts.length > 0 && !model.efforts.includes(wanted as ReasoningEffort)) {
-      errors[key] = `${model.label} doesn't take ${EFFORT_LABELS[wanted as ReasoningEffort].toLowerCase()} effort. It takes ${model.efforts.map((effort) => EFFORT_LABELS[effort].toLowerCase()).join(", ")}.`;
-    } else {
-      chosen[key] = { provider: model.providerId, model: model.modelId, effort: fitEffort(model, wanted ? wanted as ReasoningEffort : null) };
+    const main = pickFrom(form, key, byKey, false);
+    if (typeof main === "string" || main === null) {
+      errors[key] = main ?? "Choose a model from the list.";
+      continue;
     }
+    const fallbacks: ModelPick[] = [];
+    for (let index = 1; index <= MAX_FALLBACKS; index++) {
+      const fallback = pickFrom(form, `${key}Fallback${index}`, byKey, true);
+      if (typeof fallback === "string") errors[key] = `Fallback ${index}: ${fallback}`;
+      // The main model or one already listed adds nothing.
+      else if (fallback && ![main, ...fallbacks].some((pick) => pick.provider === fallback.provider && pick.model === fallback.model)) fallbacks.push(fallback);
+    }
+    chosen[key] = fallbacks.length ? { ...main, fallbacks } : main;
   }
   if (Object.keys(errors).length > 0) {
     const names = providerNames(await listProviders(context.db));

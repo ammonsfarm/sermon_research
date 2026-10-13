@@ -8,7 +8,7 @@ import type { AppEnv } from "./env.ts";
 import { getKey } from "./keys.ts";
 import { EMBEDDING_MODEL, MISTRAL_TRANSCRIPTION_MODEL, MUSE_TRANSCRIPTION_MODEL, MuseTranscribeError, museTranscribe, ProviderError, withUserAgent } from "./providers.ts";
 import { formatTime } from "./research.ts";
-import { chatCompletion, type LlmTarget, resolveTarget } from "./llm.ts";
+import { chatWithFallback, type LlmTarget, resolveTargets } from "./llm.ts";
 import { getSetting, type Ministry, putSetting, type TranscriptionSettings } from "./settings.ts";
 import { normalizeReference } from "./scriptures.ts";
 import { identifySpeakers } from "./speakers.ts";
@@ -104,8 +104,7 @@ export async function runEpisode(env: AppEnv, step: PipelineStep, episodeId: str
 
     await step.do("clean transcript", CLEAN, tracked(db, episodeId, "transcribe", "Cleaning up the transcript", async () => {
       if (!(await redoing(db, episodeId, "rewrite")) && await db.prepare("SELECT 1 FROM transcripts WHERE episode_id = ?").bind(episodeId).first()) return;
-      const [target, ministry, draft] = await Promise.all([
-        resolveTarget(env, { action: "summary" }),
+      const [ministry, draft] = await Promise.all([
         getSetting<Ministry>(db, "ministry"),
         db.prepare("SELECT e.title, d.segments_json, d.cleaned_json, d.model FROM transcripts_draft d JOIN episodes e ON e.id = d.episode_id WHERE d.episode_id = ?")
           .bind(episodeId).first<{ title: string; segments_json: string; cleaned_json: string | null; model: string }>(),
@@ -113,34 +112,39 @@ export async function runEpisode(env: AppEnv, step: PipelineStep, episodeId: str
       if (!draft) throw new ProviderError("The draft transcript is missing.");
       const segments = JSON.parse(draft.segments_json) as Segment[];
       const cleaned = draft.cleaned_json ? JSON.parse(draft.cleaned_json) as string[] : [];
+      // A fallback model may do some batches, so every model used is named.
+      const models = new Set<string>();
       while (cleaned.length < segments.length) {
         await setDetail(db, episodeId, `Cleaning up the transcript with the answers AI (${Math.floor(cleaned.length / segments.length * 100)}% done)`);
         const first = cleaned.length;
-        cleaned.push(...await cleanSegments(env, ministry, draft.title, segments.slice(first, batchEnd(segments, first)), first));
+        const batch = await cleanSegments(env, ministry, draft.title, segments.slice(first, batchEnd(segments, first)), first);
+        cleaned.push(...batch.texts);
+        models.add(batch.model);
         await db.prepare("UPDATE transcripts_draft SET cleaned_json = ? WHERE episode_id = ?").bind(JSON.stringify(cleaned), episodeId).run();
       }
       const clean = segments.map((segment, index) => ({ ...segment, text: cleaned[index] ?? segment.text }));
+      const cleanedBy = models.size ? [...models].join(", ") : (await resolveTargets(env, { action: "summary" }))[0]!.model;
       await db.batch([
         db.prepare("INSERT OR REPLACE INTO transcripts (episode_id, text, segments_json, model, created_at, cleaned_by) VALUES (?, ?, ?, ?, ?, ?)")
-          .bind(episodeId, joined(clean), JSON.stringify(clean), draft.model, new Date().toISOString(), target.model),
+          .bind(episodeId, joined(clean), JSON.stringify(clean), draft.model, new Date().toISOString(), cleanedBy),
         redone(db, episodeId, "rewrite"),
       ]);
     }));
 
     await step.do("summarize", SUMMARIZE, tracked(db, episodeId, "summarize", "Writing the summary", async () => {
       if (!(await redoing(db, episodeId, "summary")) && await db.prepare("SELECT 1 FROM summaries WHERE episode_id = ?").bind(episodeId).first()) return;
-      const [target, ministry, row] = await Promise.all([
-        resolveTarget(env, { action: "summary" }),
+      const [targets, ministry, row] = await Promise.all([
+        resolveTargets(env, { action: "summary" }),
         getSetting<Ministry>(db, "ministry"),
         db.prepare("SELECT e.title, e.published_at, t.text FROM episodes e JOIN transcripts t ON t.episode_id = e.id WHERE e.id = ?")
           .bind(episodeId).first<{ title: string; published_at: string | null; text: string }>(),
       ]);
       if (!row) throw new ProviderError("The transcript is missing.");
-      const result = await summarize({ target, ministry, title: row.title, publishedAt: row.published_at, transcript: row.text });
+      const result = await summarize({ targets, ministry, title: row.title, publishedAt: row.published_at, transcript: row.text });
       // A null main passage is left for the hourly catch-up to look at again, which records an empty one if there truly isn't one.
       await db.batch([
         db.prepare("INSERT OR REPLACE INTO summaries (episode_id, summary, topics_json, scriptures_json, model, created_at, main_scripture) VALUES (?, ?, ?, ?, ?, ?, ?)")
-          .bind(episodeId, result.summary, JSON.stringify(result.topics), JSON.stringify(result.scriptures), target.model, new Date().toISOString(), result.mainScripture),
+          .bind(episodeId, result.summary, JSON.stringify(result.topics), JSON.stringify(result.scriptures), result.model, new Date().toISOString(), result.mainScripture),
         redone(db, episodeId, "summary"),
       ]);
     }));
@@ -284,7 +288,8 @@ function joined(segments: readonly Segment[]): string {
 
 /** Workflows re-create errors between steps, so rely on the message rather than the class. */
 function describeError(error: unknown): string {
-  return (error instanceof Error ? error.message : String(error)).slice(0, 500) || "Unknown error.";
+  // Long enough for each model's error when every fallback failed.
+  return (error instanceof Error ? error.message : String(error)).slice(0, 1_000) || "Unknown error.";
 }
 
 async function setDetail(db: D1Database, episodeId: string, detail: string): Promise<void> {
@@ -341,27 +346,28 @@ export async function transcribe(audioUrl: string, apiKey: string): Promise<Segm
   throw new ProviderError("Mistral returned an empty transcript. Check that the audio link in the feed plays.");
 }
 
+/** Summarizes with the first of `targets` that answers; the rest are the job's fallbacks. */
 export async function summarize(input: {
-  target: LlmTarget;
+  targets: readonly LlmTarget[];
   ministry: Ministry | null;
   title: string;
   publishedAt: string | null;
   transcript: string;
   fetcher?: typeof fetch;
-}): Promise<SermonSummary> {
+}): Promise<SermonSummary & { model: string }> {
   const speakers = input.ministry?.speakerNames.length ? ` Speakers include ${input.ministry.speakerNames.join(", ")}.` : "";
   const church = input.ministry?.churchName ?? "a church";
   const system = `You summarize sermons from ${church}.${speakers} Use only what the transcript says. Reply with only a JSON object: {"summary": "2 to 4 short paragraphs", "mainScripture": "the passage the sermon preaches from, as one reference like Matthew 5:21-26, or null for a topical sermon without one", "topics": ["3 to 8 short topics"], "scriptures": ["every Bible reference discussed, like John 3:16, with the main passage first"]}. The main passage is usually announced or read near the start ("turn with me to Matthew 5, verses 21 through 26"); a verse quoted in passing isn't it.`;
   const transcript = input.transcript.length > SUMMARY_INPUT_CHARS ? `${input.transcript.slice(0, SUMMARY_INPUT_CHARS)} [transcript truncated]` : input.transcript;
   // Generous because thinking models (Gemini 3.x, o-series) can spend part of this before replying.
-  const result = await chatCompletion(input.target, [
+  const result = await chatWithFallback(input.targets, [
     { role: "system", content: system },
     { role: "user", content: `Title: ${input.title}\nDate: ${input.publishedAt?.slice(0, 10) ?? "unknown"}\n\nTranscript:\n${transcript}` },
   ], { maxTokens: SUMMARY_MAX_TOKENS, timeoutMs: 4 * 60_000, ...(input.fetcher ? { fetcher: input.fetcher } : {}) });
   if (result.finishReason === "length" && !(result.content ?? "").includes("}")) {
     throw new ProviderError("The answers AI ran out of room before finishing the summary. Try a model that thinks less, or retry.");
   }
-  return parseSummary(result.content);
+  return { ...parseSummary(result.content), model: result.target.model };
 }
 
 /** Accepts JSON with or without Markdown fences or surrounding prose. */
