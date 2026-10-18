@@ -26,11 +26,11 @@ interface SermonCard {
 const SELECT_CARDS = `SELECT e.id, e.title, e.published_at, e.speaker, s.summary, s.main_scripture, s.topics_json, s.scriptures_json
   FROM episodes e LEFT JOIN summaries s ON s.episode_id = e.id WHERE e.status = 'done'`;
 
-function likePattern(query: string): string {
+export function likePattern(query: string): string {
   return `%${query.replace(/[\\%_]/gu, (char) => `\\${char}`)}%`;
 }
 
-function parseList(json: string | null): string[] {
+export function parseList(json: string | null): string[] {
   try {
     const value = JSON.parse(json ?? "[]") as unknown;
     return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];

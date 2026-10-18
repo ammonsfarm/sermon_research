@@ -38,6 +38,8 @@ before anything in the "Ask first" list below.
 | `src/research.ts` | Retrieval (whole sermons for a narrow scope or by choice, within a budget taken from the model's context window; otherwise Vectorize hits with the chunks around them, filtered to a scope), cited answers, sources, question limits and research access settings |
 | `src/documents.ts`, `src/markdown.ts` | Markdown documents written from the sermons (outline, study questions, custom): starting one, its page (live progress while it's written, Try again if it failed) and `.md` download; a small Markdown renderer that escapes everything it doesn't handle |
 | `src/writing.ts` | How a document is written, in the background: the answers AI picks the sermons from a catalog (titles, dates, scripture, topics) and splits long requests into parts, then each part is written from the full transcripts of its sermons, and the parts are joined with their citations renumbered |
+| `src/api.ts` | The read-only JSON API under `/api/v1` (search, sermons, one sermon, filters) and its OpenAPI description |
+| `src/api-keys.ts` | API keys (only a SHA-256 is stored), the per-key hourly limit, and Admin → API keys |
 | `src/members.ts` | Member invites, invite acceptance, removing members |
 | `src/usage.ts` | Hourly and daily counters for questions and searches |
 | `src/context.ts` | Request context and shared redirects |
@@ -91,6 +93,24 @@ first request after each deploy.
 - **A member forgot their password:** an admin opens Admin → Members and
   presses "New invite link" next to them. The link lets them choose a new
   password and signs them out elsewhere.
+- **Connect a Custom GPT or another system:** an admin creates a key in
+  Admin → API keys (shown once; only a hash is kept). In ChatGPT: edit the
+  GPT → Configure → Create new action → Import from URL
+  `https://<site>/api/v1/openapi.json`, then Authentication → API Key →
+  Bearer, and paste the key. Endpoints, all GET with
+  `Authorization: Bearer <key>`: `/api/v1/search?q=` (the closest passages
+  with their neighbours, as the Ask box gets, made by `retrieve` with
+  `mode: "search"`), `/api/v1/sermons` (list with `q`, `sort`, `limit`,
+  `offset`), `/api/v1/sermons/{id}` (`transcript=true` for the whole text) and
+  `/api/v1/filters` (series, speakers, dates). `series`, `speaker`, `from`,
+  `to` and `sermon_id` filter search and the list; speaker matches part of
+  the name. The API ignores Admin → Research access: a key always works, and
+  revoking it stops it at once. Each key gets `API_REQUESTS_PER_HOUR` (600)
+  requests an hour, counted in `login_attempts` under `api:<key id>`. Search
+  costs one embeddings call and no answers-AI calls. `/api/` requests skip
+  sessions and the cross-site POST check, and only GET is answered. If you
+  add an endpoint, add it to `openApi` too and keep each operation's
+  description under 300 characters (GPT Actions' limit).
 - **Make the research page public or change the daily cap:** Admin →
   Research access. Public visitors get 20 questions an hour each; signed-in
   people get 60. The daily cap covers everyone but admins and resets at
