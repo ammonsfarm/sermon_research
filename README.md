@@ -110,6 +110,12 @@ assistant at this repo. [AGENTS.md](AGENTS.md) tells it how to help.
 - Members-only by default: admins invite members by link (emailed too when
   email is set up). A switch in Admin makes it public, with per-visitor hourly
   limits and a daily cap on questions to control AI spending
+- An API for other systems, such as a Custom GPT or your church website:
+  semantic search that returns cited passages, sermon lists and details
+  (with full transcripts on request), and an OpenAPI description a Custom GPT
+  imports from `/api/v1/openapi.json`. Admins create and revoke keys in
+  Admin → API keys. The other system writes its own answers, so the API
+  spends nothing on your answers AI
 
 ## Roadmap
 

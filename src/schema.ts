@@ -280,6 +280,22 @@ export const MIGRATIONS: readonly Migration[] = [
       ...legacyAnswersAi(),
     ],
   },
+  {
+    version: 16,
+    statements: [
+      // Keys other systems (a Custom GPT, a church website) use to read the sermons through /api/v1.
+      // Only a SHA-256 of each key is kept; prefix is its first characters, so an admin can tell keys apart.
+      `CREATE TABLE IF NOT EXISTS api_keys (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        token_hash TEXT NOT NULL UNIQUE,
+        prefix TEXT NOT NULL,
+        created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+        created_at TEXT NOT NULL,
+        last_used_at TEXT
+      )`,
+    ],
+  },
 ];
 
 /**

@@ -20,6 +20,8 @@ import { timingSafeEqual } from "./crypto.ts";
 import { clientIp, type Context, redirect, requireAdmin, chrome } from "./context.ts";
 import type { AppEnv } from "./env.ts";
 import { APP_SCRIPT, STYLESHEET } from "./assets.ts";
+import { api } from "./api.ts";
+import { apiKeysPage, revokeApiKey } from "./api-keys.ts";
 import { page, SECURITY_HEADERS } from "./html.ts";
 import { serveAudio } from "./audio.ts";
 import { ask, conversation, deleteConversation, home, library, researchRedirect } from "./ask.ts";
@@ -68,6 +70,11 @@ export default {
     }
     if (url.pathname === "/assets/app.js") {
       return new Response(APP_SCRIPT, { headers: { "Content-Type": "text/javascript; charset=utf-8", "Cache-Control": "public, max-age=3600", ...SECURITY_HEADERS } });
+    }
+    if (url.pathname.startsWith("/api/")) {
+      // Other systems call the API with a key, never a session cookie, so it skips the session and the cross-site form check.
+      await ensureSchema(env.DB);
+      return api(request, env, url);
     }
     if (request.method === "POST" && !isSameOrigin(request, url)) {
       return new Response("Cross-site form submissions are not allowed.", { status: 403 });
@@ -136,6 +143,9 @@ async function route(context: Context): Promise<Response> {
     case "POST /admin/members": return membersPage(context);
     case "POST /admin/members/invite": return reinviteMember(context);
     case "POST /admin/members/remove": return removeMember(context);
+    case "GET /admin/api":
+    case "POST /admin/api": return apiKeysPage(context);
+    case "POST /admin/api/revoke": return revokeApiKey(context);
     case "GET /invite": return showInvite(context);
     case "POST /invite": return acceptInvite(context);
     default: {
