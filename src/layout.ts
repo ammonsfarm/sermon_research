@@ -5,16 +5,17 @@ import { modeSwitch, type Mode } from "./theme.ts";
 interface Place { readonly path: string; readonly signedIn: boolean; readonly admin: boolean; readonly researchOpen: boolean }
 
 /** Which main tab a path belongs to. */
-function section(path: string): "ask" | "sermons" | "library" | "admin" | null {
+function section(path: string): "ask" | "sermons" | "bible" | "library" | "admin" | null {
   if (path === "/" || path === "/research" || path.startsWith("/ask/")) return "ask";
   if (path.startsWith("/episodes")) return "sermons";
+  if (path.startsWith("/bible")) return "bible";
   if (path.startsWith("/library") || path.startsWith("/documents")) return "library";
   if (path.startsWith("/admin")) return "admin";
   return null;
 }
 
 /** The main navigation and account links shown in the header of every page after setup. */
-export function siteHeader(session: Session | null, path: string, researchOpen: boolean, mode: Mode = "system", back = path): Html {
+export function siteHeader(session: Session | null, path: string, researchOpen: boolean, mode: Mode = "system", back = path, bible = false): Html {
   const place: Place = { path, signedIn: Boolean(session), admin: session?.user.role === "admin", researchOpen };
   if (path.startsWith("/setup")) return html``;
   const current = section(path);
@@ -22,6 +23,7 @@ export function siteHeader(session: Session | null, path: string, researchOpen: 
     html`<a href="${href}"${current === key ? html` aria-current="page"` : ""}>${label}</a>`;
   const tabs: Html[] = [];
   if (place.signedIn || place.researchOpen) tabs.push(link("ask", "/", "Ask"), link("sermons", "/episodes", "Sermons"));
+  if (bible && (place.signedIn || place.researchOpen)) tabs.push(link("bible", "/bible", "Bible"));
   if (place.signedIn) tabs.push(link("library", "/library", "Library"));
   if (place.admin) tabs.push(link("admin", "/admin", "Admin"));
   return html`${tabs.length ? html`<nav class="tabs-main" aria-label="Main">${tabs}</nav>` : ""}
@@ -32,7 +34,7 @@ export function siteHeader(session: Session | null, path: string, researchOpen: 
 
 const ADMIN_MENU: readonly (readonly [string, readonly (readonly [string, string])[]])[] = [
   ["Site", [["/admin", "Overview"], ["/admin/ministry", "Ministry"], ["/admin/members", "Members"], ["/admin/research", "Access"], ["/admin/api", "API keys"]]],
-  ["Sermons", [["/admin/episodes", "Episodes"], ["/admin/schedule", "Schedule"], ["/admin/podcast", "Podcast feed"]]],
+  ["Sermons", [["/admin/episodes", "Episodes"], ["/admin/schedule", "Schedule"], ["/admin/podcast", "Podcast feed"], ["/admin/bible", "Bible"]]],
   ["AI connections", [["/admin/llm", "Answers AI"], ["/admin/embeddings", "Embeddings"], ["/admin/transcription", "Transcription"], ["/admin/email", "Email"]]],
 ];
 

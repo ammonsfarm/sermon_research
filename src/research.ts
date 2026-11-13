@@ -3,6 +3,7 @@ import { html, type Html, page } from "./html.ts";
 import { renderMarkdown } from "./markdown.ts";
 import { ProviderError } from "./providers.ts";
 import { embed, requireKey, type Segment } from "./pipeline.ts";
+import { BIBLE_VECTOR_OWNER, bibleState } from "./bible.ts";
 import { chatWithFallback, type LlmAction, resolveTargets } from "./llm.ts";
 import { getSetting, getSetupStep, type Ministry, putSetting } from "./settings.ts";
 import { HOUR_MS, recordUse, startOfUtcDay, usedSince } from "./usage.ts";
@@ -111,17 +112,20 @@ const MAX_TOP_K = 100;
 
 /**
  * Vector ids are `${episodeId}:${seq}`, matching rows in `chunks`. With
- * `episodeIds`, only passages from those episodes are returned.
+ * `episodeIds`, only passages from those episodes are returned. Once the Bible
+ * is in the same index, its passages are filtered out, so they never take the
+ * place of a sermon's.
  */
 export async function nearest(env: AppEnv, text: string, topK: number, episodeIds: readonly string[] | null = null): Promise<{ id: string; score: number }[]> {
   if (episodeIds?.length === 0) return [];
   const [vector] = await embed([text], await requireKey(env, "embeddings"));
   const filtered = episodeIds && episodeIds.length <= MAX_FILTER_IDS;
+  const filter = filtered ? { episodeId: { $in: [...episodeIds] } } : (await bibleState(env.DB))?.passages ? { episodeId: { $ne: BIBLE_VECTOR_OWNER } } : null;
   const result = await env.VECTORS.query(vector!, {
     topK: episodeIds && !filtered ? MAX_TOP_K : topK,
     returnMetadata: "none",
     returnValues: false,
-    ...(filtered ? { filter: { episodeId: { $in: [...episodeIds] } } } : {}),
+    ...(filter ? { filter } : {}),
   });
   const allowed = episodeIds ? new Set(episodeIds) : null;
   return result.matches

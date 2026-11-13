@@ -1,6 +1,7 @@
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
 
 import { dispatchQueued } from "./episodes.ts";
+import { importBible } from "./bible.ts";
 import type { AppEnv } from "./env.ts";
 import { runEpisode } from "./pipeline.ts";
 import { ensureSchema } from "./schema.ts";
@@ -30,5 +31,13 @@ export class DocumentWorkflow extends WorkflowEntrypoint<AppEnv, DocumentParams>
   override async run(event: WorkflowEvent<DocumentParams>, step: WorkflowStep): Promise<void> {
     await ensureSchema(this.env.DB);
     await writeDocument(this.env, step, event.payload.documentId);
+  }
+}
+
+/** One run each time an admin adds the Bible: store the text, then embed its passages. */
+export class BibleWorkflow extends WorkflowEntrypoint<AppEnv> {
+  override async run(_event: WorkflowEvent<unknown>, step: WorkflowStep): Promise<void> {
+    await ensureSchema(this.env.DB);
+    await importBible(this.env, step);
   }
 }

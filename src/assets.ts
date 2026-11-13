@@ -147,6 +147,22 @@ details.add-provider summary { cursor: pointer; font-weight: 600; color: var(--a
 .list-plain li:last-child { border-bottom: 0; }
 .empty { color: var(--muted); padding: 16px; border: 1px dashed var(--line); border-radius: var(--radius); text-align: center; }
 
+/* Bible */
+.bible-books { list-style: none; padding: 0; margin: 0 0 24px; display: grid; gap: 4px 16px; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+.bible-books a { display: block; padding: 4px 0; }
+.bible-chapters { list-style: none; padding: 0; margin: 16px 0 24px; display: grid; gap: 8px; grid-template-columns: repeat(auto-fill, minmax(3rem, 1fr)); }
+.bible-chapters a { display: block; padding: 8px 0; text-align: center; text-decoration: none; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; }
+.bible-chapters a:hover { border-color: var(--gold); }
+.scripture { font-family: var(--serif); font-size: 1.05rem; line-height: 1.7; }
+.scripture.chapter { font-size: 1.15rem; line-height: 1.85; margin: 8px 0 24px; }
+.scripture .verse sup { font-family: var(--sans); font-size: .62em; font-weight: 600; color: var(--gold); margin-right: .3em; }
+.scripture .verse:target { background: color-mix(in srgb, var(--gold-bright) 28%, transparent); border-radius: 3px; scroll-margin-top: 96px; }
+.bible-results { list-style: none; padding: 0; margin: 0 0 24px; display: grid; gap: 10px; }
+.bible-results li { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px; }
+.bible-results a { font-weight: 600; }
+.bible-results p { margin: 4px 0 0; }
+.bible-turn { display: flex; justify-content: space-between; gap: 16px; margin: 0 0 20px; padding-top: 14px; border-top: 1px solid var(--line); }
+
 /* Ask */
 .ask-hero { position: relative; margin: -4px 0 32px; padding: 36px 32px 32px; border-radius: 20px; color: var(--ink-fg); background: radial-gradient(120% 140% at 100% 0%, var(--ink-2) 0%, var(--ink) 60%); box-shadow: var(--shadow-lift); overflow: hidden; }
 .ask-hero h1 { color: var(--ink-fg); font-size: clamp(1.9rem, 4vw, 2.6rem); margin-bottom: 6px; }

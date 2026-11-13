@@ -28,7 +28,7 @@ before anything in the "Ask first" list below.
 | `src/mp3.ts`, `src/mp3.wasm` | Decodes the stored MP3 to 16 kHz mono for Muse, inside the Worker. The `.wasm` is minimp3 (public domain, `vendor/minimp3`) with the small wrapper in `wasm/mp3.c`; it's committed, and `scripts/build-mp3-wasm.sh` rebuilds it with Zig |
 | `src/muse.ts` | Muse's side of transcription: WAV files, ending each part at a pause, and turning Muse's turns into timed segments |
 | `src/cleanup.ts` | Transcript cleanup: the prompt, batching, and keeping the draft wherever the answers AI's change looks like more than a correction |
-| `src/workflow.ts` | The Cloudflare Workflow classes: one runs `pipeline.ts` for an episode, the other runs `writing.ts` for a document |
+| `src/workflow.ts` | The Cloudflare Workflow classes: one runs `pipeline.ts` for an episode, one runs `writing.ts` for a document, and one runs the Bible import in `bible.ts` |
 | `src/schedule.ts` | Daily/weekly schedule in the church's time zone |
 | `src/ask.ts` | Ask home page, the ask box, conversations (the `turns` table, with follow-ups) and the Library |
 | `src/scope.ts` | Question scope: series (taken from the " - Series" end of a title), speaker, date range and specific sermons, plus the "Sermon text" choice (automatic, full sermons, search only) and sermons always included in full |
@@ -38,6 +38,8 @@ before anything in the "Ask first" list below.
 | `src/research.ts` | Retrieval (whole sermons for a narrow scope or by choice, within a budget taken from the model's context window; otherwise Vectorize hits with the chunks around them, filtered to a scope), cited answers, sources, question limits and research access settings |
 | `src/documents.ts`, `src/markdown.ts` | Markdown documents written from the sermons (outline, study questions, custom): starting one, its page (live progress while it's written, Try again if it failed) and `.md` download; a small Markdown renderer that escapes everything it doesn't handle |
 | `src/writing.ts` | How a document is written, in the background: the answers AI picks the sermons from a catalog (titles, dates, scripture, topics) and splits long requests into parts, then each part is written from the full transcripts of its sermons, and the parts are joined with their citations renumbered |
+| `src/bible.ts` | The Bible: the 66 books, reading references ("John 3:16"), the import from eBible.org (unzip, verses into `bible_verses`, runs of verses into `bible_passages`, embeddings into Vectorize), and search by meaning or by words |
+| `src/bible-pages.ts` | The Bible tab (`/bible`, `/bible/:book`, `/bible/:book/:chapter`) and Admin → Bible |
 | `src/api.ts` | The read-only JSON API under `/api/v1` (search, sermons, one sermon, filters) and its OpenAPI description |
 | `src/api-keys.ts` | API keys (only a SHA-256 is stored), the per-key hourly limit, and Admin → API keys |
 | `src/members.ts` | Member invites, invite acceptance, removing members |
@@ -48,7 +50,7 @@ before anything in the "Ask first" list below.
 | `src/assets.ts` | The only CSS (`/assets/app.css`) and JavaScript (`/assets/app.js`): busy state on forms, tabs, the read-along. Pages work without the script |
 | `public/fonts/` | Self-hosted Inter and Source Serif 4 (SIL Open Font License), served as static assets before the Worker runs |
 | `test/` | `node:test` suites; `test/d1-sqlite.ts` stands in for D1 |
-| `wrangler.jsonc` | Worker name, D1, Vectorize, the two Workflows and the hourly cron |
+| `wrangler.jsonc` | Worker name, D1, Vectorize, the three Workflows and the hourly cron |
 
 Commands: `npm run verify` (typecheck and tests), `npm run dev` (local),
 `npx wrangler deploy` (production), `npm run cf-typegen` (after config changes).
@@ -111,6 +113,33 @@ first request after each deploy.
   sessions and the cross-site POST check, and only GET is answered. If you
   add an endpoint, add it to `openApi` too and keep each operation's
   description under 300 characters (GPT Actions' limit).
+- **The Bible:** an admin presses the button in Admin → Bible. A Workflow run
+  (`sermon-research-bible`) downloads the World English Bible from eBible.org
+  (`BIBLE.url` in `src/bible.ts`: a zip with one verse per line, public
+  domain, 66 books without the Apocrypha), stores about 31,000 verses in
+  `bible_verses`, groups each chapter's verses into about 5,300 passages of
+  up to 900 characters in `bible_passages`, and embeds them 256 at a time
+  with the embeddings key (about a million tokens in all, a few cents). The
+  `bible` setting holds the status and counts; the Bible tab appears once
+  verses are stored, and it follows Admin → Research access like the sermons.
+  The search box sends a reference ("John 3:16", "1 cor 13") straight to its
+  chapter, and otherwise shows the passages closest in meaning (one
+  embeddings call, counted against the same hourly search limit as the
+  Sermons page) and then verses containing the words. Bible vectors live in
+  the sermons' index with ids like `bible:43:3:16` and `episodeId: "bible"`
+  in their metadata. Once they exist, every sermon search that isn't already
+  limited to chosen sermons adds the filter `episodeId != "bible"` (`nearest`
+  in `src/research.ts`), which relies on the `episodeId` metadata index from
+  First deploy. If sermon search or answers come back empty right after the
+  Bible is added, that index is missing or was created after the sermons
+  were indexed: create it, then re-process the search vectors. "Add it again"
+  replaces the text with eBible.org's current edition and embeds it again.
+  The text is stored exactly as downloaded; "World English Bible" is
+  eBible.org's trademark and may only name the unchanged text. To remove the
+  Bible, ask first, then delete the vectors whose ids are in
+  `bible_passages`, both tables' rows and the `bible` setting. If the
+  download fails with a message about a page instead of the file, eBible.org
+  answered the Worker with something other than the zip; try again later.
 - **Make the research page public or change the daily cap:** Admin →
   Research access. Public visitors get 20 questions an hour each; signed-in
   people get 60. The daily cap covers everyone but admins and resets at
