@@ -32,7 +32,7 @@ import { reprocessEpisode, saveSpeaker, sermonPage, sermonsPage, transcriptDownl
 import { checkNow, chooseMainScripturesNow, episodesDashboard, hourlyTick, identifySpeakersNow, importStep, queueFromDashboard, restartFromDashboard, saveConcurrency, scheduleSettings } from "./imports.ts";
 import { keyInfo } from "./keys.ts";
 import { acceptInvite, membersPage, reinviteMember, removeMember, showInvite } from "./members.ts";
-import { canViewResearch, researchAdmin, researchSettings } from "./research.ts";
+import { canViewResearch, researchAdmin, researchSettings, sourcesAdmin } from "./research.ts";
 import { confirmLink, emailSignInEnabled, requestLink, showLink } from "./links.ts";
 import { ensureSchema } from "./schema.ts";
 import { MODE_COOKIE, modeCookie, parseMode, safeBack } from "./theme.ts";
@@ -144,6 +144,8 @@ async function route(context: Context): Promise<Response> {
     case "GET /documents": return redirect("/library");
     case "GET /admin/research":
     case "POST /admin/research": return researchAdmin(context);
+    case "GET /admin/sources":
+    case "POST /admin/sources": return sourcesAdmin(context);
     case "GET /admin/members":
     case "POST /admin/members": return membersPage(context);
     case "POST /admin/members/invite": return reinviteMember(context);

@@ -24,7 +24,47 @@ const SIGNED_IN_PER_HOUR = 60;
 /** Semantic searches per hour; past this, search falls back to keywords only. */
 export const SEARCHES_PER_HOUR = 60;
 export const QUESTION_MAX = 500;
-const SOURCES = 8;
+
+/** How much of one kind of source a search brings to the answers AI. */
+export interface SourceLimits {
+  /** The closest passages to find. */
+  readonly hits: number;
+  /** Passages just before and just after each hit that come with it. */
+  readonly before: number;
+  readonly after: number;
+  /** Characters of text in all; the closest passages are kept and the rest left out. */
+  readonly maxChars: number;
+}
+
+/** Admin → Answer sources: what a question is answered from when nobody chooses, and how much each search brings back. */
+export interface SourceSettings {
+  /** "" is the sermons alone. */
+  readonly defaultSources: "" | "both" | "bible";
+  readonly sermons: SourceLimits;
+  readonly bible: SourceLimits;
+}
+
+/** A sermon passage is about 1,200 characters and a Bible passage up to 900 (about five verses). */
+export const DEFAULT_SOURCES: SourceSettings = {
+  defaultSources: "",
+  sermons: { hits: 8, before: 2, after: 2, maxChars: 60_000 },
+  bible: { hits: 12, before: 1, after: 1, maxChars: 30_000 },
+};
+export const SOURCE_BOUNDS = { hits: [1, 40], around: [0, 10], maxChars: [1_000, 400_000] } as const;
+
+export async function sourceSettings(db: D1Database): Promise<SourceSettings> {
+  const saved = await getSetting<Partial<SourceSettings>>(db, "sources");
+  return { ...DEFAULT_SOURCES, ...saved, sermons: { ...DEFAULT_SOURCES.sermons, ...saved?.sermons }, bible: { ...DEFAULT_SOURCES.bible, ...saved?.bible } };
+}
+
+/** The sources that fit in `maxChars`, best first; the first always stays. */
+function within<T extends { readonly text: string }>(sources: readonly T[], maxChars: number): T[] {
+  let total = 0;
+  return sources.filter((source, index) => {
+    total += source.text.length;
+    return index === 0 || total <= maxChars;
+  });
+}
 /** Generous because thinking models can spend part of this before replying; the prompt keeps answers short. */
 const ANSWER_MAX_TOKENS = 4_000;
 
@@ -138,9 +178,7 @@ export async function nearest(env: AppEnv, text: string, topK: number, episodeId
 
 /** Characters of full transcript sent for a narrow scope; roughly 35,000 tokens, well inside current models' windows. */
 export const SCOPED_FULL_CHARS = 140_000;
-/** Chunks on each side of a hit that go along with it. */
-const NEIGHBOURS = 2;
-/** Longest run of chunks shown as one numbered source. */
+/** Longest run of chunks shown as one numbered source, unless a hit's own neighbours make a longer one. */
 const RUN_MAX = 4;
 
 type ChunkRow = { id: string; episode_id: string; kind: "summary" | "transcript"; seq: number; text: string; start_seconds: number | null; title: string; published_at: string | null; speaker: string | null };
@@ -164,13 +202,13 @@ async function chunksOf(db: D1Database, ids: readonly string[], where: "episodes
  * Joins chunks into numbered sources, in reading order: neighbouring chunks of the same sermon become
  * one source (at most RUN_MAX chunks each), cited at the time its first chunk starts. `rank` sorts the sources.
  */
-function toPassages(rows: readonly ChunkRow[], rank: (run: readonly ChunkRow[]) => string): Passage[] {
+function toPassages(rows: readonly ChunkRow[], rank: (run: readonly ChunkRow[]) => string, runMax = RUN_MAX): Passage[] {
   const sorted = [...rows].sort((a, b) => a.episode_id.localeCompare(b.episode_id) || a.seq - b.seq);
   const runs: ChunkRow[][] = [];
   for (const row of sorted) {
     const run = runs.at(-1);
     const last = run?.at(-1);
-    if (run && last && last.episode_id === row.episode_id && row.seq === last.seq + 1 && last.kind === row.kind && row.kind === "transcript" && run.length < RUN_MAX) run.push(row);
+    if (run && last && last.episode_id === row.episode_id && row.seq === last.seq + 1 && last.kind === row.kind && row.kind === "transcript" && run.length < runMax) run.push(row);
     else runs.push([row]);
   }
   return runs.sort((a, b) => rank(a).localeCompare(rank(b))).map((run, index) => {
@@ -206,6 +244,8 @@ export interface RetrieveOptions {
   readonly fullIds?: readonly string[] | undefined;
   /** Characters of whole-sermon text allowed. */
   readonly budget?: number;
+  /** For searched passages: how many to find (`topK` wins when given), what comes with each, and the most text. Whole sermons aren't limited by these. */
+  readonly limits?: SourceLimits;
 }
 
 const size = (rows: readonly ChunkRow[]) => rows.reduce((sum, row) => sum + row.text.length, 0);
@@ -213,12 +253,13 @@ const size = (rows: readonly ChunkRow[]) => rows.reduce((sum, row) => sum + row.
 /**
  * Passages to answer a question from. Sermons chosen to go in whole always do; a narrow scope whose
  * sermons fit in the budget is sent whole too (always, when `mode` is "full"). Otherwise each of the
- * closest passages comes with the NEIGHBOURS chunks on either side, so a hit arrives with what the
+ * closest passages comes with the chunks on either side that `limits` asks for, so a hit arrives with what the
  * preacher said just before and after it. When whole sermons were asked for and don't fit, the closest
  * passages are used and `note` says so.
  */
 export async function retrieve(env: AppEnv, question: string, options: RetrieveOptions = {}): Promise<Retrieval> {
-  const { topK = SOURCES, episodeIds = null, mode, budget = SCOPED_FULL_CHARS } = options;
+  const { episodeIds = null, mode, budget = SCOPED_FULL_CHARS } = options;
+  const limits: SourceLimits = { ...(options.limits ?? { ...DEFAULT_SOURCES.sermons, maxChars: Infinity }), ...(options.topK ? { hits: options.topK } : {}) };
   const readingOrder = (run: readonly ChunkRow[]) => `${run[0]!.published_at ?? ""}\u0000${run[0]!.episode_id}\u0000${String(run[0]!.seq).padStart(6, "0")}`;
   const number = (passages: readonly Passage[]) => passages.map((passage, index) => ({ ...passage, n: index + 1 }));
   let note: string | null = null;
@@ -233,7 +274,7 @@ export async function retrieve(env: AppEnv, question: string, options: RetrieveO
   }
   if (whole.length > 0) {
     const have = new Set(whole.map((row) => row.episode_id));
-    const found = await searched(env, question, topK, episodeIds, have);
+    const found = await searched(env, question, limits, episodeIds, have);
     return { passages: number([...toPassages(whole, readingOrder), ...found]), note };
   }
 
@@ -244,14 +285,15 @@ export async function retrieve(env: AppEnv, question: string, options: RetrieveO
   } else if (mode === "full" && !note) {
     note = "That scope covers too many sermons to send whole, so the closest passages were used instead. Narrow the scope to read them in full.";
   }
-  return { passages: await searched(env, question, topK, episodeIds, new Set()), note };
+  return { passages: await searched(env, question, limits, episodeIds, new Set()), note };
 }
 
 /** The closest passages with their neighbours, leaving out sermons already sent whole. */
 async function searched(
-  env: AppEnv, question: string, topK: number, episodeIds: readonly string[] | null,
+  env: AppEnv, question: string, limits: SourceLimits, episodeIds: readonly string[] | null,
   skip: ReadonlySet<string>,
 ): Promise<Passage[]> {
+  const topK = limits.hits;
   const found = await nearest(env, question, skip.size ? Math.min(MAX_TOP_K, topK * 3) : topK, episodeIds);
   const matches = found.filter((match) => !skip.has(match.id.slice(0, match.id.lastIndexOf(":")))).slice(0, topK);
   if (matches.length === 0) return [];
@@ -261,7 +303,7 @@ async function searched(
     const episode = id.slice(0, colon);
     const seq = Number(id.slice(colon + 1));
     wanted.add(id);
-    if (Number.isFinite(seq)) for (let near = Math.max(1, seq - NEIGHBOURS); near <= seq + NEIGHBOURS; near++) wanted.add(`${episode}:${near}`);
+    if (Number.isFinite(seq)) for (let near = Math.max(1, seq - limits.before); near <= seq + limits.after; near++) wanted.add(`${episode}:${near}`);
   }
   const rows = await chunksOf(env.DB, [...wanted], "ids");
   const matched = new Set(matches.map((match) => match.id));
@@ -269,15 +311,12 @@ async function searched(
   const kept = rows.filter((row) => matched.has(row.id) || row.kind === "transcript");
   // Closest first, as the matches came.
   const best = (run: readonly ChunkRow[]) => String(Math.min(...run.map((row) => { const at = matches.findIndex((match) => match.id === row.id); return at < 0 ? matches.length : at; }))).padStart(6, "0");
-  return toPassages(kept, best);
+  return within(toPassages(kept, best, Math.max(RUN_MAX, limits.before + limits.after + 1)), limits.maxChars);
 }
 
-/** Bible passages an answer sees: the closest in meaning, beside any the question names. */
-const BIBLE_SOURCES = 6;
-
-/** The Bible's passages for a question, as sources. Number them with `numbered`. */
-export async function biblePassages(env: AppEnv, question: string): Promise<Passage[]> {
-  return (await bibleForQuestion(env, question, BIBLE_SOURCES)).map((passage) => ({
+/** The Bible's passages for a question, as sources: any it names, then the closest in meaning with the passages around them. Number them with `numbered`. */
+export async function biblePassages(env: AppEnv, question: string, limits: SourceLimits = DEFAULT_SOURCES.bible): Promise<Passage[]> {
+  return (await bibleForQuestion(env, question, limits)).map((passage) => ({
     n: 0, chunkId: passage.id, episodeId: "", title: passageLabel(passage), publishedAt: null, speaker: null, kind: "bible" as const, seq: 0, start: null, text: passage.text,
     href: chapterPath(bookByNumber(passage.book)!, passage.chapter, passage.verseStart),
   }));
@@ -415,4 +454,64 @@ ${option("public", "Anyone", `Visitors without an account can ask up to ${ANONYM
 <input id="f-dailyQuestions" name="dailyQuestions" type="number" min="0" max="100000" value="${settings.dailyQuestions}" required></div>
 <button type="submit">Save</button>
 </form>`, { status: error ? 400 : 200, ...chrome(context) });
+}
+
+const LIMIT_FIELDS: readonly (readonly [keyof SourceLimits, string, string, readonly [number, number]])[] = [
+  ["hits", "Passages to find", "The closest matches to the question.", SOURCE_BOUNDS.hits],
+  ["before", "Passages before each", "How many passages just before a match come with it.", SOURCE_BOUNDS.around],
+  ["after", "Passages after each", "How many passages just after a match come with it.", SOURCE_BOUNDS.around],
+  ["maxChars", "Character limit", "The most text sent in all. The closest matches are kept and the rest left out.", SOURCE_BOUNDS.maxChars],
+];
+
+/** The most text a search can bring back before the character limit, for the hint under each group. */
+function reach(limits: SourceLimits, passageChars: number): string {
+  const most = limits.hits * (limits.before + limits.after + 1) * passageChars;
+  return `${Math.min(most, limits.maxChars).toLocaleString("en-US")} characters, roughly ${Math.round(Math.min(most, limits.maxChars) / 4).toLocaleString("en-US")} tokens`;
+}
+
+/** GET/POST /admin/sources : what answers draw on by default, and how much each search brings to the answers AI. */
+export async function sourcesAdmin(context: Context): Promise<Response> {
+  const denied = requireAdmin(context);
+  if (denied) return denied;
+  let settings = await sourceSettings(context.db);
+  const errors: string[] = [];
+  if (context.request.method === "POST") {
+    const form = await context.request.formData();
+    if (form.get("intent") === "reset") {
+      await putSetting(context.db, "sources", DEFAULT_SOURCES);
+      return redirect("/admin/sources?saved=1");
+    }
+    const read = (group: "sermons" | "bible", label: string): SourceLimits => Object.fromEntries(LIMIT_FIELDS.map(([name, title, , [low, high]]) => {
+      const value = Number(String(form.get(`${group}_${name}`) ?? "").replaceAll(",", "").trim() || NaN);
+      if (!Number.isInteger(value) || value < low || value > high) errors.push(`${label}: “${title}” must be a whole number from ${low.toLocaleString("en-US")} to ${high.toLocaleString("en-US")}.`);
+      return [name, value];
+    })) as unknown as SourceLimits;
+    const chosen = String(form.get("defaultSources") ?? "");
+    settings = { defaultSources: chosen === "both" || chosen === "bible" ? chosen : "", sermons: read("sermons", "Sermons"), bible: read("bible", "The Bible") };
+    if (errors.length === 0) {
+      await putSetting(context.db, "sources", settings);
+      return redirect("/admin/sources?saved=1");
+    }
+  }
+  const group = (name: "sermons" | "bible", legend: string, note: string, passageChars: number) => html`<fieldset class="choices"><legend>${legend}</legend>
+<p class="hint">${note}</p>
+<div class="row">${LIMIT_FIELDS.map(([field, title, hint, [low, high]]) => html`<div class="field"><label for="f-${name}-${field}">${title}</label>
+<input id="f-${name}-${field}" name="${name}_${field}" type="number" min="${low}" max="${high}" step="1" value="${Number.isFinite(settings[name][field]) ? settings[name][field] : ""}" required>
+<p class="hint">${hint}</p></div>`)}</div>
+${errors.length ? "" : html`<p class="hint">With these numbers a search sends at most ${reach(settings[name], passageChars)}.</p>`}
+</fieldset>`;
+  const from = (value: SourceSettings["defaultSources"], label: string) => html`<option value="${value}"${settings.defaultSources === value ? html` selected` : ""}>${label}</option>`;
+  return page("Answer sources", html`<h1>Answer sources</h1>
+<p class="lead">What a question is answered from, and how much of it the answers AI is given. More text means fuller answers that cost more and take longer.</p>
+${context.url.searchParams.has("saved") ? html`<div class="alert-ok"><p>Saved.</p></div>` : ""}
+${errors.map((error) => html`<p class="alert">${error}</p>`)}
+<form method="post" action="/admin/sources">
+<div class="field"><label for="f-defaultSources">Answer from, unless the person chooses</label>
+<p class="hint">The Ask box starts on this once the Bible has been added. Anyone can change it for their own question.</p>
+<select id="f-defaultSources" name="defaultSources">${from("", "Sermons")}${from("both", "Sermons and the Bible")}${from("bible", "The Bible")}</select></div>
+${group("sermons", "Sermons", "A sermon passage is about 1,200 characters of the transcript. These apply when sermons are searched; a narrow scope, or “Full sermons”, sends whole sermons instead, up to what the model can take.", 1_200)}
+${group("bible", "The Bible", "A Bible passage is up to 900 characters, about five verses. Passages before and after stay inside the chapter. Verses a question names, like “John 17”, are read as well and come first.", 900)}
+<button type="submit">Save</button>
+</form>
+<form method="post" action="/admin/sources"><input type="hidden" name="intent" value="reset"><button class="link" type="submit">Put the starting numbers back</button></form>`, { status: errors.length ? 400 : 200, ...chrome(context) });
 }

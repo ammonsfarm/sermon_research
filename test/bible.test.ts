@@ -224,3 +224,62 @@ test("Ask answers from the Bible, or from the sermons and the Bible together", a
     site.restore();
   }
 });
+
+test("an admin sets what answers draw on and how much each search brings back", async () => {
+  const site = await indexedSite();
+  try {
+    const { app, cookie } = site;
+    await importBible(app.env, inlineStep);
+    const sources = async (form: Record<string, string>) => {
+      await app.request("/research", { cookie, form });
+      const user = (site.providers.calls.filter((call) => call.url.endsWith("/chat/completions")).at(-1)!.body as { messages: { content: string }[] }).messages[1]!.content;
+      return [...user.matchAll(/^\[\d+\] (?:The Bible, )?(.+?)(?: \(|:$)/gm)].map((match) => match[1]!);
+    };
+    const save = (changes: Record<string, string>) => app.request("/admin/sources", { cookie, form: {
+      defaultSources: "", sermons_hits: "8", sermons_before: "2", sermons_after: "2", sermons_maxChars: "60000",
+      bible_hits: "12", bible_before: "1", bible_after: "1", bible_maxChars: "30,000", ...changes,
+    } });
+
+    const page = await (await app.request("/admin/sources", { cookie })).text();
+    assert.match(page, /name="bible_hits" type="number" min="1" max="40" step="1" value="12"/);
+    assert.match(page, /name="sermons_before" type="number" min="0" max="10" step="1" value="2"/);
+    assert.match(page, /href="\/admin\/sources" aria-current="page">Answer sources</);
+
+    assert.deepEqual(await sources({ question: "What is light?", scope_sources: "bible" }), ["Genesis 1:1-2", "Psalms 23:1-2", "John 3:16-17", "Acts 8:36-38", "Jude 1:5"], "to start with, each match brings the passage on either side, joined to it");
+
+    assert.equal((await save({ bible_hits: "2", bible_before: "0", bible_after: "0" })).headers.get("Location"), "/admin/sources?saved=1");
+    assert.deepEqual(await sources({ question: "What is light?", scope_sources: "bible" }), ["Genesis 1:1-2", "Psalms 23:1"]);
+    await save({ bible_hits: "2", bible_before: "0", bible_after: "1" });
+    assert.deepEqual(await sources({ question: "What is light?", scope_sources: "bible" }), ["Genesis 1:1-2", "Psalms 23:1-2"]);
+    await save({ bible_hits: "2", bible_before: "1", bible_after: "0" });
+    assert.deepEqual(await sources({ question: "What is light?", scope_sources: "bible" }), ["Genesis 1:1-2", "Psalms 23:1"], "nothing comes before a chapter's first passage");
+    await save({ bible_before: "0", bible_after: "0", bible_maxChars: "1000" });
+    assert.deepEqual(await sources({ question: "What is light?", scope_sources: "bible" }), ["Genesis 1:1-2", "Psalms 23:1"], "the closest that fit the character limit");
+    assert.deepEqual(await sources({ question: "What does Jude 5 say?", scope_sources: "bible" }), ["Jude 1:5", "Genesis 1:1-2", "Psalms 23:1"], "a verse the question names still comes first");
+
+    const before = await sources({ question: "What is grace?" });
+    assert.ok(before.length > 1);
+    await save({ sermons_hits: "1", sermons_before: "0", sermons_after: "0" });
+    assert.equal((await sources({ question: "What is grace?" })).length, 1);
+    await save({ sermons_hits: "1", sermons_before: "0", sermons_after: "0", sermons_maxChars: "1000", bible_hits: "1" });
+    assert.equal((await sources({ question: "What is grace?", scope_sources: "both" })).length, 2, "one of each");
+
+    assert.doesNotMatch(await (await app.request("/", { cookie })).text(), /<option value="both" selected>/);
+    await save({ defaultSources: "both" });
+    assert.match(await (await app.request("/", { cookie })).text(), /<option value="both" selected>Sermons and the Bible/);
+    assert.match(await (await app.request("/admin/sources", { cookie })).text(), /<option value="both" selected>/);
+
+    const bad = await save({ bible_hits: "0", sermons_maxChars: "many" });
+    assert.equal(bad.status, 400);
+    const said = await bad.text();
+    assert.match(said, /The Bible: “Passages to find” must be a whole number from 1 to 40\./);
+    assert.match(said, /Sermons: “Character limit” must be a whole number from 1,000 to 400,000\./);
+    assert.match(await (await app.request("/admin/sources", { cookie })).text(), /name="bible_hits"[^>]*value="12"/, "nothing was saved");
+
+    await app.request("/admin/sources", { cookie, form: { intent: "reset" } });
+    assert.match(await (await app.request("/admin/sources", { cookie })).text(), /name="sermons_hits"[^>]*value="8"/);
+    assert.equal((await app.request("/admin/sources", { form: { intent: "reset" } })).headers.get("Location"), "/login");
+  } finally {
+    site.restore();
+  }
+});

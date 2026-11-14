@@ -33,7 +33,7 @@ export function siteHeader(session: Session | null, path: string, researchOpen: 
 }
 
 const ADMIN_MENU: readonly (readonly [string, readonly (readonly [string, string])[]])[] = [
-  ["Site", [["/admin", "Overview"], ["/admin/ministry", "Ministry"], ["/admin/members", "Members"], ["/admin/research", "Access"], ["/admin/api", "API keys"]]],
+  ["Site", [["/admin", "Overview"], ["/admin/ministry", "Ministry"], ["/admin/members", "Members"], ["/admin/research", "Access"], ["/admin/sources", "Answer sources"], ["/admin/api", "API keys"]]],
   ["Sermons", [["/admin/episodes", "Episodes"], ["/admin/schedule", "Schedule"], ["/admin/podcast", "Podcast feed"], ["/admin/bible", "Bible"]]],
   ["AI connections", [["/admin/llm", "Answers AI"], ["/admin/embeddings", "Embeddings"], ["/admin/transcription", "Transcription"], ["/admin/email", "Email"]]],
 ];

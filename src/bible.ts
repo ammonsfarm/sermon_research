@@ -396,12 +396,33 @@ export async function searchBible(env: AppEnv, query: string, topK = 10): Promis
 /** Passages of one chapter a reference can bring in; enough for all but the longest chapters. */
 const MENTION_PASSAGES = 8;
 
+/** The closest passages, each with the passages just before and after it in its chapter, in reading order. */
+async function withNeighbours(db: D1Database, hits: readonly BiblePassage[], before: number, after: number): Promise<BiblePassage[]> {
+  if (hits.length === 0 || (before === 0 && after === 0)) return [...hits];
+  const chapters = [...new Map(hits.map((hit) => [`${hit.book}:${hit.chapter}`, hit])).values()];
+  const rows: BiblePassage[] = [];
+  // Two bound values a chapter, and D1 allows 100 a statement.
+  for (let start = 0; start < chapters.length; start += 40) {
+    const some = chapters.slice(start, start + 40);
+    const { results } = await db.prepare(`SELECT id, book, chapter, verse_start, verse_end, text FROM bible_passages WHERE ${some.map(() => "(book = ? AND chapter = ?)").join(" OR ")} ORDER BY book, chapter, verse_start`)
+      .bind(...some.flatMap((hit) => [hit.book, hit.chapter])).all<PassageRow>();
+    rows.push(...results.map(fromRow));
+  }
+  return hits.flatMap((hit) => {
+    const chapter = rows.filter((row) => row.book === hit.book && row.chapter === hit.chapter);
+    const at = chapter.findIndex((row) => row.id === hit.id);
+    return at < 0 ? [hit] : chapter.slice(Math.max(0, at - before), at + after + 1);
+  });
+}
+
 /**
  * Bible passages to answer a question from: the verses the question names,
- * then the `topK` passages closest to it in meaning. Passages that follow one
- * another in a chapter are joined, so a chapter reads as one source.
+ * then the `hits` passages closest to it in meaning, each with the passages
+ * `before` and `after` it in its chapter, up to `maxChars` of text in all.
+ * Passages that follow one another are joined, so a stretch of a chapter
+ * reads as one source.
  */
-export async function bibleForQuestion(env: AppEnv, question: string, topK: number): Promise<BiblePassage[]> {
+export async function bibleForQuestion(env: AppEnv, question: string, limits: { hits: number; before: number; after: number; maxChars: number }): Promise<BiblePassage[]> {
   const named: BiblePassage[] = [];
   for (const mention of referencesIn(question)) {
     const { results } = await env.DB.prepare("SELECT id, book, chapter, verse_start, verse_end, text FROM bible_passages WHERE book = ? AND chapter = ? AND verse_end >= ? AND verse_start <= ? ORDER BY verse_start LIMIT ?")
@@ -410,9 +431,14 @@ export async function bibleForQuestion(env: AppEnv, question: string, topK: numb
   }
   const seen = new Set<string>();
   const joined: BiblePassage[] = [];
-  for (const passage of [...named, ...await searchBible(env, question, topK)]) {
+  const close = await withNeighbours(env.DB, await searchBible(env, question, limits.hits), limits.before, limits.after);
+  let total = 0;
+  for (const passage of [...named, ...close]) {
     if (seen.has(passage.id)) continue;
     seen.add(passage.id);
+    // Past the character limit the rest are left out; they're the less close ones. The first always stays.
+    total += passage.text.length;
+    if (total > limits.maxChars && joined.length > 0) break;
     const last = joined.at(-1);
     if (last && last.book === passage.book && last.chapter === passage.chapter && passage.verseStart === last.verseEnd + 1) {
       joined[joined.length - 1] = { ...last, verseEnd: passage.verseEnd, text: `${last.text} ${passage.text}` };
