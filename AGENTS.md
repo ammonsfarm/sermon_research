@@ -140,6 +140,21 @@ first request after each deploy.
   `bible_passages`, both tables' rows and the `bible` setting. If the
   download fails with a message about a page instead of the file, eBible.org
   answered the Worker with something other than the zip; try again later.
+- **Asking the Bible:** once the Bible is added, the Ask box has an "Answer
+  from" choice: Sermons (the default), Sermons and the Bible, or The Bible.
+  It's kept as `sources` in the conversation's scope (`"both"`, `"bible"`, or
+  unset), so follow-ups ask the same places. For the Bible, `bibleForQuestion`
+  in `src/bible.ts` first reads the verses the question names
+  (`referencesIn` finds up to three, like "Romans 8:28-30" or "Psalm 23",
+  up to 8 passages of a chapter each), then adds the `BIBLE_SOURCES` (6)
+  passages closest in meaning, and joins passages that follow one another.
+  They're numbered after the sermon sources, marked "The Bible" in the
+  prompt, and link to the verse on the Bible tab. With both, the answers AI
+  is told to keep what the Bible says apart from what a preacher said. The
+  sermon scope (series, speaker, dates) only applies to the sermons.
+  Documents (outlines, study questions) and the API are still written from
+  the sermons alone, as are questions asked on a sermon's own page. Asking
+  both costs two embeddings calls instead of one.
 - **Make the research page public or change the daily cap:** Admin →
   Research access. Public visitors get 20 questions an hour each; signed-in
   people get 60. The daily cap covers everyone but admins and resets at

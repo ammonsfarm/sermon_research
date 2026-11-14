@@ -3,7 +3,7 @@ import { html, type Html, page } from "./html.ts";
 import { renderMarkdown } from "./markdown.ts";
 import { ProviderError } from "./providers.ts";
 import { embed, requireKey, type Segment } from "./pipeline.ts";
-import { BIBLE_VECTOR_OWNER, bibleState } from "./bible.ts";
+import { BIBLE, BIBLE_VECTOR_OWNER, bibleForQuestion, bibleState, bookByNumber, chapterPath, passageLabel } from "./bible.ts";
 import { chatWithFallback, type LlmAction, resolveTargets } from "./llm.ts";
 import { getSetting, getSetupStep, type Ministry, putSetting } from "./settings.ts";
 import { HOUR_MS, recordUse, startOfUtcDay, usedSince } from "./usage.ts";
@@ -91,10 +91,12 @@ export interface Passage {
   readonly publishedAt: string | null;
   /** Who preached it; missing from sources saved before speakers were kept. */
   readonly speaker?: string | null;
-  readonly kind: "summary" | "transcript";
+  /** "bible" is a passage of the Bible: `title` is its reference, `href` its place on the Bible tab, and it belongs to no sermon. */
+  readonly kind: "summary" | "transcript" | "bible";
   readonly seq: number;
   readonly start: number | null;
   readonly text: string;
+  readonly href?: string;
 }
 
 /** A source as saved with an answer or document, so it survives re-indexing. */
@@ -270,6 +272,22 @@ async function searched(
   return toPassages(kept, best);
 }
 
+/** Bible passages an answer sees: the closest in meaning, beside any the question names. */
+const BIBLE_SOURCES = 6;
+
+/** The Bible's passages for a question, as sources. Number them with `numbered`. */
+export async function biblePassages(env: AppEnv, question: string): Promise<Passage[]> {
+  return (await bibleForQuestion(env, question, BIBLE_SOURCES)).map((passage) => ({
+    n: 0, chunkId: passage.id, episodeId: "", title: passageLabel(passage), publishedAt: null, speaker: null, kind: "bible" as const, seq: 0, start: null, text: passage.text,
+    href: chapterPath(bookByNumber(passage.book)!, passage.chapter, passage.verseStart),
+  }));
+}
+
+/** Sources from several places as one list, numbered from 1 in order. */
+export function numbered(...groups: readonly (readonly Passage[])[]): Passage[] {
+  return groups.flat().map((passage, index) => ({ ...passage, n: index + 1 }));
+}
+
 /** Who the sermons come from, for the answers AI's instructions. */
 export function preamble(ministry: Ministry | null): string {
   const church = ministry?.churchName ?? "this church";
@@ -279,7 +297,7 @@ export function preamble(ministry: Ministry | null): string {
 
 /** The numbered sources block every prompt shares. */
 export function sourcesPrompt(passages: readonly Passage[]): string {
-  return passages.map((passage) =>
+  return passages.map((passage) => passage.kind === "bible" ? `[${passage.n}] The Bible, ${passage.title} (${BIBLE.name}):\n${passage.text}` :
     `[${passage.n}] "${passage.title}" (${[passage.publishedAt?.slice(0, 10) ?? "undated", passage.speaker].filter(Boolean).join(", ")})${passage.kind === "summary" ? ", summary" : passage.start !== null ? `, at ${formatTime(passage.start)}` : ""}:\n${passage.text}`).join("\n\n");
 }
 
@@ -323,10 +341,20 @@ export interface Exchange { readonly question: string; readonly answer: string }
 /** How many earlier exchanges a follow-up sees. */
 const HISTORY_TURNS = 3;
 
+/** What the numbered sources are, for the answers AI. With both kinds it's told to keep the preacher's words and the Bible's apart. */
+function sourcesAre(passages: readonly Passage[]): string {
+  const bible = passages.some((passage) => passage.kind === "bible");
+  const sermons = passages.some((passage) => passage.kind !== "bible");
+  if (bible && !sermons) return `which are passages from the Bible (${BIBLE.name}). Quote it accurately and say where each passage is from; don't add teaching the passages don't contain`;
+  if (bible) return `which are passages from sermon transcripts and summaries, and passages from the Bible (${BIBLE.name}), each marked "The Bible". Make clear which is which: what the Bible passage says, and what a preacher said about it`;
+  return "which are passages from sermon transcripts and summaries";
+}
+
 export async function answer(
   env: AppEnv, ministry: Ministry | null, question: string, passages: readonly Passage[], history: readonly Exchange[] = [], who: { userId?: string | null; model?: string | null } = {},
 ): Promise<string> {
-  const system = `${preamble(ministry)} Answer only from the numbered sources, which are passages from sermon transcripts and summaries. Cite every claim with the source number in square brackets, like [2]. If the sources don't answer the question, say so plainly and don't guess. Keep answers under 250 words, in plain paragraphs.${history.length ? " This is a follow-up: use the earlier conversation to understand what the question refers to, but cite only the numbered sources below." : ""}`;
+  const onlyBible = passages.every((passage) => passage.kind === "bible");
+  const system = `${onlyBible ? `You help people at ${ministry?.churchName ?? "this church"} study the Bible.` : preamble(ministry)} Answer only from the numbered sources, ${sourcesAre(passages)}. Cite every claim with the source number in square brackets, like [2]. If the sources don't answer the question, say so plainly and don't guess. Keep answers under 250 words, in plain paragraphs.${history.length ? " This is a follow-up: use the earlier conversation to understand what the question refers to, but cite only the numbered sources below." : ""}`;
   const earlier = history.slice(-HISTORY_TURNS).map((turn) => `Q: ${turn.question}\nA: ${turn.answer}`).join("\n\n");
   return chat(env, system, `${earlier ? `Earlier in this conversation:\n\n${earlier}\n\n` : ""}Sources:\n\n${sourcesPrompt(passages)}\n\nQuestion: ${question}`, { maxTokens: ANSWER_MAX_TOKENS, timeoutMs: passages.reduce((sum, passage) => sum + passage.text.length, 0) > SCOPED_FULL_CHARS ? 180_000 : 60_000, ...who });
 }
@@ -335,7 +363,9 @@ export async function answer(
 export function sourcesList(passages: readonly Omit<Passage, "chunkId">[], options: { prefix?: string; collapsed?: boolean } = {}): Html {
   const prefix = options.prefix ?? "source";
   const list = html`<ol class="sources">
-${passages.map((passage) => html`<li id="${prefix}-${passage.n}"><span class="n">${passage.n}</span> <a href="/episodes/${passage.episodeId}#t-${passage.seq}">${passage.title}</a>
+${passages.map((passage) => passage.kind === "bible" ? html`<li id="${prefix}-${passage.n}"><span class="n">${passage.n}</span> <a href="${passage.href ?? "/bible"}">${passage.title}</a>
+<span class="hint">${BIBLE.name}</span>
+<p class="quote">${passage.text.length > 400 ? `${passage.text.slice(0, 400)}…` : passage.text}</p></li>` : html`<li id="${prefix}-${passage.n}"><span class="n">${passage.n}</span> <a href="/episodes/${passage.episodeId}#t-${passage.seq}">${passage.title}</a>
 <span class="hint">${passage.publishedAt?.slice(0, 10) ?? ""}${passage.speaker ? ` · ${passage.speaker}` : ""}${passage.kind === "summary" ? " · summary" : passage.start !== null ? ` · ${formatTime(passage.start)}` : ""}</span>
 <p class="quote">${passage.text.length > 400 ? `${passage.text.slice(0, 400)}…` : passage.text}</p></li>`)}
 </ol>`;
