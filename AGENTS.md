@@ -146,8 +146,9 @@ first request after each deploy.
   unset), so follow-ups ask the same places. For the Bible, `bibleForQuestion`
   in `src/bible.ts` first reads the verses the question names
   (`referencesIn` finds up to three, like "Romans 8:28-30" or "Psalm 23",
-  up to 8 passages of a chapter each), then adds the `BIBLE_SOURCES` (6)
-  passages closest in meaning, and joins passages that follow one another.
+  up to 8 passages of a chapter each), then adds the passages closest in
+  meaning with the ones around them (see "How much text an answer gets"),
+  and joins passages that follow one another.
   They're numbered after the sermon sources, marked "The Bible" in the
   prompt, and link to the verse on the Bible tab. With both, the answers AI
   is told to keep what the Bible says apart from what a preacher said. The
@@ -155,6 +156,24 @@ first request after each deploy.
   Documents (outlines, study questions) and the API are still written from
   the sermons alone, as are questions asked on a sermon's own page. Asking
   both costs two embeddings calls instead of one.
+- **How much text an answer gets:** Admin → Answer sources (the `sources`
+  setting; `sourceSettings` and `DEFAULT_SOURCES` in `src/research.ts`). For
+  sermons and for the Bible separately it sets how many of the closest
+  passages a search finds (1 to 40), how many passages before and after each
+  come with it (0 to 10), and a character limit for that kind of source
+  (1,000 to 400,000): past it, the less close passages are left out. It
+  starts at 8 passages with 2 either side and 60,000 characters for sermons,
+  and 12 with 1 either side and 30,000 for the Bible. A sermon passage is
+  about 1,200 characters; a Bible passage is up to 900 (about five verses),
+  and its neighbours stay inside the chapter. The same page sets what the
+  Ask box's "Answer from" starts on. These numbers apply to searched
+  passages in answers only: whole sermons (a narrow scope, or "Full
+  sermons") are limited by the model's context window instead, and documents
+  and the API keep their own numbers. A thin answer to a broad Bible
+  question ("What are Jesus' prayers like?") usually means the search found
+  passages that talk about the subject rather than the ones that show it:
+  raise "Passages to find" and the ones around each, or name the passage in
+  the question ("see John 17"), which is read directly.
 - **Make the research page public or change the daily cap:** Admin →
   Research access. Public visitors get 20 questions an hour each; signed-in
   people get 60. The daily cap covers everyone but admins and resets at
@@ -162,7 +181,7 @@ first request after each deploy.
   `src/research.ts`.
 - **Answers are poor or say the sources don't cover it:** check that episodes
   show Done in Admin → Episodes. A stronger answers-AI model helps most.
-  `SOURCES` in `src/research.ts` sets how many passages each answer sees.
+  Admin → Answer sources sets how many passages each answer sees.
   Documents read whole transcripts instead (see the next item).
 - **How documents are written:** in a Workflow run
   (`sermon-research-document`), so the person can leave the page. First the
