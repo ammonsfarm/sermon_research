@@ -15,6 +15,8 @@ export interface Context {
   readonly ministry: Ministry | null;
   /** True when research is open to visitors who aren't signed in. */
   readonly researchOpen: boolean;
+  /** True once the Bible has been added (Admin → Bible), which shows its tab. */
+  readonly bible: boolean;
   /** This visitor's light / dark choice, from a cookie. */
   readonly mode: Mode;
 }
@@ -29,7 +31,7 @@ export function chrome(context: Context): { siteTitle?: string; logoUrl?: string
     scheme: isScheme(context.ministry.colorScheme) ? context.ministry.colorScheme : DEFAULT_SCHEME,
     mode: context.mode,
     ...(context.ministry.logoUrl ? { logoUrl: context.ministry.logoUrl, logoTile: Boolean(context.ministry.logoTile) } : {}),
-    header: siteHeader(context.session, path, context.researchOpen, context.mode, path + context.url.search),
+    header: siteHeader(context.session, path, context.researchOpen, context.mode, path + context.url.search, context.bible),
     ...(isAdmin && path.startsWith("/admin") ? { aside: adminMenu(path) } : {}),
   };
 }

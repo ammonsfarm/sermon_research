@@ -21,6 +21,8 @@ import { clientIp, type Context, redirect, requireAdmin, chrome } from "./contex
 import type { AppEnv } from "./env.ts";
 import { APP_SCRIPT, STYLESHEET } from "./assets.ts";
 import { api } from "./api.ts";
+import { bibleState } from "./bible.ts";
+import { bibleAdmin, bibleBookPage, bibleChapterPage, biblePage } from "./bible-pages.ts";
 import { apiKeysPage, revokeApiKey } from "./api-keys.ts";
 import { page, SECURITY_HEADERS } from "./html.ts";
 import { serveAudio } from "./audio.ts";
@@ -81,8 +83,8 @@ export default {
     }
     await ensureSchema(env.DB);
     const session = await readSession(env.DB, readCookie(request, SESSION_COOKIE));
-    const [ministry, research] = await Promise.all([getSetting<Ministry>(env.DB, "ministry"), getSetting<{ access?: string }>(env.DB, "research")]);
-    const context: Context = { request, env, db: env.DB, url, session, ministry, researchOpen: research?.access === "public", mode: parseMode(readCookie(request, MODE_COOKIE)) };
+    const [ministry, research, bible] = await Promise.all([getSetting<Ministry>(env.DB, "ministry"), getSetting<{ access?: string }>(env.DB, "research"), bibleState(env.DB)]);
+    const context: Context = { request, env, db: env.DB, url, session, ministry, researchOpen: research?.access === "public", bible: Boolean(bible?.verses), mode: parseMode(readCookie(request, MODE_COOKIE)) };
     const response = await route(context);
     if (session?.refreshedToken && !response.headers.has("Set-Cookie")) {
       const headers = new Headers(response.headers);
@@ -99,7 +101,7 @@ export default {
   },
 } satisfies ExportedHandler<AppEnv>;
 
-export { DocumentWorkflow, EpisodeWorkflow } from "./workflow.ts";
+export { BibleWorkflow, DocumentWorkflow, EpisodeWorkflow } from "./workflow.ts";
 
 async function route(context: Context): Promise<Response> {
   const { request, url } = context;
@@ -136,6 +138,9 @@ async function route(context: Context): Promise<Response> {
     case "GET /research": return researchRedirect();
     case "POST /research": return ask(context);
     case "GET /episodes": return sermonsPage(context);
+    case "GET /bible": return biblePage(context);
+    case "GET /admin/bible":
+    case "POST /admin/bible": return bibleAdmin(context);
     case "GET /documents": return redirect("/library");
     case "GET /admin/research":
     case "POST /admin/research": return researchAdmin(context);
@@ -163,6 +168,8 @@ async function route(context: Context): Promise<Response> {
       if (document && request.method === "GET" && document[2] === ".md") return documentDownload(context, document[1]!);
       if (document && request.method === "POST" && document[2] === "/delete") return deleteDocument(context, document[1]!);
       if (document && request.method === "POST" && document[2] === "/retry") return retryDocument(context, document[1]!);
+      const bible = /^\/bible\/([a-z0-9-]{1,40})(?:\/(\d{1,3}))?$/u.exec(url.pathname);
+      if (bible && request.method === "GET") return bible[2] ? bibleChapterPage(context, bible[1]!, Number(bible[2])) : bibleBookPage(context, bible[1]!);
       const audio = /^\/audio\/([0-9a-f-]{36})$/u.exec(url.pathname);
       if (audio && (request.method === "GET" || request.method === "HEAD")) return serveAudio(context, audio[1]!, () => canViewResearch(context));
       if (url.pathname === "/admin/llm" || url.pathname.startsWith("/admin/llm/")) return llmAdmin(context);

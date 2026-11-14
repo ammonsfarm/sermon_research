@@ -1,6 +1,8 @@
 import { readFileSync } from "node:fs";
+import { crc32, deflateRawSync } from "node:zlib";
 
 import worker from "../src/index.ts";
+import { BIBLE } from "../src/bible.ts";
 import type { AppEnv } from "../src/env.ts";
 import { type PipelineStep, runEpisode } from "../src/pipeline.ts";
 import { resetSchemaCache } from "../src/schema.ts";
@@ -39,6 +41,8 @@ export interface TestApp {
   readonly workflow: FakeWorkflow;
   /** Document runs started and not yet run by runDocuments(). */
   readonly documentRuns: FakeDocumentWorkflow;
+  /** Ids of the Bible imports started. */
+  readonly bibleRuns: string[];
   /** Objects in the fake AUDIO bucket, by key. */
   readonly audio: Map<string, { bytes: Uint8Array; contentType: string | undefined }>;
   request(path: string, init?: { method?: string; form?: Record<string, string | string[]>; cookie?: string; headers?: Record<string, string> }): Promise<Response>;
@@ -49,14 +53,17 @@ export function createApp(overrides: Partial<AppEnv> = {}): TestApp {
   const vectors: FakeVectors = { stored: new Map(), deleted: [], queries: [] };
   const workflow: FakeWorkflow = { created: [], terminated: [], failing: false };
   const documentRuns: FakeDocumentWorkflow = { created: [], failing: false };
+  const bibleRuns: string[] = [];
   const VECTORS = {
     async upsert(items: VectorizeVector[]) {
       for (const item of items) vectors.stored.set(item.id, item);
       return { mutationId: "m" };
     },
-    async query(_vector: number[], options: { topK?: number; filter?: { episodeId?: { $in?: string[] } } } = {}) {
-      const allowed = options.filter?.episodeId?.$in;
-      const ids = [...vectors.stored.values()].filter((item) => !allowed || allowed.includes(String(item.metadata?.episodeId))).map((item) => item.id);
+    async query(_vector: number[], options: { topK?: number; filter?: { episodeId?: string | { $in?: string[]; $ne?: string } } } = {}) {
+      const wanted = options.filter?.episodeId;
+      const allowed = typeof wanted === "string" ? [wanted] : wanted?.$in;
+      const excluded = typeof wanted === "string" ? undefined : wanted?.$ne;
+      const ids = [...vectors.stored.values()].filter((item) => (!allowed || allowed.includes(String(item.metadata?.episodeId))) && item.metadata?.episodeId !== excluded).map((item) => item.id);
       vectors.queries.push(options);
       return { count: 0, matches: ids.slice(0, options.topK ?? 5).map((id) => ({ id, score: 0.9 })) };
     },
@@ -79,6 +86,12 @@ export function createApp(overrides: Partial<AppEnv> = {}): TestApp {
     async create(options: { id: string; params: { documentId: string } }) {
       if (documentRuns.failing) throw new Error("Workflows unavailable");
       documentRuns.created.push(options);
+      return { id: options.id };
+    },
+  };
+  const BIBLE_WORKFLOW = {
+    async create(options: { id: string }) {
+      bibleRuns.push(options.id);
       return { id: options.id };
     },
   };
@@ -106,12 +119,13 @@ export function createApp(overrides: Partial<AppEnv> = {}): TestApp {
       };
     },
   };
-  const env = { DB: createTestD1(), APP_SECRET: SECRET, VECTORS, EPISODE_WORKFLOW, DOCUMENT_WORKFLOW, AUDIO, ...overrides } as unknown as AppEnv;
+  const env = { DB: createTestD1(), APP_SECRET: SECRET, VECTORS, EPISODE_WORKFLOW, DOCUMENT_WORKFLOW, BIBLE_WORKFLOW, AUDIO, ...overrides } as unknown as AppEnv;
   return {
     env,
     vectors,
     workflow,
     documentRuns,
+    bibleRuns,
     audio,
     request(path, init = {}) {
       const headers = new Headers(init.headers);
@@ -143,6 +157,53 @@ export const FEED_XML = `<?xml version="1.0"?>
 <item><title>Grace Alone</title><guid>ep-1</guid><pubDate>Sun, 07 Sep 2026 15:00:00 GMT</pubDate>
 <enclosure url="https://cdn.example.org/ep1.mp3" length="1" type="audio/mpeg"/><itunes:duration>2700</itunes:duration></item>
 </channel></rss>`;
+
+/** A zip archive of `files`, deflated or stored, laid out as zip programs write them. */
+export function zipOf(files: Record<string, string>, deflate = true): Uint8Array {
+  const locals: Buffer[] = [];
+  const directory: Buffer[] = [];
+  let offset = 0;
+  for (const [name, content] of Object.entries(files)) {
+    const raw = Buffer.from(content);
+    const data = deflate ? deflateRawSync(raw) : raw;
+    const header = Buffer.alloc(30);
+    header.writeUInt32LE(0x04034b50, 0);
+    header.writeUInt16LE(deflate ? 8 : 0, 8);
+    header.writeUInt32LE(crc32(raw), 14);
+    header.writeUInt32LE(data.length, 18);
+    header.writeUInt32LE(raw.length, 22);
+    header.writeUInt16LE(Buffer.byteLength(name), 26);
+    const entry = Buffer.alloc(46);
+    entry.writeUInt32LE(0x02014b50, 0);
+    header.copy(entry, 10, 8, 30);
+    entry.writeUInt32LE(offset, 42);
+    locals.push(header, Buffer.from(name), data);
+    directory.push(entry, Buffer.from(name));
+    offset += 30 + Buffer.byteLength(name) + data.length;
+  }
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(Object.keys(files).length, 8);
+  end.writeUInt16LE(Object.keys(files).length, 10);
+  end.writeUInt32LE(Buffer.concat(directory).length, 12);
+  end.writeUInt32LE(offset, 16);
+  return new Uint8Array(Buffer.concat([...locals, ...directory, end]));
+}
+
+/** A few verses in eBible.org's verse-per-line layout. Acts 8:37 is empty, as in the real file, and Psalm 23 is long enough for two passages. */
+export const BIBLE_VERSES = [
+  "\uFEFFGEN 1:1 In the beginning, God created the heavens and the earth.",
+  "GEN 1:2 The earth was formless and empty.",
+  `PSA 23:1 Yahweh is my shepherd; I shall lack nothing. ${"He makes me lie down in green pastures. ".repeat(12)}`,
+  `PSA 23:2 He leads me beside still waters. ${"He restores my soul. ".repeat(25)}`,
+  "JOH 3:16 For God so loved the world, that he gave his only born Son, that whoever believes in him should not perish, but have eternal life.",
+  "JOH 3:17 For God didn’t send his Son into the world to judge the world, but that the world should be saved through him.",
+  "ACT 8:36 As they went on the way, they came to some water.",
+  "ACT 8:37 ",
+  "ACT 8:38 He commanded the chariot to stand still.",
+  "JUD 1:5 Now I desire to remind you <i>&</i> that the Lord saved a people out of the land of Egypt.",
+].join("\r\n");
+export const BIBLE_ZIP = zipOf({ "engwebp_about.htm": "<p>About</p>", "engwebp_vpl.txt": BIBLE_VERSES, "engwebp_vpl.xml": "<verseFile/>" });
 
 /** What the fake church website serves for every episode's MP3. */
 export const AUDIO_BYTES = new TextEncoder().encode("ID3 fake mp3 audio bytes");
@@ -246,6 +307,7 @@ export function fakeProviders(fail: Record<string, number> = {}): { calls: FakeC
     const failure = Object.entries(fail).find(([prefix]) => url.startsWith(prefix));
     if (failure) return new Response("{\"error\":\"nope\"}", { status: failure[1] });
     if (url.startsWith("https://cdn.example.org/")) return new Response(AUDIO_BYTES, { headers: { "Content-Type": "audio/mpeg", "Content-Length": String(AUDIO_BYTES.byteLength) } });
+    if (url === BIBLE.url) return new Response(BIBLE_ZIP, { headers: { "Content-Type": "application/zip" } });
     if (url === FEED_URL) return new Response(FEED_XML, { headers: { "Content-Type": "application/rss+xml" } });
     if (url.endsWith("/chat/completions")) {
       const messages = (body as { messages?: { role: string; content: string }[] } | null)?.messages ?? [];

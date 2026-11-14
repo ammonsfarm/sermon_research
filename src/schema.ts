@@ -296,6 +296,29 @@ export const MIGRATIONS: readonly Migration[] = [
       )`,
     ],
   },
+  {
+    version: 17,
+    statements: [
+      // The Bible text (src/bible.ts): every verse for reading, and runs of a few verses for search by meaning.
+      `CREATE TABLE IF NOT EXISTS bible_verses (
+        book INTEGER NOT NULL,
+        chapter INTEGER NOT NULL,
+        verse INTEGER NOT NULL,
+        text TEXT NOT NULL,
+        PRIMARY KEY (book, chapter, verse)
+      ) WITHOUT ROWID`,
+      `CREATE TABLE IF NOT EXISTS bible_passages (
+        id TEXT PRIMARY KEY,
+        book INTEGER NOT NULL,
+        chapter INTEGER NOT NULL,
+        verse_start INTEGER NOT NULL,
+        verse_end INTEGER NOT NULL,
+        text TEXT NOT NULL,
+        indexed INTEGER NOT NULL DEFAULT 0
+      )`,
+      `CREATE INDEX IF NOT EXISTS bible_passages_pending ON bible_passages(indexed, book, chapter, verse_start)`,
+    ],
+  },
 ];
 
 /**
