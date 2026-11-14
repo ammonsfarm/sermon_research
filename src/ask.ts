@@ -3,9 +3,9 @@ import { chrome, type Context, redirect } from "./context.ts";
 import { createDocument, type DocumentSummary, recentDocuments } from "./documents.ts";
 import { html, type Html, page } from "./html.ts";
 import {
-  answer, canViewResearch, type Exchange, gate, type Passage, QUESTION_MAX, renderAnswer, retrieve, sermonTextBudget, sourcesList, type StoredSource, toStored, useQuota,
+  answer, biblePassages, canViewResearch, type Exchange, gate, numbered, type Passage, QUESTION_MAX, renderAnswer, retrieve, sermonTextBudget, sourcesList, type StoredSource, toStored, useQuota,
 } from "./research.ts";
-import { type CatalogEntry, catalog, describeScope, isAll, parseScope, type Scope, scopeControls, scopeFields, scopeIds, titleWithoutSeries } from "./scope.ts";
+import { type CatalogEntry, catalog, describeScope, isAll, parseScope, type Scope, scopeControls, scopeFields, scopeIds, sermonScope, titleWithoutSeries } from "./scope.ts";
 import { type ModelChoice, modelChoices, parseModelKey } from "./llm.ts";
 import { getSetupStep } from "./settings.ts";
 import { mentionedSpeaker, speakerList } from "./speakers.ts";
@@ -57,6 +57,8 @@ ${options.fixedScope ? html`<input type="hidden" name="kind" value="answer">` : 
 <select id="f-kind" name="kind">${Object.entries(OUTPUTS).map(([value, label]) => html`<option value="${value}"${value === kind ? html` selected` : ""}${value !== "answer" && !signedIn ? html` disabled` : ""}>${label}</option>`)}</select>`}
 ${options.models?.length ? html`<label for="f-model" class="inline-label hint">Model</label>
 <select id="f-model" name="model"><option value="">Site default</option>${options.models.map((model) => html`<option value="${model.key}">${model.label}</option>`)}</select>` : ""}
+${context.bible && !options.thread && !options.fixedScope ? html`<label for="f-sources" class="inline-label hint">Answer from</label>
+<select id="f-sources" name="scope_sources"><option value="">Sermons</option><option value="both"${scope.sources === "both" ? html` selected` : ""}>Sermons and the Bible</option><option value="bible"${scope.sources === "bible" ? html` selected` : ""}>The Bible</option></select>` : ""}
 ${options.thread ? html`<input type="hidden" name="thread" value="${options.thread}">` : ""}${options.thread || options.fixedScope ? scopeFields(scope) : scopeControls(scope, options.entries)}
 <span class="spacer"></span>
 <button type="submit">${options.thread ? "Ask follow-up" : "Ask"}</button>
@@ -120,7 +122,7 @@ async function askPage(context: Context, options: { question?: string; kind?: Ou
   const latest = entries.slice(0, 4);
   return page("Ask", html`<section class="ask-hero">
 <h1>Ask the sermons</h1>
-<p class="lead">${entries.length} sermon${entries.length === 1 ? "" : "s"}${church ? ` from ${church}` : ""}. Answers quote the exact passages they come from.</p>
+<p class="lead">${entries.length} sermon${entries.length === 1 ? "" : "s"}${church ? ` from ${church}` : ""}${context.bible ? ", and the Bible" : ""}. Answers quote the exact passages they come from.</p>
 ${askBox(context, { question: options.question ?? "", kind: options.kind ?? "answer", scope: options.scope ?? {}, entries, models, autofocus: !options.result })}
 </section>
 ${options.result ?? ""}
@@ -137,7 +139,7 @@ ${!options.result && latest.length ? html`<section><h2>Latest sermons</h2>
 
 function threadList(threads: readonly ThreadSummary[], entries: readonly CatalogEntry[]): Html {
   return html`<ul class="list-plain">${threads.map((thread) => html`<li><a href="/ask/${thread.id}">${thread.question}</a><br>
-<span class="hint">${thread.turns} question${thread.turns === 1 ? "" : "s"} · ${thread.updated.slice(0, 10)}${isAll(thread.scope) ? "" : ` · ${describeScope(thread.scope, entries)}`}</span></li>`)}</ul>`;
+<span class="hint">${thread.turns} question${thread.turns === 1 ? "" : "s"} · ${thread.updated.slice(0, 10)}${isAll(thread.scope) && !thread.scope.sources ? "" : ` · ${describeScope(thread.scope, entries)}`}</span></li>`)}</ul>`;
 }
 
 /** GET /research: the old address of the Ask page. */
@@ -164,7 +166,12 @@ export async function ask(context: Context): Promise<Response> {
     if (!thread) return redirect("/");
     history = thread;
     scope = JSON.parse(thread[0]!.scope_json) as Scope;
-  } else if (!scope.speaker && !scope.episodes?.length) {
+  } else if (scope.sources && (!context.bible || kind !== "answer")) {
+    // Documents are written from the sermons, and the Bible can't be asked before it's added.
+    scope = sermonScope(scope);
+  }
+  const sermons = scope.sources !== "bible";
+  if (!threadId && sermons && !scope.speaker && !scope.episodes?.length) {
     // "What has Pastor Phil said about prayer?" searches only that speaker's sermons, and the scope says so.
     const speaker = mentionedSpeaker(question, speakerList(entries));
     if (speaker) scope = { ...scope, speaker };
@@ -176,7 +183,7 @@ export async function ask(context: Context): Promise<Response> {
   if (question.length < 3) return fail("Type a question first.", 400);
   if (kind !== "answer" && !context.session) return fail("Sign in to create documents.", 403);
   const ids = scopeIds(scope, entries);
-  if (ids?.length === 0) return fail("No sermons match that scope. Widen it and try again.", 400);
+  if (sermons && ids?.length === 0) return fail("No sermons match that scope. Widen it and try again.", 400);
 
   const limited = await useQuota(context);
   if (limited) return fail(limited, 429);
@@ -190,9 +197,11 @@ export async function ask(context: Context): Promise<Response> {
     // A follow-up like "what about in Matthew?" searches better alongside the question it follows.
     const searchText = history.length ? `${history.at(-1)!.question}\n${question}` : question;
     const who = { userId: context.session?.user.id ?? null, model };
-    const found = await retrieve(context.env, searchText, { episodeIds: ids, mode: scope.text, fullIds: scope.full, budget: await sermonTextBudget(context.env, who) });
-    passages = found.passages;
-    if (passages.length === 0) return fail("No sermons have been indexed yet, so there's nothing to answer from.", 200);
+    const found = sermons
+      ? await retrieve(context.env, searchText, { episodeIds: ids, mode: scope.text, fullIds: scope.full, budget: await sermonTextBudget(context.env, who) })
+      : { passages: [], note: null };
+    passages = numbered(found.passages, scope.sources ? await biblePassages(context.env, searchText) : []);
+    if (passages.length === 0) return fail(sermons ? "No sermons have been indexed yet, so there's nothing to answer from." : "The Bible isn't ready to be searched yet, so there's nothing to answer from.", 200);
     const exchanges: Exchange[] = history.map((turn) => ({ question: turn.question, answer: turn.answer }));
     text = await answer(context.env, context.ministry, question, passages, exchanges, who);
     if (found.note) text = `${text}\n\nNote: ${found.note}`;
@@ -206,7 +215,7 @@ export async function ask(context: Context): Promise<Response> {
     return askPage(context, {
       question, kind, scope,
       result: html`<section class="turn"><p class="question">${question}</p>
-${isAll(scope) ? "" : html`<p class="scope-note">Scope: <strong>${describeScope(scope, entries)}</strong></p>`}
+${isAll(scope) && !scope.sources ? "" : html`<p class="scope-note">Scope: <strong>${describeScope(scope, entries)}</strong></p>`}
 <div class="answer">${renderAnswer(text, passages.length)}</div>
 ${sourcesList(passages)}
 <p class="hint">AI answers can be wrong. Check the sources before quoting them.</p></section>`,

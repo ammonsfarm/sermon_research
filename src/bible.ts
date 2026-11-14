@@ -73,6 +73,12 @@ const ALIASES: Readonly<Record<string, string>> = {
   psalm: "Psalms", "song of songs": "Song of Solomon", song: "Song of Solomon", canticles: "Song of Solomon", revelations: "Revelation",
   gen: "Genesis", ex: "Exodus", deut: "Deuteronomy", ps: "Psalms", prov: "Proverbs", matt: "Matthew", mk: "Mark", lk: "Luke", jn: "John",
   rom: "Romans", phil: "Philippians", philem: "Philemon", heb: "Hebrews", jas: "James", rev: "Revelation",
+  lev: "Leviticus", num: "Numbers", josh: "Joshua", judg: "Judges", neh: "Nehemiah", eccl: "Ecclesiastes", isa: "Isaiah", jer: "Jeremiah",
+  lam: "Lamentations", ezek: "Ezekiel", dan: "Daniel", hos: "Hosea", mic: "Micah", hab: "Habakkuk", zeph: "Zephaniah", hag: "Haggai",
+  zech: "Zechariah", mal: "Malachi", gal: "Galatians", eph: "Ephesians", col: "Colossians", tit: "Titus",
+  "1 sam": "1 Samuel", "2 sam": "2 Samuel", "1 kgs": "1 Kings", "2 kgs": "2 Kings", "1 chron": "1 Chronicles", "2 chron": "2 Chronicles",
+  "1 cor": "1 Corinthians", "2 cor": "2 Corinthians", "1 thess": "1 Thessalonians", "2 thess": "2 Thessalonians",
+  "1 tim": "1 Timothy", "2 tim": "2 Timothy", "1 pet": "1 Peter", "2 pet": "2 Peter", "1 jn": "1 John", "2 jn": "2 John", "3 jn": "3 John",
 };
 
 export interface Reference {
@@ -104,6 +110,34 @@ export function parseReference(text: string): Reference | null {
   if (book.chapters === 1 && !match[4]) return { book, chapter: 1, verse: chapter > 1 ? chapter : null };
   if (chapter < 1 || chapter > book.chapters) return null;
   return { book, chapter, verse: match[4] ? Number(match[4]) : null };
+}
+
+export interface Mention {
+  readonly book: Book;
+  readonly chapter: number;
+  /** The verses named, or null for the whole chapter. */
+  readonly from: number | null;
+  readonly to: number | null;
+}
+
+const NAMES = [...BOOKS.map((book) => book.name.toLowerCase()), ...Object.keys(ALIASES)]
+  .sort((a, b) => b.length - a.length)
+  .map((name) => name.replace(/^([1-3]) /u, (_match, digit: string) => `(?:${digit}|${"i".repeat(Number(digit))})\\s?`));
+const MENTION = new RegExp(`(?<![a-z0-9])(${NAMES.join("|")})\\.?\\s+(\\d{1,3})(?:\\s?:\\s?(\\d{1,3})(?:\\s?[-–—]\\s?(\\d{1,3}))?)?`, "giu");
+const MAX_MENTIONS = 3;
+
+/** The references written in a question, like "What does Romans 8:28-30 mean?", so those verses can be read rather than searched for. */
+export function referencesIn(text: string): Mention[] {
+  const found = new Map<string, Mention>();
+  for (const match of text.matchAll(MENTION)) {
+    const place = parseReference(`${match[1]} ${match[2]}${match[3] ? `:${match[3]}` : ""}`);
+    if (!place?.chapter) continue;
+    const from = place.verse;
+    const to = from !== null && match[4] && Number(match[4]) >= from ? Number(match[4]) : from;
+    found.set(`${place.book.number}:${place.chapter}:${from}:${to}`, { book: place.book, chapter: place.chapter, from, to });
+    if (found.size === MAX_MENTIONS) break;
+  }
+  return [...found.values()];
 }
 
 // ------------------------------------------------------------------ the text
@@ -341,6 +375,10 @@ export async function importBible(env: AppEnv, step: PipelineStep): Promise<void
 
 type PassageRow = { id: string; book: number; chapter: number; verse_start: number; verse_end: number; text: string };
 
+function fromRow(row: PassageRow): BiblePassage {
+  return { id: row.id, book: row.book, chapter: row.chapter, verseStart: row.verse_start, verseEnd: row.verse_end, text: row.text };
+}
+
 /** The passages closest in meaning to `query`, best first. One embeddings call. */
 export async function searchBible(env: AppEnv, query: string, topK = 10): Promise<BiblePassage[]> {
   const [vector] = await embed([query], await requireKey(env, "embeddings"));
@@ -351,8 +389,36 @@ export async function searchBible(env: AppEnv, query: string, topK = 10): Promis
   const byId = new Map(results.map((row) => [row.id, row]));
   return ids.flatMap((id) => {
     const row = byId.get(id);
-    return row ? [{ id: row.id, book: row.book, chapter: row.chapter, verseStart: row.verse_start, verseEnd: row.verse_end, text: row.text }] : [];
+    return row ? [fromRow(row)] : [];
   });
+}
+
+/** Passages of one chapter a reference can bring in; enough for all but the longest chapters. */
+const MENTION_PASSAGES = 8;
+
+/**
+ * Bible passages to answer a question from: the verses the question names,
+ * then the `topK` passages closest to it in meaning. Passages that follow one
+ * another in a chapter are joined, so a chapter reads as one source.
+ */
+export async function bibleForQuestion(env: AppEnv, question: string, topK: number): Promise<BiblePassage[]> {
+  const named: BiblePassage[] = [];
+  for (const mention of referencesIn(question)) {
+    const { results } = await env.DB.prepare("SELECT id, book, chapter, verse_start, verse_end, text FROM bible_passages WHERE book = ? AND chapter = ? AND verse_end >= ? AND verse_start <= ? ORDER BY verse_start LIMIT ?")
+      .bind(mention.book.number, mention.chapter, mention.from ?? 1, mention.to ?? 999, MENTION_PASSAGES).all<PassageRow>();
+    named.push(...results.map(fromRow));
+  }
+  const seen = new Set<string>();
+  const joined: BiblePassage[] = [];
+  for (const passage of [...named, ...await searchBible(env, question, topK)]) {
+    if (seen.has(passage.id)) continue;
+    seen.add(passage.id);
+    const last = joined.at(-1);
+    if (last && last.book === passage.book && last.chapter === passage.chapter && passage.verseStart === last.verseEnd + 1) {
+      joined[joined.length - 1] = { ...last, verseEnd: passage.verseEnd, text: `${last.text} ${passage.text}` };
+    } else joined.push(passage);
+  }
+  return joined;
 }
 
 /** Verses containing the words as typed, in Bible order. */

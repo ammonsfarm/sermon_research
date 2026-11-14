@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { BIBLE, bibleState, BOOKS, buildPassages, importBible, parseReference, parseVerses, passageLabel, searchBible, unzipFile } from "../src/bible.ts";
+import { BIBLE, bibleState, BOOKS, buildPassages, importBible, parseReference, parseVerses, passageLabel, referencesIn, searchBible, unzipFile } from "../src/bible.ts";
 import { nearest } from "../src/research.ts";
 import { BIBLE_VERSES, completeSetup, cookieFrom, createApp, fakeProviders, indexedSite, inlineStep, zipOf } from "./helpers.ts";
 
@@ -154,5 +154,73 @@ test("a failed download is reported, and only admins can add the Bible", async (
     assert.equal(cookieFrom(await app.request("/bible", { cookie })), "");
   } finally {
     providers.restore();
+  }
+});
+
+test("references written in a question are found", () => {
+  const found = (text: string) => referencesIn(text).map((mention) => `${mention.book.name} ${mention.chapter}:${mention.from ?? "-"}-${mention.to ?? "-"}`);
+  assert.deepEqual(found("What does Romans 8:28-30 mean, and how does it fit with 1 John 4?"), ["Romans 8:28-30", "1 John 4:---"]);
+  assert.deepEqual(found("compare john 3:16, John 3:16 and II Tim. 2:15"), ["John 3:16-16", "2 Timothy 2:15-15"]);
+  assert.deepEqual(found("Jude 5 and Psalm 23"), ["Jude 1:5-5", "Psalms 23:---"]);
+  assert.deepEqual(found("I have 3 questions about acts of kindness, mark my words, and the 12 disciples"), []);
+  assert.deepEqual(found("John 99:1"), []);
+  assert.equal(found("Gen 1, Ex 2, Lev 3, Num 4, Deut 5").length, 3, "at most three");
+});
+
+test("Ask answers from the Bible, or from the sermons and the Bible together", async () => {
+  const site = await indexedSite();
+  try {
+    const { app, cookie } = site;
+    const prompts = () => site.providers.calls.filter((call) => call.url.endsWith("/chat/completions")).map((call) => (call.body as { messages: { content: string }[] }).messages);
+
+    assert.doesNotMatch(await (await app.request("/", { cookie })).text(), /name="scope_sources"/, "no choice until the Bible is added");
+    await app.request("/research", { cookie, form: { question: "What is grace?", scope_sources: "bible" } });
+    assert.doesNotMatch(prompts().at(-1)![1]!.content, /The Bible,/, "asking for the Bible before it's added answers from the sermons");
+
+    await importBible(app.env, inlineStep);
+    const page = await (await app.request("/", { cookie })).text();
+    assert.match(page, /<select id="f-sources" name="scope_sources"><option value="">Sermons<\/option><option value="both">Sermons and the Bible<\/option><option value="bible">The Bible<\/option>/);
+
+    await app.request("/research", { cookie, form: { question: "What is grace?" } });
+    assert.doesNotMatch(prompts().at(-1)![1]!.content, /The Bible,/, "sermons alone unless asked");
+
+    const asked = await app.request("/research", { cookie, form: { question: "What does John 3:16 say about love?", scope_sources: "bible", scope_series: "No such series" } });
+    assert.equal(asked.status, 303, "a sermon scope doesn't matter when only the Bible is asked");
+    const [system, user] = prompts().at(-1)!.map((message) => message.content) as [string, string];
+    assert.match(system, /study the Bible\. Answer only from the numbered sources, which are passages from the Bible \(World English Bible\)/);
+    assert.match(user, /^Sources:\n\n\[1\] The Bible, John 3:16-17 \(World English Bible\):\nFor God so loved the world/, "the verse the question names comes first");
+    assert.doesNotMatch(user, /Grace Alone|Welcome, church/);
+    assert.equal((user.match(/The Bible, John 3:16-17/g) ?? []).length, 1, "and isn't repeated by the search");
+    const thread = asked.headers.get("Location")!;
+    const conversation = await (await app.request(thread.split("#")[0]!, { cookie })).text();
+    assert.match(conversation, /Scope: <strong>The Bible<\/strong>/);
+    assert.match(conversation, /<a href="\/bible\/john\/3#v16">John 3:16-17<\/a>\s*<span class="hint">World English Bible<\/span>/);
+    assert.match(conversation, /name="scope_sources" value="bible"/, "a follow-up keeps asking the Bible");
+    assert.doesNotMatch(conversation, /id="f-sources"/);
+
+    await app.request("/research", { cookie, form: { question: "And the shepherd?", thread: thread.split("#")[0]!.split("/").at(-1)!, scope_sources: "" } });
+    assert.match(prompts().at(-1)![1]!.content, /\[1\] The Bible, John 3:16-17/, "the follow-up is searched with the question before it");
+    assert.doesNotMatch(prompts().at(-1)![1]!.content, /Welcome, church/);
+
+    const both = await app.request("/research", { cookie, form: { question: "What is grace?", scope_sources: "both" } });
+    const [bothSystem, bothUser] = prompts().at(-1)!.map((message) => message.content) as [string, string];
+    assert.match(bothSystem, /You help people study sermons preached at Grace Church\..*each marked "The Bible"\. Make clear which is which/);
+    assert.match(bothUser, /\[1\] "(Grace Alone|Faith & Works)"/, "sermons first");
+    assert.match(bothUser, /Welcome, church/);
+    assert.match(bothUser, /\] The Bible, Genesis 1:1-2 \(World English Bible\)/);
+    const numbers = [...bothUser.matchAll(/^\[(\d+)\] /gm)].map((match) => Number(match[1]));
+    assert.deepEqual(numbers, numbers.map((_n, index) => index + 1), "one run of numbers across both");
+    const bothPage = await (await app.request(both.headers.get("Location")!.split("#")[0]!, { cookie })).text();
+    assert.match(bothPage, /Scope: <strong>All sermons, and the Bible<\/strong>/);
+    assert.match(bothPage, /href="\/episodes\/[0-9a-f-]{36}#t-\d+"/);
+    assert.match(bothPage, /href="\/bible\/genesis\/1#v1"/);
+
+    const documents = app.documentRuns.created.length;
+    await app.request("/research", { cookie, form: { question: "An outline on grace", kind: "outline", scope_sources: "bible" } });
+    assert.equal(app.documentRuns.created.length, documents + 1, "documents are still written from the sermons");
+    const saved = await app.env.DB.prepare("SELECT scope_json FROM documents ORDER BY created_at DESC LIMIT 1").first<{ scope_json: string }>();
+    assert.doesNotMatch(saved!.scope_json, /sources/);
+  } finally {
+    site.restore();
   }
 });

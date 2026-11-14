@@ -73,7 +73,8 @@ assistant at this repo. [AGENTS.md](AGENTS.md) tells it how to help.
   and the transcript is split into timestamped passages and indexed for search
 - The Bible on its own tab: an admin adds the World English Bible (public
   domain, from eBible.org) in Admin → Bible, and people read it by book and
-  chapter and search it by reference, by words or by meaning
+  chapter and search it by reference, by words or by meaning. Questions can
+  be answered from the sermons, the Bible, or both, with every Bible passage cited
 - A live episodes dashboard that refreshes itself while work runs, showing
   each episode's current step, retry errors and when the background worker
   last ran, with retry (one or all failed), "check now" and importing older

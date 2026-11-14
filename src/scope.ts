@@ -13,6 +13,8 @@ export interface Scope {
   readonly text?: "full" | "search";
   /** Sermons whose whole text always goes in, with the rest of the scope searched for related passages. */
   readonly full?: readonly string[];
+  /** What an answer draws on besides or instead of the sermons: "bible" is the Bible alone, "both" is the sermons and the Bible. Unset means the sermons. */
+  readonly sources?: "bible" | "both";
 }
 
 export interface CatalogEntry {
@@ -65,7 +67,9 @@ export function parseScope(values: FormData | URLSearchParams): Scope {
   const episodes = [...new Set(values.getAll("scope_episode").map(String).filter((id) => ID.test(id)))].slice(0, MAX_PICKED);
   const mode = text("scope_text");
   const full = [...new Set(values.getAll("scope_full").map(String).filter((id) => ID.test(id)))].slice(0, MAX_PICKED);
+  const sources = text("scope_sources");
   return {
+    ...(sources === "bible" || sources === "both" ? { sources } : {}),
     ...(mode === "full" || mode === "search" ? { text: mode } : {}),
     ...(full.length ? { full } : {}),
     ...(series ? { series } : {}),
@@ -74,6 +78,12 @@ export function parseScope(values: FormData | URLSearchParams): Scope {
     ...(DATE.test(to) ? { to } : {}),
     ...(episodes.length ? { episodes } : {}),
   };
+}
+
+/** The scope without its choice of sources: just which sermons. */
+export function sermonScope(scope: Scope): Scope {
+  const { sources: _sources, ...sermons } = scope;
+  return sermons;
 }
 
 export function isAll(scope: Scope): boolean {
@@ -97,6 +107,8 @@ export function scopeIds(scope: Scope, entries: readonly CatalogEntry[]): string
 
 /** A short description, like "Series: Matthew, Speaker: Jane Doe, from 2026-01-01" or "“Grace Alone”". */
 export function describeScope(scope: Scope, entries: readonly CatalogEntry[]): string {
+  if (scope.sources === "bible") return "The Bible";
+  if (scope.sources === "both") return `${describeScope(sermonScope(scope), entries)}, and the Bible`;
   if (isAll(scope)) return "All sermons";
   const parts: string[] = [];
   if (scope.episodes?.length) {
@@ -113,17 +125,18 @@ export function describeScope(scope: Scope, entries: readonly CatalogEntry[]): s
 
 /** Hidden fields that carry a scope into a follow-up question. */
 export function scopeFields(scope: Scope): Html {
-  return html`${scope.series ? html`<input type="hidden" name="scope_series" value="${scope.series}">` : ""}${scope.speaker ? html`<input type="hidden" name="scope_speaker" value="${scope.speaker}">` : ""}${scope.from ? html`<input type="hidden" name="scope_from" value="${scope.from}">` : ""}${scope.to ? html`<input type="hidden" name="scope_to" value="${scope.to}">` : ""}${(scope.episodes ?? []).map((id) => html`<input type="hidden" name="scope_episode" value="${id}">`)}${scope.text ? html`<input type="hidden" name="scope_text" value="${scope.text}">` : ""}${(scope.full ?? []).map((id) => html`<input type="hidden" name="scope_full" value="${id}">`)}`;
+  return html`${scope.sources ? html`<input type="hidden" name="scope_sources" value="${scope.sources}">` : ""}${scope.series ? html`<input type="hidden" name="scope_series" value="${scope.series}">` : ""}${scope.speaker ? html`<input type="hidden" name="scope_speaker" value="${scope.speaker}">` : ""}${scope.from ? html`<input type="hidden" name="scope_from" value="${scope.from}">` : ""}${scope.to ? html`<input type="hidden" name="scope_to" value="${scope.to}">` : ""}${(scope.episodes ?? []).map((id) => html`<input type="hidden" name="scope_episode" value="${id}">`)}${scope.text ? html`<input type="hidden" name="scope_text" value="${scope.text}">` : ""}${(scope.full ?? []).map((id) => html`<input type="hidden" name="scope_full" value="${id}">`)}`;
 }
 
 /** The "Scope" disclosure in the ask box: series, dates and specific sermons. */
 export function scopeControls(scope: Scope, entries: readonly CatalogEntry[]): Html {
+  const sermons = sermonScope(scope);
   const series = seriesList(entries);
   const speakers = speakerList(entries);
   const picked = new Set(scope.episodes ?? []);
   const whole = new Set(scope.full ?? []);
   return html`<details class="scope"${isAll(scope) && !scope.text && !scope.full?.length ? "" : html` open`}>
-<summary>Scope: ${describeScope(scope, entries)}</summary>
+<summary>Scope: ${describeScope(sermons, entries)}</summary>
 <div class="scope-body">
 <div><label for="f-scope-series">Series</label>
 <select id="f-scope-series" name="scope_series"><option value="">Any series</option>${series.map((name) => html`<option value="${name}"${name === scope.series ? html` selected` : ""}>${name}</option>`)}</select></div>
