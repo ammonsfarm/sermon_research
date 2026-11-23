@@ -280,6 +280,28 @@ export async function readMuseUpload(body: Blob, contentType: string): Promise<M
   };
 }
 
+/** The fake transcription server's address, as an admin would enter it. */
+export const SERVER_URL = "https://whisper.example.org/v1";
+
+/** A transcription server request as the server would read it: the form fields, and the file's name, type and bytes. */
+export interface ServerUpload {
+  readonly fields: Record<string, string>;
+  readonly file: { readonly name: string; readonly type: string; readonly bytes: Uint8Array };
+  /** True when the body came as a stream, as it must for long sermons. */
+  readonly streamed: boolean;
+}
+
+async function readServerUpload(body: BodyInit, contentType: string): Promise<ServerUpload> {
+  const form = await new Response(body, { headers: { "Content-Type": contentType } }).formData();
+  const fields: Record<string, string> = {};
+  let file: ServerUpload["file"] | null = null;
+  for (const [name, value] of form) {
+    if (typeof value === "string") fields[name] = value;
+    else file = { name: value.name, type: value.type, bytes: new Uint8Array(await value.arrayBuffer()) };
+  }
+  return { fields, file: file!, streamed: body instanceof ReadableStream };
+}
+
 /** Muse hears two turns in any part with sound, its first and second half, and nothing in silence. */
 function museReply(upload: MuseUpload) {
   const ms = Math.round(upload.wav.samples.length / upload.wav.rate * 1000);
@@ -302,7 +324,8 @@ export function fakeProviders(fail: Record<string, number> = {}): { calls: FakeC
     const url = String(input instanceof Request ? input.url : input);
     const headers = new Headers(init.headers);
     const body = typeof init.body === "string" ? JSON.parse(init.body)
-      : init.body instanceof Blob && url === "https://api.meta.ai/v1/asr/transcribe" ? await readMuseUpload(init.body, headers.get("Content-Type") ?? "") : null;
+      : init.body instanceof Blob && url === "https://api.meta.ai/v1/asr/transcribe" ? await readMuseUpload(init.body, headers.get("Content-Type") ?? "")
+        : init.body && url.startsWith(SERVER_URL) ? await readServerUpload(init.body, headers.get("Content-Type") ?? "") : null;
     calls.push({ url, method: init.method ?? "GET", authorization: headers.get("Authorization"), userAgent: headers.get("User-Agent"), body });
     const failure = Object.entries(fail).find(([prefix]) => url.startsWith(prefix));
     if (failure) return new Response("{\"error\":\"nope\"}", { status: failure[1] });
@@ -329,6 +352,10 @@ export function fakeProviders(fail: Record<string, number> = {}): { calls: FakeC
     }
     if (url === "https://api.mistral.ai/v1/audio/transcriptions") return Response.json({ text: "full", segments: TRANSCRIPT_SEGMENTS });
     if (url === "https://api.meta.ai/v1/asr/transcribe") return Response.json(museReply(body as MuseUpload));
+    // A whisper-style server: silence comes back empty, anything else in verbose_json with segments.
+    if (url === `${SERVER_URL}/audio/transcriptions`) {
+      return Response.json((body as ServerUpload).file.type === "audio/wav" ? { text: "" } : { task: "transcribe", language: "en", duration: 11, text: "full", segments: TRANSCRIPT_SEGMENTS.map((segment, id) => ({ id, ...segment, tokens: [], avg_logprob: -0.2 })) });
+    }
     if (url === "https://api.mistral.ai/v1/models") return Response.json({ data: [] });
     if (url === "https://api.openai.com/v1/models") return Response.json({ data: ["gpt-test", "gpt-5-mini", "o3", "text-embedding-3-small", "gpt-4o-transcribe"].map((id) => ({ id })) });
     if (url === "https://api.meta.ai/v1/models") return Response.json({ data: [{ id: "muse-test" }, { id: "muse-two" }] });
@@ -343,6 +370,7 @@ export const PROVIDERS = {
   embeddings: { apiKey: "" },
   transcription: { apiKey: "mistral-key-5678" },
   muse: { provider: "muse", apiKey: "muse-key-4321" },
+  server: { provider: "server", baseUrl: SERVER_URL, model: "Systran/faster-whisper-large-v3", apiKey: "" },
   email: { intent: "save", from: "Grace Church <sermons@grace.example>", apiKey: "re_key_9999" },
 };
 

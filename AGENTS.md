@@ -18,7 +18,7 @@ before anything in the "Ask first" list below.
 | `src/llm.ts` | Answers-AI providers and models: the five built-in providers, how each one's chat request differs (`chatBody`), listing a provider's models and working out their reasoning levels (`fetchCatalog`), site defaults and fallbacks per job, per-person limits, `resolveTargets`, which picks the models for a call, and `chatWithFallback`, which tries them in turn |
 | `src/llm-admin.ts` | Admin → Answers AI (`/admin/llm/*`): providers and keys, pulling and adding models, the model, effort and fallbacks for each job, and models per person |
 | `src/feed.ts` | Podcast RSS fetch and parse, including each episode's description and author |
-| `src/providers.ts` | Live checks and calls to OpenAI-compatible APIs, OpenAI embeddings, Mistral, Muse transcription (with its error messages) and Resend |
+| `src/providers.ts` | Live checks and calls to OpenAI-compatible APIs, OpenAI embeddings, Mistral, Muse transcription and the admin's own transcription server (with their error messages), and Resend |
 | `src/keys.ts` | API keys stored AES-GCM encrypted in `provider_keys` |
 | `src/links.ts` | Emailed sign-in links |
 | `src/imports.ts` | Import step with cost estimate, episodes dashboard (filtered by text and status, 200 a page), schedule page, hourly cron logic |
@@ -330,7 +330,8 @@ first request after each deploy.
   at once" (1 to 5, default 2). Use 1 for free or low-limit provider plans.
 - **Transcription service:** Admin → Transcription chooses Mistral (the
   default; sites set up before the choice existed have no `provider` and
-  read as Mistral) or Muse (`muse-voice-transcribe-1.0`). Both use the same
+  read as Mistral), Muse (`muse-voice-transcribe-1.0`) or the admin's own
+  server (next item). Mistral and Muse use the same
   `transcription` key slot, so switching needs the other service's key; the
   Muse check transcribes one second of silence. Mistral fetches the audio
   itself from a signed link. Muse only takes mono 16-bit WAV of up to 10
@@ -352,6 +353,29 @@ first request after each deploy.
   about 3 seconds of CPU and 45 MB of memory, inside the Workers Paid
   plan's 30-second default. Muse can't take M4A, AAC or other non-MP3
   feeds; those episodes fail with a message saying to switch to Mistral.
+- **Your own transcription server:** the third choice in Admin →
+  Transcription (`provider: "server"`) works with any server that offers
+  OpenAI's `POST /audio/transcriptions`, such as whisper.cpp's server,
+  faster-whisper (speaches), LocalAI or vLLM. The admin enters the address
+  up to `/audio/transcriptions` (usually ending in `/v1`; a pasted full
+  endpoint is trimmed), the model name the server expects, and a key if it
+  needs one. The address must be https and reachable from the internet:
+  Workers can't reach `localhost` or a home network. The key has its own
+  slot, `transcription:server`, so Mistral's or Muse's key is never sent to
+  the server, and it can be left blank. The check transcribes one second of
+  silence (an empty reply is fine). Each episode is one workflow step,
+  "transcribe with your server" (`serverTranscribe` in `src/providers.ts`):
+  the R2 copy of the audio is streamed to the server as the multipart
+  `file`, with `model`, `response_format=verbose_json` and
+  `timestamp_granularities[]=segment`, waiting up to 14 minutes. Timed
+  `segments` become the draft; a reply with only `text` becomes one untimed
+  segment, so the read-along can't follow along. The draft's `model` is the
+  server's model name, and it's cleaned up like the others. **A server
+  behind a Cloudflare Tunnel or other Cloudflare proxy fails with HTTP 524
+  after 100 seconds**, which is shorter than a sermon takes on most
+  machines. Reach it another way (Tailscale Funnel, a port forward with
+  HTTPS and a certificate), or make sure it answers within 100 seconds. The
+  import estimate counts it as free.
 - **Transcription says the file couldn't be fetched:** Mistral downloads the
   audio from `/audio/:id` on this site using a signed link, so the site must
   be reachable publicly. The link's origin is saved as `site_origin` whenever

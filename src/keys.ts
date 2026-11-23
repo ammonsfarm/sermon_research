@@ -1,7 +1,10 @@
 import { seal, unseal } from "./crypto.ts";
 
-/** Where each provider's API key is stored. */
-export type KeySlot = "llm" | "embeddings" | "transcription" | "email" | `llm:${string}`;
+/**
+ * Where each provider's API key is stored. A transcription server's key has its
+ * own slot, so Mistral's or Muse's key is never sent to the admin's server.
+ */
+export type KeySlot = "llm" | "embeddings" | "transcription" | "transcription:server" | "email" | `llm:${string}`;
 
 export interface StoredKeyInfo {
   readonly last4: string;

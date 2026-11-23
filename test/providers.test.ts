@@ -3,9 +3,9 @@ import test from "node:test";
 
 import { getKey } from "../src/keys.ts";
 import { getDefaults, listModels } from "../src/llm.ts";
-import { MuseTranscribeError, museTranscribe, providerMessage, sendEmail } from "../src/providers.ts";
+import { MuseTranscribeError, museTranscribe, providerMessage, sendEmail, serverBaseUrl, ServerTranscribeError, serverTranscribe } from "../src/providers.ts";
 import { getSetting, type TranscriptionSettings } from "../src/settings.ts";
-import { ADMIN, completeSetup, cookieFrom, createApp, fakeProviders, FEED_URL, MINISTRY, type MuseUpload, PROVIDERS, SECRET } from "./helpers.ts";
+import { ADMIN, completeSetup, cookieFrom, createApp, fakeProviders, FEED_URL, MINISTRY, type MuseUpload, PROVIDERS, SECRET, SERVER_URL, type ServerUpload } from "./helpers.ts";
 
 async function atStep(step: string) {
   const app = createApp();
@@ -130,7 +130,7 @@ test("transcription is Mistral unless the admin picks Muse, which is checked wit
 
     const unknown = await app.request("/setup/transcription", { form: { provider: "whisper", apiKey: "k" }, cookie });
     assert.equal(unknown.status, 400);
-    assert.match(await unknown.text(), /Choose Mistral or Muse\./);
+    assert.match(await unknown.text(), /Choose Mistral, Muse or your own server\./);
     assert.equal(providers.calls.length, 0, "nothing is sent for an unknown service");
 
     const refused = fakeProviders({ "https://api.meta.ai/v1/asr/transcribe": 401 });
@@ -178,6 +178,103 @@ test("the admin overview names the transcription service", async () => {
   assert.match(await (await app.request("/admin", { cookie })).text(), /<dd>Muse muse-voice-transcribe-1\.0 · key ending 4321<\/dd>/);
   await app.env.DB.prepare("UPDATE settings SET value_json = json_remove(value_json, '$.provider') WHERE key = 'transcription'").run();
   assert.match(await (await app.request("/admin", { cookie })).text(), /<dd>Mistral muse-voice-transcribe-1\.0/, "a setting saved before Muse was offered reads as Mistral");
+  const server = fakeProviders();
+  try {
+    await app.request("/admin/transcription", { form: { ...PROVIDERS.server, apiKey: "server-key-2468" }, cookie });
+  } finally {
+    server.restore();
+  }
+  assert.match(await (await app.request("/admin", { cookie })).text(), /<dd>Your server \(Systran\/faster-whisper-large-v3\) · key ending 2468<\/dd>/);
+});
+
+test("an admin's own transcription server is checked with a second of silence and never gets Mistral's key", async () => {
+  const { app, cookie } = await atStep("transcription");
+  const providers = fakeProviders();
+  const serverCalls = () => providers.calls.filter((call) => call.url.startsWith(SERVER_URL));
+  try {
+    const form = await (await app.request("/setup/transcription", { cookie })).text();
+    assert.match(form, /<input type="radio" name="provider" value="server"><span><strong>Your own server<\/strong>/);
+    assert.match(form, /name="baseUrl" type="url"/);
+
+    const invalid = await app.request("/setup/transcription", { form: { ...PROVIDERS.server, baseUrl: "http://whisper.example.org/v1", model: "" }, cookie });
+    assert.equal(invalid.status, 400);
+    const page = await invalid.text();
+    assert.match(page, /Use an https:\/\/ address\./);
+    assert.match(page, /Enter the model name your server expects\./);
+    assert.match(page, /value="server" checked/, "the choice is kept");
+    assert.match(page, /value="http:\/\/whisper\.example\.org\/v1"/, "and what was typed");
+    assert.equal(serverCalls().length, 0);
+
+    // Mistral's key is saved first; switching to a server without a key must not send it.
+    await app.request("/setup/transcription", { form: PROVIDERS.transcription, cookie });
+    const saved = await app.request("/setup/transcription", { form: { ...PROVIDERS.server, baseUrl: `${SERVER_URL}/audio/transcriptions/` }, cookie });
+    assert.equal(saved.headers.get("Location"), "/setup/email");
+    const check = serverCalls().at(-1)!;
+    assert.equal(check.url, `${SERVER_URL}/audio/transcriptions`, "a pasted endpoint is trimmed to the base address");
+    assert.equal(check.method, "POST");
+    assert.equal(check.authorization, null, "no key, and never the Mistral one");
+    const upload = check.body as ServerUpload;
+    assert.deepEqual(upload.fields, { model: "Systran/faster-whisper-large-v3", response_format: "verbose_json", "timestamp_granularities[]": "segment" });
+    assert.deepEqual([upload.file.name, upload.file.type, upload.file.bytes.byteLength], ["check.wav", "audio/wav", 44 + 32_000], "one second of 16 kHz mono silence");
+    assert.ok(upload.streamed);
+    const setting = await getSetting<TranscriptionSettings>(app.env.DB, "transcription");
+    assert.deepEqual([setting?.provider, setting?.model, setting?.baseUrl], ["server", "Systran/faster-whisper-large-v3", SERVER_URL]);
+    assert.equal(await getKey(app.env.DB, SECRET, "transcription"), "mistral-key-5678", "Mistral's key stays for switching back");
+    assert.equal(await getKey(app.env.DB, SECRET, "transcription:server"), null);
+    const reopened = await (await app.request("/setup/transcription", { cookie })).text();
+    assert.match(reopened, /value="server" checked/);
+    assert.match(reopened, new RegExp(`name="baseUrl" type="url" value="${SERVER_URL}"`));
+
+    // A key is kept in the server's own slot, reused when left blank, and can be removed.
+    await app.request("/setup/transcription", { form: { ...PROVIDERS.server, apiKey: "server-key-2468" }, cookie });
+    assert.equal(serverCalls().at(-1)!.authorization, "Bearer server-key-2468");
+    assert.equal(await getKey(app.env.DB, SECRET, "transcription:server"), "server-key-2468");
+    await app.request("/setup/transcription", { form: PROVIDERS.server, cookie });
+    assert.equal(serverCalls().at(-1)!.authorization, "Bearer server-key-2468");
+    await app.request("/setup/transcription", { form: { ...PROVIDERS.server, noKey: "1" }, cookie });
+    assert.equal(serverCalls().at(-1)!.authorization, null);
+    assert.equal(await getKey(app.env.DB, SECRET, "transcription:server"), null);
+  } finally {
+    providers.restore();
+  }
+
+  const down = fakeProviders({ [SERVER_URL]: 404 });
+  try {
+    const refused = await app.request("/setup/transcription", { form: PROVIDERS.server, cookie });
+    assert.equal(refused.status, 400);
+    assert.match(await refused.text(), /Your transcription server has nothing at https:\/\/whisper\.example\.org\/v1\/audio\/transcriptions \(HTTP 404\)/);
+  } finally {
+    down.restore();
+  }
+});
+
+test("a transcription server's failures are explained, and its segments are read from verbose_json", async () => {
+  assert.equal(serverBaseUrl(" https://a.example/v1/ "), "https://a.example/v1");
+  assert.equal(serverBaseUrl("https://a.example/v1/audio/transcriptions"), "https://a.example/v1");
+  assert.equal(serverBaseUrl("http://a.example/v1"), null);
+  const server = { baseUrl: SERVER_URL, model: "whisper-1", apiKey: null };
+  const audio = new Uint8Array([1, 2, 3]);
+  const upload = { body: audio, bytes: audio.byteLength, filename: "a.mp3", contentType: "audio/mpeg" };
+  const replying = (status: number, body: unknown = { error: { message: `Reason ${status}` } }) => (async () => Response.json(body, { status })) as typeof fetch;
+  const cases: [number, RegExp][] = [
+    [401, /^Your transcription server refused the request \(HTTP 401\)\. Check the key in Admin → Transcription\. It said: "Reason 401"$/u],
+    [413, /too large \(HTTP 413\)/u],
+    [524, /^Cloudflare stopped waiting for your transcription server \(HTTP 524\)\. A Cloudflare proxy or Tunnel .* waits only 100 seconds/u],
+    [530, /couldn't be reached \(HTTP 530\)/u],
+    [500, /^Your transcription server returned HTTP 500\. It said: "Reason 500"$/u],
+  ];
+  for (const [status, message] of cases) {
+    const error = await serverTranscribe(server, upload, replying(status)).then(() => null, (caught: unknown) => caught);
+    assert.ok(error instanceof ServerTranscribeError, `HTTP ${status}`);
+    assert.match(error.message, message);
+  }
+  await assert.rejects(serverTranscribe(server, upload, (async () => { throw new TypeError("network"); }) as typeof fetch), /didn't respond\. Check that it's running and reachable from the internet over https\./u);
+  await assert.rejects(serverTranscribe(server, upload, (async () => new Response("<html>")) as typeof fetch), /replied, but not with JSON/u);
+
+  const verbose = { text: "a b", segments: [{ id: 0, start: 0, end: 1.5, text: " a " }, { id: 1, start: 1.5, end: 2, text: "  " }, { id: 2, start: 2, end: 3, text: "b" }] };
+  assert.deepEqual(await serverTranscribe(server, upload, replying(200, verbose)), [{ text: "a", start: 0, end: 1.5 }, { text: "b", start: 2, end: 3 }], "empty segments are dropped");
+  assert.deepEqual(await serverTranscribe(server, upload, replying(200, { text: " Just text. " })), [{ text: "Just text.", start: 0, end: 0 }], "a server that ignores verbose_json still gives the text");
+  assert.deepEqual(await serverTranscribe(server, upload, replying(200, { text: "" })), []);
 });
 
 test("Muse's documented errors are explained, with Muse's own message", async () => {

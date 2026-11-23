@@ -125,7 +125,7 @@ ${overview.saved ? html`<p>Saved.</p>` : ""}
 <dt><a href="/admin/podcast">Podcast</a></dt><dd>${podcast ? `${podcast.title} · ${podcast.episodeCount} episodes` : "Not set"}</dd>
 <dt><a href="/admin/llm">Answers AI</a></dt><dd>${llm.defaults.length ? html`${llm.models} model${llm.models === 1 ? "" : "s"} from ${llm.providers.join(", ")}<br>${llm.defaults.map((line) => html`${line}<br>`)}` : "Not set"}</dd>
 <dt><a href="/admin/embeddings">Embeddings</a></dt><dd>${embeddings ? `${embeddings.model}${keyLabel(keys.embeddings)}` : "Not set"}</dd>
-<dt><a href="/admin/transcription">Transcription</a></dt><dd>${transcription ? `${transcription.provider === "muse" ? "Muse" : "Mistral"} ${transcription.model}${keyLabel(keys.transcription)}` : "Not set"}</dd>
+<dt><a href="/admin/transcription">Transcription</a></dt><dd>${transcription ? transcription.provider === "server" ? `Your server (${transcription.model})${keyLabel(keys["transcription:server"])}` : `${transcription.provider === "muse" ? "Muse" : "Mistral"} ${transcription.model}${keyLabel(keys.transcription)}` : "Not set"}</dd>
 <dt><a href="/admin/email">Email</a></dt><dd>${email && "from" in email ? `Resend from ${email.from}${keyLabel(keys.email)}` : "Off (password sign-in only)"}</dd>
 </dl>
 <h2>Episodes</h2>
