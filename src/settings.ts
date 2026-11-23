@@ -33,7 +33,10 @@ export interface PodcastSettings {
 /** Missing `provider` means Mistral: sites set up before Muse was offered. */
 export interface TranscriptionSettings {
   readonly provider?: TranscriptionProvider;
+  /** The model sent to the service; for a transcription server, the one the admin named. */
   readonly model: string;
+  /** A transcription server's address, up to `/audio/transcriptions`. Only with provider `server`. */
+  readonly baseUrl?: string;
   readonly checkedAt: string;
 }
 

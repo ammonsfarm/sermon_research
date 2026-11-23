@@ -6,7 +6,7 @@ import { decodeMp3 } from "./mp3.ts";
 import { MUSE_LIMITS, MUSE_PART_SETTING, MUSE_SAMPLE_RATE, MUSE_TOO_LONG, type MuseLimits, quietestSplit, turnsToSegments, WAV_HEADER_BYTES, writeWavHeader } from "./muse.ts";
 import type { AppEnv } from "./env.ts";
 import { getKey } from "./keys.ts";
-import { EMBEDDING_MODEL, MISTRAL_TRANSCRIPTION_MODEL, MUSE_TRANSCRIPTION_MODEL, MuseTranscribeError, museTranscribe, ProviderError, withUserAgent } from "./providers.ts";
+import { EMBEDDING_MODEL, MISTRAL_TRANSCRIPTION_MODEL, MUSE_TRANSCRIPTION_MODEL, MuseTranscribeError, museTranscribe, ProviderError, segmentsFrom, serverTranscribe, withUserAgent } from "./providers.ts";
 import { formatTime } from "./research.ts";
 import { chatWithFallback, type LlmTarget, resolveTargets } from "./llm.ts";
 import { getSetting, type Ministry, putSetting, type TranscriptionSettings } from "./settings.ts";
@@ -84,6 +84,8 @@ export async function runEpisode(env: AppEnv, step: PipelineStep, episodeId: str
       for (let part = 1; !(await step.do(`transcribe with Muse, part ${part}`, MUSE_PART, tracked(db, episodeId, "transcribe", "Transcribing with Muse", () => transcribeMusePart(env, episodeId, muse)))); part++) {
         if (part >= MAX_MUSE_PARTS) throw new ProviderError("This recording is too long for Muse transcription.");
       }
+    } else if (service === "server") {
+      await step.do("transcribe with your server", TRANSCRIBE, tracked(db, episodeId, "transcribe", "Transcribing with your server", () => transcribeWithServer(env, episodeId)));
     } else await step.do("transcribe", TRANSCRIBE, tracked(db, episodeId, "transcribe", "Transcribing with Mistral (often 2 to 10 minutes)", async () => {
       if (!(await redoing(db, episodeId, "transcribe")) && await hasTranscript(db, episodeId)) return;
       const [episode, origin] = await Promise.all([
@@ -277,6 +279,36 @@ function redone(db: D1Database, episodeId: string, step: RedoStep): D1PreparedSt
   return db.prepare("UPDATE episodes SET redo = ? WHERE id = ? AND redo = ?").bind(REDO_STEPS[REDO_STEPS.indexOf(step) + 1] ?? null, episodeId, step);
 }
 
+/**
+ * Sends the episode's R2 copy of its audio to the admin's transcription server
+ * in one request and saves the draft, named after the server's model.
+ */
+async function transcribeWithServer(env: AppEnv, episodeId: string): Promise<void> {
+  const db = env.DB;
+  if (!(await redoing(db, episodeId, "transcribe")) && await hasTranscript(db, episodeId)) return;
+  const [settings, episode] = await Promise.all([
+    getSetting<TranscriptionSettings>(db, "transcription"),
+    db.prepare("SELECT audio_key FROM episodes WHERE id = ?").bind(episodeId).first<{ audio_key: string | null }>(),
+  ]);
+  if (settings?.provider !== "server" || !settings.baseUrl) throw new NonRetryableError("The transcription service changed while this episode was waiting. Retry it to use the current one.");
+  const object = episode?.audio_key ? await env.AUDIO.get(episode.audio_key) : null;
+  if (!object) throw new ProviderError("The stored copy of the audio is missing. Retry to download it again.");
+  await setDetail(db, episodeId, `Transcribing ${formatBytes(object.size)} of audio with your server`);
+  const headers = new Headers();
+  object.writeHttpMetadata(headers);
+  const apiKey = await getKey(db, env.APP_SECRET ?? "", "transcription:server");
+  const segments = await serverTranscribe(
+    { baseUrl: settings.baseUrl, model: settings.model, apiKey },
+    { body: object.body, bytes: object.size, filename: episode!.audio_key!.split("/").pop()!, contentType: headers.get("Content-Type") ?? "audio/mpeg" },
+  );
+  if (segments.length === 0) throw new ProviderError("Your transcription server returned an empty transcript. Check that the audio plays and that the server's model is a speech-to-text one.");
+  await db.batch([
+    db.prepare("INSERT OR REPLACE INTO transcripts_draft (episode_id, text, segments_json, model, created_at) VALUES (?, ?, ?, ?, ?)")
+      .bind(episodeId, joined(segments), JSON.stringify(segments), settings.model, new Date().toISOString()),
+    redone(db, episodeId, "transcribe"),
+  ]);
+}
+
 /** True once Mistral's draft or the cleaned transcript is saved, so the audio needn't be fetched or transcribed again. */
 async function hasTranscript(db: D1Database, episodeId: string): Promise<boolean> {
   return Boolean(await db.prepare("SELECT 1 FROM transcripts_draft WHERE episode_id = ?1 UNION ALL SELECT 1 FROM transcripts WHERE episode_id = ?1").bind(episodeId).first());
@@ -336,13 +368,8 @@ export async function transcribe(audioUrl: string, apiKey: string): Promise<Segm
   body.set("file_url", audioUrl);
   body.set("model", MISTRAL_TRANSCRIPTION_MODEL);
   body.set("timestamp_granularities", "segment");
-  const result = await post("https://api.mistral.ai/v1/audio/transcriptions", { headers: { Authorization: `Bearer ${apiKey}` }, body }, "Mistral transcription", 14 * 60_000) as { text?: unknown; segments?: unknown };
-  const segments = Array.isArray(result.segments) ? result.segments.flatMap((segment): Segment[] => {
-    const { text, start, end } = (segment ?? {}) as Record<string, unknown>;
-    return typeof text === "string" && typeof start === "number" && typeof end === "number" && text.trim() ? [{ text: text.trim(), start, end }] : [];
-  }) : [];
+  const segments = segmentsFrom(await post("https://api.mistral.ai/v1/audio/transcriptions", { headers: { Authorization: `Bearer ${apiKey}` }, body }, "Mistral transcription", 14 * 60_000));
   if (segments.length > 0) return segments;
-  if (typeof result.text === "string" && result.text.trim()) return [{ text: result.text.trim(), start: 0, end: 0 }];
   throw new ProviderError("Mistral returned an empty transcript. Check that the audio link in the feed plays.");
 }
 

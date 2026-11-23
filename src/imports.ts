@@ -31,8 +31,8 @@ import { chooseMissingMainScriptures, HOURLY_MAIN_TEXTS } from "./scriptures.ts"
 import { HOURLY_SPEAKERS, identifyMissingSpeakers } from "./speakers.ts";
 
 /** List prices when this was written: Mistral's Voxtral Mini (mistral.ai/pricing) and Muse's $0.18 an hour (dev.meta.ai). */
-const TRANSCRIPTION_USD_PER_MINUTE: Record<TranscriptionProvider, number> = { mistral: 0.001, muse: 0.003 };
-const TRANSCRIPTION_NAMES: Record<TranscriptionProvider, string> = { mistral: "Mistral", muse: "Muse" };
+const TRANSCRIPTION_USD_PER_MINUTE: Record<TranscriptionProvider, number> = { mistral: 0.001, muse: 0.003, server: 0 };
+const TRANSCRIPTION_NAMES: Record<TranscriptionProvider, string> = { mistral: "Mistral", muse: "Muse", server: "your server" };
 /** Used when a feed doesn't say how long an episode is. */
 const ASSUMED_MINUTES = 40;
 /** Rough spoken-English token rate, used to size the answers AI's work: reading the transcript to clean it, writing it back, then reading it to summarize. */
@@ -94,7 +94,7 @@ ${options.map((count) => {
 <span><strong>${count === 0 ? "None, only new ones" : count === total ? `All ${count}` : `Newest ${count}`}</strong>${count > 0 ? html`<br><span class="hint">About ${cost.minutes.toLocaleString("en-US")} minutes of audio · transcription ${money(cost.transcriptionUsd)} · about ${cost.aiTokens.toLocaleString("en-US")} tokens on your answers AI, about a third of them written out${cost.guessedDurations ? ` · ${cost.guessedDurations} lengths guessed` : ""}</span>` : ""}</span></label>`;
   })}
 </fieldset>
-<p class="hint">Transcription uses ${TRANSCRIPTION_NAMES[provider]}'s list price of $${TRANSCRIPTION_USD_PER_MINUTE[provider]} per minute when this was written; embeddings add a few cents at most. Check your providers' current prices.</p>
+<p class="hint">${provider === "server" ? "Your own transcription server costs this site nothing per minute" : `Transcription uses ${TRANSCRIPTION_NAMES[provider]}'s list price of $${TRANSCRIPTION_USD_PER_MINUTE[provider]} per minute when this was written`}; embeddings add a few cents at most. Check your providers' current prices.</p>
 <h2>Schedule</h2>
 ${scheduleFields(schedule)}
 <button type="submit">Start import</button>

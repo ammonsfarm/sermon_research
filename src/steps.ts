@@ -6,6 +6,7 @@ import { BUILTIN_PROVIDERS, checkTarget, describeModel, fitEffort, getProvider, 
 import {
   checkEmbeddings,
   checkTranscription,
+  checkTranscriptionServer,
   EMBEDDING_MODEL,
   isHttpsUrl,
   isTranscriptionProvider,
@@ -13,6 +14,7 @@ import {
   MUSE_TRANSCRIPTION_MODEL,
   ProviderError,
   sendEmail,
+  serverBaseUrl,
   TRANSCRIPTION_MODELS,
   TRANSCRIPTION_PROVIDERS,
   type TranscriptionProvider,
@@ -133,9 +135,13 @@ ${field({ name: "apiKey", label: "OpenAI API key", type: "password", error: erro
 const TRANSCRIPTION_CHOICES: Record<TranscriptionProvider, { name: string; hint: string }> = {
   mistral: { name: "Mistral", hint: `${MISTRAL_TRANSCRIPTION_MODEL}. Takes full-length recordings in any common format. Create a key at console.mistral.ai.` },
   muse: { name: "Muse", hint: `Meta's ${MUSE_TRANSCRIPTION_MODEL}. Muse only accepts WAV, so this site converts your feed's MP3s to WAV and sends them a few minutes at a time. Feeds in other formats need Mistral. Create a key at dev.meta.ai.` },
+  server: { name: "Your own server", hint: "Any server with an OpenAI-compatible /audio/transcriptions API, such as whisper.cpp's server, faster-whisper (speaches), LocalAI or vLLM. Each sermon's whole audio file is sent in one request, so the server must be reachable from the internet over https and answer within 14 minutes." },
 };
 
-function transcriptionForm(state: StepState, errors: Errors = {}, provider: string = "mistral"): Html {
+function transcriptionForm(state: StepState, errors: Errors = {}, provider: string = "mistral", values: Values = {}): Html {
+  const serverKey = state.keys["transcription:server"];
+  const serviceKey = state.keys.transcription;
+  const hint = `Stored encrypted. Mistral and Muse each need their own key; your own server may need none.${serviceKey ? ` A key ending in ${serviceKey.last4} is saved for Mistral or Muse.` : ""}${serverKey ? ` A key ending in ${serverKey.last4} is saved for your server.` : ""}${serviceKey || serverKey ? " Leave this blank to keep the saved key." : ""}`;
   return html`<h1>Transcription</h1>
 <p class="lead">Choose the service that turns sermon audio into text, then paste its API key.</p>
 ${errors.form ? html`<p class="alert">${errors.form}</p>` : ""}
@@ -144,7 +150,12 @@ ${errors.form ? html`<p class="alert">${errors.form}</p>` : ""}
 ${TRANSCRIPTION_PROVIDERS.map((value) => html`<label class="choice"><input type="radio" name="provider" value="${value}"${value === provider ? html` checked` : ""}><span><strong>${TRANSCRIPTION_CHOICES[value].name}</strong><br><span class="hint">${TRANSCRIPTION_CHOICES[value].hint}</span></span></label>`)}
 ${errors.provider ? html`<p class="error">${errors.provider}</p>` : ""}
 </fieldset>
-${field({ name: "apiKey", label: "API key", type: "password", error: errors.apiKey, hint: keyHint(state, "transcription", "Stored encrypted. Changing service needs that service's key."), autocomplete: "new-password" })}
+<fieldset><legend>Your own server only</legend>
+${field({ name: "baseUrl", label: "API address", type: "url", value: values.baseUrl ?? "", error: errors.baseUrl, hint: "The part before /audio/transcriptions, for example https://whisper.example.org/v1." })}
+${field({ name: "model", label: "Model", value: values.model ?? "", error: errors.model, hint: "The model name your server expects, for example whisper-1 or Systran/faster-whisper-large-v3." })}
+${serverKey ? html`<label class="check"><input type="checkbox" name="noKey" value="1"> Remove the saved server key: my server needs none</label>` : ""}
+</fieldset>
+${field({ name: "apiKey", label: "API key", type: "password", error: errors.apiKey, hint, autocomplete: "new-password" })}
 <button type="submit">Test and save</button>
 </form>`;
 }
@@ -179,7 +190,11 @@ export async function stepForm(context: Context, step: ProviderStep, wizard: boo
       return render(state, llmForm(state, providers, {}, defaults.chat ? { provider: defaults.chat.provider, model: defaults.chat.model } : {}));
     }
     case "embeddings": return render(state, embeddingsForm(state, {}, await canReuseLlmKey(db, context.env.APP_SECRET ?? "")));
-    case "transcription": return render(state, transcriptionForm(state, {}, (await getSetting<TranscriptionSettings>(db, "transcription"))?.provider ?? "mistral"));
+    case "transcription": {
+      const saved = await getSetting<TranscriptionSettings>(db, "transcription");
+      const server = saved?.provider === "server" ? { baseUrl: saved.baseUrl ?? "", model: saved.model } : {};
+      return render(state, transcriptionForm(state, {}, saved?.provider ?? "mistral", server));
+    }
     case "email": {
       const email = await getSetting<EmailSettings>(db, "email");
       return render(state, emailForm(state, {}, email && "from" in email ? { from: email.from } : {}));
@@ -285,7 +300,27 @@ export async function stepSubmit(context: Context, step: ProviderStep, wizard: b
       }
       case "transcription": {
         const provider = text("provider", 20) || "mistral";
-        if (!isTranscriptionProvider(provider)) return render(state, transcriptionForm(state, { provider: "Choose Mistral or Muse." }), 400);
+        if (!isTranscriptionProvider(provider)) return render(state, transcriptionForm(state, { provider: "Choose Mistral, Muse or your own server." }), 400);
+        if (provider === "server") {
+          const values = { baseUrl: text("baseUrl"), model: text("model", 200) };
+          const errors: Errors = {};
+          const baseUrl = serverBaseUrl(values.baseUrl);
+          if (!baseUrl) errors.baseUrl = "Use an https:// address.";
+          if (!values.model) errors.model = "Enter the model name your server expects.";
+          if (!baseUrl || Object.keys(errors).length > 0) return render(state, transcriptionForm(state, errors, provider, values), 400);
+          // Only the server's own slot: Mistral's or Muse's key must never go to it.
+          const apiKey = text("apiKey", 500) || (text("noKey") ? null : await getKey(db, secret, "transcription:server"));
+          try {
+            await checkTranscriptionServer({ baseUrl, model: values.model, apiKey });
+          } catch (error) {
+            if (error instanceof ProviderError) return render(state, transcriptionForm(state, { form: error.message }, provider, values), 400);
+            throw error;
+          }
+          if (apiKey) await putKey(db, secret, "transcription:server", apiKey);
+          else await db.prepare("DELETE FROM provider_keys WHERE slot = 'transcription:server'").run();
+          await putSetting(db, "transcription", { provider, model: values.model, baseUrl, checkedAt: new Date().toISOString() } satisfies TranscriptionSettings);
+          return done();
+        }
         const apiKey = await keyOrStored("transcription");
         if (!apiKey) return render(state, transcriptionForm(state, { apiKey: `Enter a ${TRANSCRIPTION_CHOICES[provider].name} API key.` }, provider), 400);
         try {

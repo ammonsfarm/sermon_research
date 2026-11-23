@@ -13,7 +13,7 @@ import { ensureSchema, resetSchemaCache } from "../src/schema.ts";
 import { isDue, localSlot, type Schedule } from "../src/schedule.ts";
 import type { LlmTarget } from "../src/llm.ts";
 import { getSetting, putSetting } from "../src/settings.ts";
-import { AUDIO_BYTES, completeSetup, configureLlm, createApp, fakeProviders, type MuseUpload, ORIGIN, PROVIDERS, readMuseUpload, SCHEDULE_FORM, type TestApp, TONES_MP3 } from "./helpers.ts";
+import { AUDIO_BYTES, completeSetup, configureLlm, createApp, fakeProviders, type MuseUpload, ORIGIN, PROVIDERS, readMuseUpload, SCHEDULE_FORM, SERVER_URL, type ServerUpload, type TestApp, TONES_MP3 } from "./helpers.ts";
 
 function target(overrides: Partial<LlmTarget> = {}): LlmTarget {
   return { kind: "custom", providerName: "Test AI", baseUrl: "https://llm.example", apiKey: "k", model: "m", effort: null, ...overrides };
@@ -507,6 +507,57 @@ test("transcription gets a signed link to our copy of the audio, never the churc
   } finally {
     providers.restore();
     globalThis.fetch = original;
+  }
+});
+
+test("an admin's transcription server gets our stored copy of the audio, and its draft is cleaned up like the others", async () => {
+  const app = createApp();
+  const providers = fakeProviders();
+  try {
+    const cookie = await completeSetup(app, { count: 1 });
+    await app.request("/admin/transcription", { form: { ...PROVIDERS.server, apiKey: "server-key-2468" }, cookie });
+    const [episode] = await episodes(app);
+    await runEpisode(app.env, inlineStep, episode!.id);
+    assert.equal((await episodes(app))[0]!.status, "done");
+
+    const sent = providers.calls.filter((call) => call.url === `${SERVER_URL}/audio/transcriptions`).at(-1)!;
+    assert.equal(sent.authorization, "Bearer server-key-2468");
+    const upload = sent.body as ServerUpload;
+    assert.equal(upload.fields.model, "Systran/faster-whisper-large-v3");
+    assert.deepEqual([upload.file.name, upload.file.type], [`${episode!.id}.mp3`, "audio/mpeg"]);
+    assert.deepEqual(upload.file.bytes, AUDIO_BYTES, "the whole file, as stored in R2");
+    assert.ok(upload.streamed, "streamed rather than held in memory");
+    assert.equal(providers.calls.filter((call) => call.url.includes("mistral.ai/v1/audio")).length, 0, "Mistral isn't used");
+
+    const draft = await app.env.DB.prepare("SELECT segments_json, model FROM transcripts_draft WHERE episode_id = ?").bind(episode!.id).first<{ segments_json: string; model: string }>();
+    assert.equal(draft?.model, "Systran/faster-whisper-large-v3");
+    assert.deepEqual(JSON.parse(draft!.segments_json), [{ text: "Welcome. church.", start: 0, end: 4.5 }, { text: "Today we read a fusions 2:8.", start: 4.5, end: 11 }]);
+    const transcript = await app.env.DB.prepare("SELECT text, cleaned_by FROM transcripts WHERE episode_id = ?").bind(episode!.id).first<{ text: string; cleaned_by: string }>();
+    assert.deepEqual({ ...transcript }, { text: "Welcome, church. Today we read Ephesians 2:8.", cleaned_by: "gpt-test" });
+  } finally {
+    providers.restore();
+  }
+});
+
+test("a transcription server behind a Cloudflare Tunnel that times out fails with what to do about it", async () => {
+  const app = createApp();
+  const setup = fakeProviders();
+  let cookie = "";
+  try {
+    cookie = await completeSetup(app, { count: 1 });
+    await app.request("/admin/transcription", { form: PROVIDERS.server, cookie });
+  } finally {
+    setup.restore();
+  }
+  const providers = fakeProviders({ [`${SERVER_URL}/audio/transcriptions`]: 524 });
+  try {
+    const [episode] = await episodes(app);
+    await runEpisode(app.env, inlineStep, episode!.id);
+    const [failed] = await episodes(app);
+    assert.equal(failed!.status, "failed");
+    assert.match(failed!.error ?? "", /^Cloudflare stopped waiting for your transcription server \(HTTP 524\)\..*Tailscale Funnel/u);
+  } finally {
+    providers.restore();
   }
 });
 
