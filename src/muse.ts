@@ -3,20 +3,28 @@ import type { Segment } from "./pipeline.ts";
 /** Muse takes mono 16-bit PCM WAV at 16 or 24 kHz; 16 kHz keeps a 10-minute part at about 19 MB, under its 32 MB limit. */
 export const MUSE_SAMPLE_RATE = 16_000;
 
-export interface MuseLimits {
+/** How a service that takes the recording a few minutes at a time (Muse, or the admin's own server) gets its parts. */
+export interface PartLimits {
   /**
    * The longest part to start with. Muse accepts 10 minutes, but its gateway
    * gives up (HTTP 504) after about 2 minutes of transcribing: a 9.5-minute
    * part timed out, and 5 minutes went through, so parts start a little under that.
    */
   readonly partSeconds: number;
-  /** The shortest a part gets after Muse times out on longer ones. */
+  /** The shortest a part gets after the service times out on longer ones. */
   readonly minPartSeconds: number;
   /** How far back from the end of a full part to look for a pause to split at; at most a third of the part. */
   readonly searchSeconds: number;
 }
 
-export const MUSE_LIMITS: MuseLimits = { partSeconds: 240, minPartSeconds: 30, searchSeconds: 30 };
+export const MUSE_LIMITS: PartLimits = { partSeconds: 240, minPartSeconds: 30, searchSeconds: 30 };
+
+/**
+ * The admin's own server starts at the same 4 minutes: a Cloudflare Tunnel in
+ * front of it waits only 100 seconds for each reply (HTTP 524), and a GPU or
+ * Apple Silicon Whisper does 4 minutes well inside that. A slower server halves it.
+ */
+export const SERVER_LIMITS: PartLimits = { partSeconds: 240, minPartSeconds: 30, searchSeconds: 30 };
 
 /**
  * The part length the site settled on after Muse timed out on longer ones, in
@@ -25,8 +33,14 @@ export const MUSE_LIMITS: MuseLimits = { partSeconds: 240, minPartSeconds: 30, s
  */
 export const MUSE_PART_SETTING = "muse_part_seconds";
 
+/** The same for the admin's own server, kept apart because its speed has nothing to do with Muse's. */
+export const SERVER_PART_SETTING = "server_part_seconds";
+
 /** Muse statuses that mean a part took too long: gateway timeouts, and 500 for its processing budget. */
 export const MUSE_TOO_LONG: ReadonlySet<number> = new Set([408, 500, 504, 524]);
+
+/** A server's statuses that mean a part took too long: timeouts, its own or a proxy's (524 is Cloudflare's 100 seconds). A 500 is the server's own fault. */
+export const SERVER_TOO_LONG: ReadonlySet<number> = new Set([408, 504, 524]);
 
 /** One stretch of speech from Muse's ENDPOINTING mode, timed from the start of the part sent. */
 export interface MuseTurn {
@@ -103,6 +117,19 @@ export function turnsToSegments(response: { turns?: unknown; transcript?: unknow
     return [{ text: response.transcript.replace(/\s+/gu, " ").trim(), start: round(offsetSeconds), end: round(offsetSeconds + partSeconds) }];
   }
   return segments.sort((a, b) => a.start - b.start);
+}
+
+/**
+ * A server's segments for one part, timed from the start of the sermon. An
+ * untimed reply (only `text`, which `segmentsFrom` gives as 0 to 0) covers the
+ * whole part, and nothing runs past the part's end.
+ */
+export function partSegments(segments: readonly Segment[], offsetSeconds: number, partSeconds: number): Segment[] {
+  const untimed = segments.length === 1 && segments[0]!.start === 0 && segments[0]!.end === 0;
+  return segments.map((segment) => {
+    const end = untimed ? partSeconds : Math.min(partSeconds, Math.max(segment.start, segment.end));
+    return { text: segment.text, start: round(offsetSeconds + Math.min(segment.start, end)), end: round(offsetSeconds + end) };
+  });
 }
 
 function round(seconds: number): number {

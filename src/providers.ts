@@ -185,7 +185,7 @@ export class ServerTranscribeError extends ProviderError {
     const explained = status === 401 || status === 403 ? `Your transcription server refused the request (HTTP ${status}). Check the key in Admin → Transcription.`
       : status === 404 ? `Your transcription server has nothing at ${baseUrl}/audio/transcriptions (HTTP 404). The address should be the part before /audio/transcriptions, often ending in /v1.`
         : status === 413 ? "Your transcription server says the audio file is too large (HTTP 413). Raise its upload limit."
-          : status === 524 ? "Cloudflare stopped waiting for your transcription server (HTTP 524). A Cloudflare proxy or Tunnel in front of a server waits only 100 seconds for its reply, and a whole sermon takes longer than that. Reach the server another way, such as Tailscale Funnel or a port forward with HTTPS."
+          : status === 524 ? "Cloudflare stopped waiting for your transcription server (HTTP 524). A Cloudflare proxy or Tunnel in front of a server waits only 100 seconds for each reply."
             : status === 408 || status === 504 ? `Your transcription server, or a proxy in front of it, timed out (HTTP ${status}).`
               : status === 502 || status === 503 || status === 530 ? `Your transcription server couldn't be reached (HTTP ${status}). Check that it's running and that its tunnel or proxy is up.`
                 : `Your transcription server returned HTTP ${status}.`;

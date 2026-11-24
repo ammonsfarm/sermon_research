@@ -135,7 +135,7 @@ ${field({ name: "apiKey", label: "OpenAI API key", type: "password", error: erro
 const TRANSCRIPTION_CHOICES: Record<TranscriptionProvider, { name: string; hint: string }> = {
   mistral: { name: "Mistral", hint: `${MISTRAL_TRANSCRIPTION_MODEL}. Takes full-length recordings in any common format. Create a key at console.mistral.ai.` },
   muse: { name: "Muse", hint: `Meta's ${MUSE_TRANSCRIPTION_MODEL}. Muse only accepts WAV, so this site converts your feed's MP3s to WAV and sends them a few minutes at a time. Feeds in other formats need Mistral. Create a key at dev.meta.ai.` },
-  server: { name: "Your own server", hint: "Any server with an OpenAI-compatible /audio/transcriptions API, such as whisper.cpp's server, faster-whisper (speaches), LocalAI or vLLM. Each sermon's whole audio file is sent in one request, so the server must be reachable from the internet over https and answer within 14 minutes." },
+  server: { name: "Your own server", hint: "Any server with an OpenAI-compatible /audio/transcriptions API, such as whisper.cpp's server, faster-whisper (speaches), LocalAI or vLLM. MP3s are sent a few minutes at a time as WAV, so a Cloudflare Tunnel's 100-second limit isn't a problem; other formats go whole. The server must be reachable from the internet over https." },
 };
 
 function transcriptionForm(state: StepState, errors: Errors = {}, provider: string = "mistral", values: Values = {}): Html {

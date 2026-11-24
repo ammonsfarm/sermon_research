@@ -3,10 +3,10 @@ import { downloadAudio, formatBytes, signedAudioUrl } from "./audio.ts";
 import { batchEnd, cleanSegments } from "./cleanup.ts";
 import { REDO_STEPS, type RedoStep } from "./episodes.ts";
 import { decodeMp3 } from "./mp3.ts";
-import { MUSE_LIMITS, MUSE_PART_SETTING, MUSE_SAMPLE_RATE, MUSE_TOO_LONG, type MuseLimits, quietestSplit, turnsToSegments, WAV_HEADER_BYTES, writeWavHeader } from "./muse.ts";
+import { MUSE_LIMITS, MUSE_PART_SETTING, MUSE_SAMPLE_RATE, MUSE_TOO_LONG, type PartLimits, partSegments, quietestSplit, SERVER_LIMITS, SERVER_PART_SETTING, SERVER_TOO_LONG, turnsToSegments, WAV_HEADER_BYTES, writeWavHeader } from "./muse.ts";
 import type { AppEnv } from "./env.ts";
 import { getKey } from "./keys.ts";
-import { EMBEDDING_MODEL, MISTRAL_TRANSCRIPTION_MODEL, MUSE_TRANSCRIPTION_MODEL, MuseTranscribeError, museTranscribe, ProviderError, segmentsFrom, serverTranscribe, withUserAgent } from "./providers.ts";
+import { EMBEDDING_MODEL, MISTRAL_TRANSCRIPTION_MODEL, MUSE_TRANSCRIPTION_MODEL, MuseTranscribeError, museTranscribe, ProviderError, segmentsFrom, ServerTranscribeError, serverTranscribe, type TranscriptionServer, withUserAgent } from "./providers.ts";
 import { formatTime } from "./research.ts";
 import { chatWithFallback, type LlmTarget, resolveTargets } from "./llm.ts";
 import { getSetting, type Ministry, putSetting, type TranscriptionSettings } from "./settings.ts";
@@ -47,10 +47,13 @@ export interface StepConfig {
 
 const DOWNLOAD: StepConfig = { retries: { limit: 3, delay: "1 minute", backoff: "exponential" }, timeout: "15 minutes" };
 const TRANSCRIBE: StepConfig = { retries: { limit: 3, delay: "1 minute", backoff: "exponential" }, timeout: "15 minutes" };
-/** One Muse part: decode up to 10 minutes of the MP3 and transcribe it. Extra retries ride out Muse's rate limits. */
-const MUSE_PART: StepConfig = { retries: { limit: 5, delay: "1 minute", backoff: "exponential" }, timeout: "10 minutes" };
-/** About 9 hours of audio, so a runaway loop stops. */
-const MAX_MUSE_PARTS = 60;
+/**
+ * One part for Muse or the admin's server: decode a few minutes of the MP3 and transcribe it. Extra retries ride out
+ * rate limits. 15 minutes leaves room for a non-MP3 that goes to the server whole, which waits up to 14.
+ */
+const PART: StepConfig = { retries: { limit: 5, delay: "1 minute", backoff: "exponential" }, timeout: "15 minutes" };
+/** About 4 hours of audio in the shortest parts, so a runaway loop stops well inside a workflow's step limit. */
+const MAX_PART_SECONDS = 4 * 60 * 60;
 /** Several calls in one step; each batch is saved as it's done, so a retry or a timeout loses at most one. */
 const CLEAN: StepConfig = { retries: { limit: 5, delay: "30 seconds", backoff: "exponential" }, timeout: "20 minutes" };
 const SUMMARIZE: StepConfig = { retries: { limit: 3, delay: "30 seconds", backoff: "exponential" }, timeout: "5 minutes" };
@@ -64,7 +67,7 @@ const CHUNK_CHARS = 1_200;
 const EMBED_BATCH = 64;
 
 /** Runs one episode end to end. Every step writes its own results, so a retry resumes where it stopped. */
-export async function runEpisode(env: AppEnv, step: PipelineStep, episodeId: string, muse: MuseLimits = MUSE_LIMITS): Promise<void> {
+export async function runEpisode(env: AppEnv, step: PipelineStep, episodeId: string, parts?: PartLimits): Promise<void> {
   const db = env.DB;
   const secret = env.APP_SECRET ?? "";
   try {
@@ -79,13 +82,14 @@ export async function runEpisode(env: AppEnv, step: PipelineStep, episodeId: str
 
     const service = await step.do("choose transcription service", FINISH, async () => (await getSetting<TranscriptionSettings>(db, "transcription"))?.provider ?? "mistral");
 
-    if (service === "muse") {
-      // Muse takes 10 minutes at a time, so each part is its own step, and each saves its progress.
-      for (let part = 1; !(await step.do(`transcribe with Muse, part ${part}`, MUSE_PART, tracked(db, episodeId, "transcribe", "Transcribing with Muse", () => transcribeMusePart(env, episodeId, muse)))); part++) {
-        if (part >= MAX_MUSE_PARTS) throw new ProviderError("This recording is too long for Muse transcription.");
+    if (service === "muse" || service === "server") {
+      // Muse takes 10 minutes at a time, and a server behind Cloudflare must answer within 100 seconds,
+      // so each part is its own step, and each saves its progress.
+      const limits = parts ?? (service === "muse" ? MUSE_LIMITS : SERVER_LIMITS);
+      const name = service === "muse" ? "Muse" : "your server";
+      for (let part = 1; !(await step.do(`transcribe with ${name}, part ${part}`, PART, tracked(db, episodeId, "transcribe", `Transcribing with ${name}`, () => transcribePart(env, episodeId, service, limits)))); part++) {
+        if (part >= Math.ceil(MAX_PART_SECONDS / limits.minPartSeconds)) throw new ProviderError(`This recording is too long to transcribe with ${name}.`);
       }
-    } else if (service === "server") {
-      await step.do("transcribe with your server", TRANSCRIBE, tracked(db, episodeId, "transcribe", "Transcribing with your server", () => transcribeWithServer(env, episodeId)));
     } else await step.do("transcribe", TRANSCRIBE, tracked(db, episodeId, "transcribe", "Transcribing with Mistral (often 2 to 10 minutes)", async () => {
       if (!(await redoing(db, episodeId, "transcribe")) && await hasTranscript(db, episodeId)) return;
       const [episode, origin] = await Promise.all([
@@ -204,51 +208,101 @@ export async function runEpisode(env: AppEnv, step: PipelineStep, episodeId: str
   }
 }
 
+/** Muse, or the admin's own server: either takes the recording a few minutes at a time, as 16 kHz mono WAV. */
+interface PartTranscriber {
+  readonly name: string;
+  /** The model named on the draft. */
+  readonly model: string;
+  /** The site-wide setting holding the part length it settled on. */
+  readonly setting: string;
+  transcribe(wav: Uint8Array, offsetSeconds: number, partSeconds: number): Promise<Segment[]>;
+  /** Whether a failure means the part took too long, so shorter ones may go through. */
+  tooLong(error: unknown): boolean;
+}
+
+async function partTranscriber(env: AppEnv, service: "muse" | "server"): Promise<PartTranscriber> {
+  if (service === "muse") {
+    const apiKey = await requireKey(env, "transcription");
+    return {
+      name: "Muse", model: MUSE_TRANSCRIPTION_MODEL, setting: MUSE_PART_SETTING,
+      transcribe: async (wav, offset, seconds) => turnsToSegments(await museTranscribe(wav, apiKey), offset, seconds),
+      tooLong: (error) => error instanceof MuseTranscribeError && MUSE_TOO_LONG.has(error.status),
+    };
+  }
+  const server = await transcriptionServer(env);
+  return {
+    name: "your server", model: server.model, setting: SERVER_PART_SETTING,
+    // Each part has 5 minutes, half the step's time, so a retry of a stuck server comes round sooner.
+    transcribe: async (wav, offset, seconds) => partSegments(
+      await serverTranscribe(server, { body: wav, bytes: wav.byteLength, filename: "part.wav", contentType: "audio/wav" }, undefined, 5 * 60_000), offset, seconds),
+    tooLong: (error) => error instanceof ServerTranscribeError && SERVER_TOO_LONG.has(error.status),
+  };
+}
+
+/** The admin's server as saved now, or a failure if the service was changed while this episode waited. */
+async function transcriptionServer(env: AppEnv): Promise<TranscriptionServer> {
+  const settings = await getSetting<TranscriptionSettings>(env.DB, "transcription");
+  if (settings?.provider !== "server" || !settings.baseUrl) throw new NonRetryableError("The transcription service changed while this episode was waiting. Retry it to use the current one.");
+  return { baseUrl: settings.baseUrl, model: settings.model, apiKey: await getKey(env.DB, env.APP_SECRET ?? "", "transcription:server") };
+}
+
 /**
- * Transcribes an episode's next part with Muse and saves it. Returns true once
- * the whole recording is done and the draft transcript is written.
+ * Transcribes an episode's next part with Muse or the admin's server and saves
+ * it. Returns true once the whole recording is done and the draft transcript
+ * is written. Audio that isn't a readable MP3 goes to the server whole, since
+ * it reads any format; Muse can't take it.
  */
-async function transcribeMusePart(env: AppEnv, episodeId: string, limits: MuseLimits): Promise<boolean> {
+async function transcribePart(env: AppEnv, episodeId: string, service: "muse" | "server", limits: PartLimits): Promise<boolean> {
   const db = env.DB;
   if (!(await redoing(db, episodeId, "transcribe")) && await hasTranscript(db, episodeId)) return true;
   const [episode, progress] = await Promise.all([
     db.prepare("SELECT audio_key, duration_seconds FROM episodes WHERE id = ?").bind(episodeId).first<{ audio_key: string | null; duration_seconds: number | null }>(),
     db.prepare("SELECT done_samples, segments_json FROM transcription_progress WHERE episode_id = ?").bind(episodeId).first<{ done_samples: number; segments_json: string }>(),
   ]);
+  const transcriber = await partTranscriber(env, service);
   // Retrying the step can't fix these, so the episode fails straight away and frees its place in the queue.
   if (!episode?.audio_key) throw new NonRetryableError("The audio hasn't been copied yet. Retry to download it.");
   const switchToMistral = "Switch to Mistral in Admin → Transcription, then retry.";
-  if (!episode.audio_key.endsWith(".mp3")) throw new NonRetryableError(`This site can only convert MP3s to the WAV that Muse accepts, and this episode's audio is .${episode.audio_key.split(".").pop()}. ${switchToMistral}`);
+  if (!episode.audio_key.endsWith(".mp3")) {
+    if (service === "server") return transcribeWhole(env, episodeId, episode.audio_key);
+    throw new NonRetryableError(`This site can only convert MP3s to the WAV that Muse accepts, and this episode's audio is .${episode.audio_key.split(".").pop()}. ${switchToMistral}`);
+  }
   const object = await env.AUDIO.get(episode.audio_key);
   if (!object) throw new NonRetryableError("The copy of the audio is missing. Retry to download it again.");
 
   const from = progress?.done_samples ?? 0;
   const offset = from / MUSE_SAMPLE_RATE;
-  const partSeconds = Math.min(limits.partSeconds, (await getSetting<number>(db, MUSE_PART_SETTING)) ?? limits.partSeconds);
-  await setDetail(db, episodeId, `Transcribing with Muse: ${formatTime(offset)}${episode.duration_seconds ? ` of ${formatTime(episode.duration_seconds)}` : ""} done`);
+  const partSeconds = Math.min(limits.partSeconds, (await getSetting<number>(db, transcriber.setting)) ?? limits.partSeconds);
+  await setDetail(db, episodeId, `Transcribing with ${transcriber.name}: ${formatTime(offset)}${episode.duration_seconds ? ` of ${formatTime(episode.duration_seconds)}` : ""} done`);
   // The part is decoded straight into a WAV file's body, so it's never copied.
   const max = Math.round(partSeconds * MUSE_SAMPLE_RATE);
   const wav = new Uint8Array(WAV_HEADER_BYTES + max * 2);
   const pcm = new Int16Array(wav.buffer, WAV_HEADER_BYTES, max);
   const { samples, more } = await decodeMp3(object.body, MUSE_SAMPLE_RATE, from, pcm);
-  if (from === 0 && samples === 0) throw new NonRetryableError(`The audio couldn't be read as MP3. ${switchToMistral}`);
+  if (from === 0 && samples === 0) {
+    if (service === "server") return transcribeWhole(env, episodeId, episode.audio_key);
+    throw new NonRetryableError(`The audio couldn't be read as MP3. ${switchToMistral}`);
+  }
   const end = more ? quietestSplit(pcm, samples, MUSE_SAMPLE_RATE, Math.min(limits.searchSeconds, partSeconds / 3)) : samples;
 
   const segments = progress ? JSON.parse(progress.segments_json) as Segment[] : [];
   if (end > 0) {
     writeWavHeader(wav, end);
-    let reply: Awaited<ReturnType<typeof museTranscribe>>;
     try {
-      reply = await museTranscribe(wav.subarray(0, WAV_HEADER_BYTES + end * 2), await requireKey(env, "transcription"));
+      segments.push(...await transcriber.transcribe(wav.subarray(0, WAV_HEADER_BYTES + end * 2), offset, end / MUSE_SAMPLE_RATE));
     } catch (error) {
-      if (!(error instanceof MuseTranscribeError) || !MUSE_TOO_LONG.has(error.status) || partSeconds <= limits.minPartSeconds) throw error;
-      // Muse gave up on a part this long, so the retry, and every part after it on any episode, is shorter.
+      if (!transcriber.tooLong(error)) throw error;
+      const message = error instanceof Error ? error.message : String(error);
+      if (partSeconds <= limits.minPartSeconds) {
+        if (service === "muse") throw error;
+        throw new ProviderError(`${message} Even ${partSeconds}-second parts took too long, so your server may be stuck or much slower than usual. Check it, or reach it without a Cloudflare proxy, such as through Tailscale Funnel or a port forward with HTTPS.`);
+      }
+      // The service gave up on a part this long, so the retry, and every part after it on any episode, is shorter.
       // Halving the length that failed, rather than whatever is saved, means two episodes timing out together halve it once.
       const shorter = Math.max(limits.minPartSeconds, Math.floor(partSeconds / 2));
-      await putSetting(db, MUSE_PART_SETTING, Math.min(shorter, (await getSetting<number>(db, MUSE_PART_SETTING)) ?? shorter));
-      throw new ProviderError(`${error.message} The next try sends ${shorter}-second parts.`);
+      await putSetting(db, transcriber.setting, Math.min(shorter, (await getSetting<number>(db, transcriber.setting)) ?? shorter));
+      throw new ProviderError(`${message} The next try sends ${shorter}-second parts.`);
     }
-    segments.push(...turnsToSegments(reply, offset, end / MUSE_SAMPLE_RATE));
   }
   const now = new Date().toISOString();
   if (more) {
@@ -258,10 +312,13 @@ async function transcribeMusePart(env: AppEnv, episodeId: string, limits: MuseLi
     ).bind(episodeId, from + end, JSON.stringify(segments), now).run();
     return false;
   }
-  if (segments.length === 0) throw new ProviderError("Muse heard no speech in this recording. Check that the audio plays.");
+  if (segments.length === 0) {
+    throw new ProviderError(service === "muse" ? "Muse heard no speech in this recording. Check that the audio plays."
+      : "Your transcription server returned an empty transcript. Check that the audio plays and that the server's model is a speech-to-text one.");
+  }
   await db.batch([
     db.prepare("INSERT OR REPLACE INTO transcripts_draft (episode_id, text, segments_json, model, created_at) VALUES (?, ?, ?, ?, ?)")
-      .bind(episodeId, joined(segments), JSON.stringify(segments), MUSE_TRANSCRIPTION_MODEL, now),
+      .bind(episodeId, joined(segments), JSON.stringify(segments), transcriber.model, now),
     db.prepare("DELETE FROM transcription_progress WHERE episode_id = ?").bind(episodeId),
     redone(db, episodeId, "transcribe"),
   ]);
@@ -281,32 +338,33 @@ function redone(db: D1Database, episodeId: string, step: RedoStep): D1PreparedSt
 
 /**
  * Sends the episode's R2 copy of its audio to the admin's transcription server
- * in one request and saves the draft, named after the server's model.
+ * in one request, for audio this site can't split (anything but a readable
+ * MP3), and saves the draft, named after the server's model. Always true: the
+ * whole recording is done.
  */
-async function transcribeWithServer(env: AppEnv, episodeId: string): Promise<void> {
+async function transcribeWhole(env: AppEnv, episodeId: string, audioKey: string): Promise<true> {
   const db = env.DB;
-  if (!(await redoing(db, episodeId, "transcribe")) && await hasTranscript(db, episodeId)) return;
-  const [settings, episode] = await Promise.all([
-    getSetting<TranscriptionSettings>(db, "transcription"),
-    db.prepare("SELECT audio_key FROM episodes WHERE id = ?").bind(episodeId).first<{ audio_key: string | null }>(),
-  ]);
-  if (settings?.provider !== "server" || !settings.baseUrl) throw new NonRetryableError("The transcription service changed while this episode was waiting. Retry it to use the current one.");
-  const object = episode?.audio_key ? await env.AUDIO.get(episode.audio_key) : null;
+  const server = await transcriptionServer(env);
+  const object = await env.AUDIO.get(audioKey);
   if (!object) throw new ProviderError("The stored copy of the audio is missing. Retry to download it again.");
   await setDetail(db, episodeId, `Transcribing ${formatBytes(object.size)} of audio with your server`);
   const headers = new Headers();
   object.writeHttpMetadata(headers);
-  const apiKey = await getKey(db, env.APP_SECRET ?? "", "transcription:server");
-  const segments = await serverTranscribe(
-    { baseUrl: settings.baseUrl, model: settings.model, apiKey },
-    { body: object.body, bytes: object.size, filename: episode!.audio_key!.split("/").pop()!, contentType: headers.get("Content-Type") ?? "audio/mpeg" },
-  );
+  let segments: Segment[];
+  try {
+    segments = await serverTranscribe(server, { body: object.body, bytes: object.size, filename: audioKey.split("/").pop()!, contentType: headers.get("Content-Type") ?? "audio/mpeg" });
+  } catch (error) {
+    if (!(error instanceof ServerTranscribeError) || error.status !== 524) throw error;
+    throw new ProviderError(`${error.message} Only MP3s can be sent a few minutes at a time, and this episode's audio isn't one, so it went whole, which takes longer than that. Reach the server without a Cloudflare proxy, such as through Tailscale Funnel or a port forward with HTTPS.`);
+  }
   if (segments.length === 0) throw new ProviderError("Your transcription server returned an empty transcript. Check that the audio plays and that the server's model is a speech-to-text one.");
   await db.batch([
     db.prepare("INSERT OR REPLACE INTO transcripts_draft (episode_id, text, segments_json, model, created_at) VALUES (?, ?, ?, ?, ?)")
-      .bind(episodeId, joined(segments), JSON.stringify(segments), settings.model, new Date().toISOString()),
+      .bind(episodeId, joined(segments), JSON.stringify(segments), server.model, new Date().toISOString()),
+    db.prepare("DELETE FROM transcription_progress WHERE episode_id = ?").bind(episodeId),
     redone(db, episodeId, "transcribe"),
   ]);
+  return true;
 }
 
 /** True once Mistral's draft or the cleaned transcript is saved, so the audio needn't be fetched or transcribed again. */
