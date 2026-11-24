@@ -313,6 +313,25 @@ function museReply(upload: MuseUpload) {
   };
 }
 
+/** The samples of a WAV file sent to the fake transcription server. */
+export function wavSamples(bytes: Uint8Array): Int16Array {
+  return new Int16Array(bytes.slice(44).buffer);
+}
+
+/**
+ * A whisper-style server in verbose_json: silence comes back empty; a WAV part
+ * with sound is heard as its first and second half, timed from the part's
+ * start; any other file (a whole MP3) is Mistral's transcript.
+ */
+function serverReply(upload: ServerUpload) {
+  const segment = (id: number, text: string, start: number, end: number) => ({ id, text, start, end, tokens: [], avg_logprob: -0.2 });
+  if (upload.file.type !== "audio/wav") return { task: "transcribe", language: "en", duration: 11, text: "full", segments: TRANSCRIPT_SEGMENTS.map((item, id) => segment(id, item.text, item.start, item.end)) };
+  const samples = wavSamples(upload.file.bytes);
+  if (samples.every((sample) => sample === 0)) return { text: "" };
+  const seconds = samples.length / 16_000;
+  return { task: "transcribe", language: "en", duration: seconds, text: " First half. Second half.", segments: [segment(0, " First half.", 0, seconds / 2), segment(1, " Second half.", seconds / 2, seconds)] };
+}
+
 /**
  * Replaces global fetch with fake podcast, OpenAI, Mistral and Resend endpoints.
  * `fail` maps a URL prefix to an HTTP status to return instead.
@@ -352,10 +371,7 @@ export function fakeProviders(fail: Record<string, number> = {}): { calls: FakeC
     }
     if (url === "https://api.mistral.ai/v1/audio/transcriptions") return Response.json({ text: "full", segments: TRANSCRIPT_SEGMENTS });
     if (url === "https://api.meta.ai/v1/asr/transcribe") return Response.json(museReply(body as MuseUpload));
-    // A whisper-style server: silence comes back empty, anything else in verbose_json with segments.
-    if (url === `${SERVER_URL}/audio/transcriptions`) {
-      return Response.json((body as ServerUpload).file.type === "audio/wav" ? { text: "" } : { task: "transcribe", language: "en", duration: 11, text: "full", segments: TRANSCRIPT_SEGMENTS.map((segment, id) => ({ id, ...segment, tokens: [], avg_logprob: -0.2 })) });
-    }
+    if (url === `${SERVER_URL}/audio/transcriptions`) return Response.json(serverReply(body as ServerUpload));
     if (url === "https://api.mistral.ai/v1/models") return Response.json({ data: [] });
     if (url === "https://api.openai.com/v1/models") return Response.json({ data: ["gpt-test", "gpt-5-mini", "o3", "text-embedding-3-small", "gpt-4o-transcribe"].map((id) => ({ id })) });
     if (url === "https://api.meta.ai/v1/models") return Response.json({ data: [{ id: "muse-test" }, { id: "muse-two" }] });

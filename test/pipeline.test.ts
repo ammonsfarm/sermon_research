@@ -7,13 +7,13 @@ import { hourlyTick } from "../src/imports.ts";
 import { NonRetryableError } from "cloudflare:workflows";
 import { batchEnd, mergeCleaned } from "../src/cleanup.ts";
 import { decodeMp3 } from "../src/mp3.ts";
-import { MUSE_SAMPLE_RATE, quietestSplit, turnsToSegments, wavFile } from "../src/muse.ts";
+import { MUSE_SAMPLE_RATE, partSegments, quietestSplit, turnsToSegments, wavFile } from "../src/muse.ts";
 import { buildChunks, parseSummary, summarize, type PipelineStep, runEpisode } from "../src/pipeline.ts";
 import { ensureSchema, resetSchemaCache } from "../src/schema.ts";
 import { isDue, localSlot, type Schedule } from "../src/schedule.ts";
 import type { LlmTarget } from "../src/llm.ts";
 import { getSetting, putSetting } from "../src/settings.ts";
-import { AUDIO_BYTES, completeSetup, configureLlm, createApp, fakeProviders, type MuseUpload, ORIGIN, PROVIDERS, readMuseUpload, SCHEDULE_FORM, SERVER_URL, type ServerUpload, type TestApp, TONES_MP3 } from "./helpers.ts";
+import { AUDIO_BYTES, completeSetup, configureLlm, createApp, fakeProviders, type MuseUpload, ORIGIN, PROVIDERS, readMuseUpload, SCHEDULE_FORM, SERVER_URL, type ServerUpload, type TestApp, TONES_MP3, wavSamples } from "./helpers.ts";
 
 function target(overrides: Partial<LlmTarget> = {}): LlmTarget {
   return { kind: "custom", providerName: "Test AI", baseUrl: "https://llm.example", apiKey: "k", model: "m", effort: null, ...overrides };
@@ -510,7 +510,7 @@ test("transcription gets a signed link to our copy of the audio, never the churc
   }
 });
 
-test("an admin's transcription server gets our stored copy of the audio, and its draft is cleaned up like the others", async () => {
+test("audio this site can't split goes to an admin's transcription server whole, and its draft is cleaned up like the others", async () => {
   const app = createApp();
   const providers = fakeProviders();
   try {
@@ -525,7 +525,7 @@ test("an admin's transcription server gets our stored copy of the audio, and its
     const upload = sent.body as ServerUpload;
     assert.equal(upload.fields.model, "Systran/faster-whisper-large-v3");
     assert.deepEqual([upload.file.name, upload.file.type], [`${episode!.id}.mp3`, "audio/mpeg"]);
-    assert.deepEqual(upload.file.bytes, AUDIO_BYTES, "the whole file, as stored in R2");
+    assert.deepEqual(upload.file.bytes, AUDIO_BYTES, "the whole file, as stored in R2, since it isn't an MP3 the site can read");
     assert.ok(upload.streamed, "streamed rather than held in memory");
     assert.equal(providers.calls.filter((call) => call.url.includes("mistral.ai/v1/audio")).length, 0, "Mistral isn't used");
 
@@ -539,7 +539,119 @@ test("an admin's transcription server gets our stored copy of the audio, and its
   }
 });
 
-test("a transcription server behind a Cloudflare Tunnel that times out fails with what to do about it", async () => {
+/** Serves TONES_MP3 as every episode's audio, and lets `server` answer the transcription server first (null passes it on). */
+function withTones(server: (upload: ServerUpload) => Response | null = () => null): () => void {
+  const faked = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url.startsWith("https://cdn.example.org/")) return new Response(TONES_MP3, { headers: { "Content-Type": "audio/mpeg", "Content-Length": String(TONES_MP3.byteLength) } });
+    if (url === `${SERVER_URL}/audio/transcriptions` && init?.body) {
+      // Read once, then passed on as the same bytes, so the fake server can read it too.
+      const bytes = new Uint8Array(await new Response(init.body).arrayBuffer());
+      const form = await new Response(bytes, { headers: { "Content-Type": new Headers(init.headers).get("Content-Type") ?? "" } }).formData();
+      const file = form.get("file") as File;
+      const answer = server({ fields: {}, file: { name: file.name, type: file.type, bytes: new Uint8Array(await file.arrayBuffer()) }, streamed: false });
+      if (answer) return answer;
+      init = { ...init, body: bytes };
+    }
+    return faked(input, init);
+  }) as typeof fetch;
+  return () => { globalThis.fetch = faked; };
+}
+
+const serverCalls = (providers: ReturnType<typeof fakeProviders>) => providers.calls.filter((call) => call.url === `${SERVER_URL}/audio/transcriptions`);
+
+test("a server's segments are offset into the sermon and kept inside their part", () => {
+  assert.deepEqual(partSegments([{ text: "One.", start: 0, end: 2 }, { text: "Two.", start: 2, end: 4.2 }], 60, 4), [{ text: "One.", start: 60, end: 62 }, { text: "Two.", start: 62, end: 64 }]);
+  assert.deepEqual(partSegments([{ text: "All of it.", start: 0, end: 0 }], 30, 12.5), [{ text: "All of it.", start: 30, end: 42.5 }], "an untimed reply covers the part");
+  assert.deepEqual(partSegments([], 0, 10), []);
+});
+
+test("an admin's transcription server gets MP3 audio a few minutes at a time as WAV, offset into the sermon", async () => {
+  const app = createApp();
+  const providers = fakeProviders();
+  const restore = withTones();
+  const parts = { partSeconds: 4, minPartSeconds: 1, searchSeconds: 2 };
+  try {
+    const cookie = await completeSetup(app, { count: 1 });
+    await app.request("/admin/transcription", { form: { ...PROVIDERS.server, apiKey: "server-key-2468" }, cookie });
+    const [episode] = await episodes(app);
+    await runEpisode(app.env, inlineStep, episode!.id, parts);
+    assert.equal((await episodes(app))[0]!.status, "done");
+
+    const sent = serverCalls(providers).slice(1);
+    assert.equal(sent.length, 2, "the check, then two parts");
+    for (const call of sent) {
+      const upload = call.body as ServerUpload;
+      assert.equal(call.authorization, "Bearer server-key-2468");
+      assert.deepEqual(upload.fields, { model: "Systran/faster-whisper-large-v3", response_format: "verbose_json", "timestamp_granularities[]": "segment" });
+      assert.deepEqual([upload.file.name, upload.file.type], ["part.wav", "audio/wav"]);
+      assert.ok(wavSamples(upload.file.bytes).length <= 4 * MUSE_SAMPLE_RATE, "no part is longer than the limit");
+    }
+    const firstPart = wavSamples((sent[0]!.body as ServerUpload).file.bytes).length / MUSE_SAMPLE_RATE;
+    assert.ok(firstPart > 2.55 && firstPart < 3.15, `the first part ends in the pause, at ${firstPart} s`);
+
+    const draft = await app.env.DB.prepare("SELECT segments_json, model FROM transcripts_draft WHERE episode_id = ?").bind(episode!.id).first<{ segments_json: string; model: string }>();
+    assert.equal(draft?.model, "Systran/faster-whisper-large-v3");
+    const segments = JSON.parse(draft!.segments_json) as { text: string; start: number; end: number }[];
+    assert.deepEqual(segments.map((segment) => segment.text), ["First half.", "Second half.", "First half.", "Second half."]);
+    assert.equal(segments[2]!.start, Math.round(firstPart * 1000) / 1000, "the second part's segments start where the first part ends");
+    assert.ok(segments.at(-1)!.end > 5.5, "the whole recording is covered");
+    assert.equal(await app.env.DB.prepare("SELECT count(*) AS n FROM transcription_progress").first<{ n: number }>().then((row) => row?.n), 0, "progress is cleared once done");
+  } finally {
+    restore();
+    providers.restore();
+  }
+});
+
+test("when Cloudflare stops waiting for a server's part, the retry and every later episode send shorter ones", async () => {
+  const app = createApp();
+  const providers = fakeProviders();
+  // A Tunnel in front of a slow server: anything over 2.5 seconds of audio takes longer than Cloudflare waits.
+  const restore = withTones((upload) => wavSamples(upload.file.bytes).length > 2.5 * MUSE_SAMPLE_RATE ? new Response("error code: 524", { status: 524 }) : null);
+  const limits = { partSeconds: 4, minPartSeconds: 1, searchSeconds: 2 };
+  try {
+    const cookie = await completeSetup(app, { count: 2 });
+    await app.request("/admin/transcription", { form: PROVIDERS.server, cookie });
+    const [first, second] = await episodes(app);
+    await runEpisode(app.env, inlineStep, first!.id, limits);
+    const failed = (await episodes(app))[0]!;
+    assert.equal(failed.status, "failed");
+    assert.equal(failed.error, "Cloudflare stopped waiting for your transcription server (HTTP 524). A Cloudflare proxy or Tunnel in front of a server waits only 100 seconds for each reply. It said: \"error code: 524\" The next try sends 2-second parts.");
+    assert.equal(await getSetting<number>(app.env.DB, "server_part_seconds"), 2);
+    assert.equal(await getSetting<number>(app.env.DB, "muse_part_seconds"), null, "Muse's part length is its own");
+
+    const before = serverCalls(providers).length;
+    await runEpisode(app.env, inlineStep, first!.id, limits);
+    await runEpisode(app.env, inlineStep, second!.id, limits);
+    assert.deepEqual((await episodes(app)).map((row) => row.status), ["done", "done"], "both finish without timing out again");
+    const lengths = serverCalls(providers).slice(before).map((call) => wavSamples((call.body as ServerUpload).file.bytes).length / MUSE_SAMPLE_RATE);
+    assert.ok(lengths.length >= 6 && lengths.every((seconds) => seconds <= 2), `every part is 2 seconds or less: ${lengths.join(", ")}`);
+  } finally {
+    restore();
+    providers.restore();
+  }
+});
+
+test("a server too slow for even the shortest parts fails with what to do about it", async () => {
+  const app = createApp();
+  const providers = fakeProviders();
+  const restore = withTones((upload) => wavSamples(upload.file.bytes).some((sample) => sample !== 0) ? new Response("error code: 524", { status: 524 }) : null);
+  try {
+    const cookie = await completeSetup(app, { count: 1 });
+    await app.request("/admin/transcription", { form: PROVIDERS.server, cookie });
+    const [episode] = await episodes(app);
+    await runEpisode(app.env, inlineStep, episode!.id, { partSeconds: 1, minPartSeconds: 1, searchSeconds: 0.3 });
+    const [failed] = await episodes(app);
+    assert.equal(failed!.status, "failed");
+    assert.match(failed!.error ?? "", /^Cloudflare stopped waiting for your transcription server \(HTTP 524\)\..* Even 1-second parts took too long.*Tailscale Funnel/u);
+  } finally {
+    restore();
+    providers.restore();
+  }
+});
+
+test("audio sent whole to a server behind a Cloudflare Tunnel that times out fails with what to do about it", async () => {
   const app = createApp();
   const setup = fakeProviders();
   let cookie = "";
@@ -555,7 +667,7 @@ test("a transcription server behind a Cloudflare Tunnel that times out fails wit
     await runEpisode(app.env, inlineStep, episode!.id);
     const [failed] = await episodes(app);
     assert.equal(failed!.status, "failed");
-    assert.match(failed!.error ?? "", /^Cloudflare stopped waiting for your transcription server \(HTTP 524\)\..*Tailscale Funnel/u);
+    assert.match(failed!.error ?? "", /^Cloudflare stopped waiting for your transcription server \(HTTP 524\)\..*Only MP3s can be sent a few minutes at a time.*Tailscale Funnel/u);
   } finally {
     providers.restore();
   }

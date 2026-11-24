@@ -43,7 +43,7 @@ create the admin account. Then it walks through:
    chooses the model and reasoning effort for summaries, chat and document
    creation, and can limit which models particular people may use.
 4. **Search embeddings**: an OpenAI key for `text-embedding-3-small`. If step 3 was OpenAI, you can reuse that key.
-5. **Transcription**: Mistral (Voxtral handles full-length sermon audio in any common format) or Meta's Muse (Muse only accepts WAV, so the Worker converts the feed's MP3s to WAV and sends them a few minutes at a time; feeds in other formats need Mistral), and its key. Or your own transcription server: any https address with an OpenAI-compatible `/audio/transcriptions` API (whisper.cpp, faster-whisper, LocalAI, vLLM), its model name and an optional key
+5. **Transcription**: Mistral (Voxtral handles full-length sermon audio in any common format) or Meta's Muse (Muse only accepts WAV, so the Worker converts the feed's MP3s to WAV and sends them a few minutes at a time; feeds in other formats need Mistral), and its key. Or your own transcription server: any https address with an OpenAI-compatible `/audio/transcriptions` API (whisper.cpp, faster-whisper, LocalAI, vLLM), its model name and an optional key. It gets MP3s a few minutes at a time, like Muse, so it works behind a Cloudflare Tunnel
 6. **Email** (optional): a Resend key and sender address, so people can sign in with an emailed link
 7. **Import**: how many past episodes to process now (none, 10, 50 or all),
    each with an estimate of audio minutes and cost, and a daily or weekly
@@ -69,7 +69,7 @@ assistant at this repo. [AGENTS.md](AGENTS.md) tells it how to help.
 - Episode processing: the Worker copies each episode's audio into R2 (so a
   church website's bot check can't block the transcription service), Mistral
   transcribes it from a short-lived signed link to that copy (or Muse, a part
-  at a time, or your own server, which gets the whole file), the answers AI writes a summary with topics and scripture references,
+  at a time, or your own server, which gets MP3s the same way and other formats whole), the answers AI writes a summary with topics and scripture references,
   and the transcript is split into timestamped passages and indexed for search
 - The Bible on its own tab: an admin adds the World English Bible (public
   domain, from eBible.org) in Admin → Bible, and people read it by book and

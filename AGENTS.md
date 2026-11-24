@@ -363,19 +363,25 @@ first request after each deploy.
   Workers can't reach `localhost` or a home network. The key has its own
   slot, `transcription:server`, so Mistral's or Muse's key is never sent to
   the server, and it can be left blank. The check transcribes one second of
-  silence (an empty reply is fine). Each episode is one workflow step,
-  "transcribe with your server" (`serverTranscribe` in `src/providers.ts`):
-  the R2 copy of the audio is streamed to the server as the multipart
-  `file`, with `model`, `response_format=verbose_json` and
-  `timestamp_granularities[]=segment`, waiting up to 14 minutes. Timed
-  `segments` become the draft; a reply with only `text` becomes one untimed
-  segment, so the read-along can't follow along. The draft's `model` is the
-  server's model name, and it's cleaned up like the others. **A server
-  behind a Cloudflare Tunnel or other Cloudflare proxy fails with HTTP 524
-  after 100 seconds**, which is shorter than a sermon takes on most
-  machines. Reach it another way (Tailscale Funnel, a port forward with
-  HTTPS and a certificate), or make sure it answers within 100 seconds. The
-  import estimate counts it as free.
+  silence (an empty reply is fine). MP3s go a part at a time, exactly like
+  Muse ("transcribe with your server, part N", `transcribePart` in
+  `src/pipeline.ts`): up to 4 minutes of 16 kHz mono WAV per request
+  (`SERVER_LIMITS` in `src/muse.ts`), split at a pause, each part waiting
+  up to 5 minutes, with progress in `transcription_progress`. This is
+  because **a Cloudflare Tunnel or other Cloudflare proxy in front of the
+  server returns HTTP 524 after 100 seconds**, which a whole sermon always
+  passes. On 408, 504 or 524 the part length halves, down to 30 seconds,
+  saved site-wide in `server_part_seconds` (separate from Muse's); to try
+  longer parts again, delete that setting. Audio that isn't a readable MP3
+  is streamed whole from R2 instead, waiting up to 14 minutes, so behind a
+  Tunnel it still fails with 524. Each request (`serverTranscribe` in
+  `src/providers.ts`) sends the multipart `file` with `model`,
+  `response_format=verbose_json` and `timestamp_granularities[]=segment`.
+  Timed `segments` are offset into the sermon and become the draft; a reply
+  with only `text` becomes one segment covering its part (or, sent whole,
+  one untimed segment, so the read-along can't follow along). The draft's
+  `model` is the server's model name, and it's cleaned up like the others.
+  The import estimate counts it as free.
 - **Transcription says the file couldn't be fetched:** Mistral downloads the
   audio from `/audio/:id` on this site using a signed link, so the site must
   be reachable publicly. The link's origin is saved as `site_origin` whenever
