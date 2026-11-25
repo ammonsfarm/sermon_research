@@ -75,6 +75,8 @@ export async function runEpisode(env: AppEnv, step: PipelineStep, episodeId: str
       if (!(await redoing(db, episodeId, "transcribe")) && await hasTranscript(db, episodeId)) return;
       const episode = await db.prepare("SELECT audio_url, audio_key FROM episodes WHERE id = ?").bind(episodeId).first<{ audio_url: string | null; audio_key: string | null }>();
       if (episode?.audio_key && await env.AUDIO.head(episode.audio_key)) return;
+      // An uploaded sermon has only its R2 copy, so there's nowhere to fetch it from again.
+      if (episode && !episode.audio_url && episode.audio_key) throw new NonRetryableError("This sermon's uploaded audio is missing from storage. Upload it again from Admin → Upload a sermon.");
       if (!episode?.audio_url) throw new ProviderError("This episode has no audio file in the feed.");
       const stored = await downloadAudio(env, episodeId, episode.audio_url);
       await db.prepare("UPDATE episodes SET audio_key = ?, audio_bytes = ?, updated_at = ? WHERE id = ?").bind(stored.key, stored.bytes, new Date().toISOString(), episodeId).run();
@@ -142,15 +144,17 @@ export async function runEpisode(env: AppEnv, step: PipelineStep, episodeId: str
       const [targets, ministry, row] = await Promise.all([
         resolveTargets(env, { action: "summary" }),
         getSetting<Ministry>(db, "ministry"),
-        db.prepare("SELECT e.title, e.published_at, t.text FROM episodes e JOIN transcripts t ON t.episode_id = e.id WHERE e.id = ?")
-          .bind(episodeId).first<{ title: string; published_at: string | null; text: string }>(),
+        db.prepare("SELECT e.title, e.published_at, e.main_scripture, t.text FROM episodes e JOIN transcripts t ON t.episode_id = e.id WHERE e.id = ?")
+          .bind(episodeId).first<{ title: string; published_at: string | null; main_scripture: string | null; text: string }>(),
       ]);
       if (!row) throw new ProviderError("The transcript is missing.");
       const result = await summarize({ targets, ministry, title: row.title, publishedAt: row.published_at, transcript: row.text });
+      // The passage an admin gave with an upload stands; the AI's is used otherwise.
+      const mainScripture = row.main_scripture ?? result.mainScripture;
       // A null main passage is left for the hourly catch-up to look at again, which records an empty one if there truly isn't one.
       await db.batch([
         db.prepare("INSERT OR REPLACE INTO summaries (episode_id, summary, topics_json, scriptures_json, model, created_at, main_scripture) VALUES (?, ?, ?, ?, ?, ?, ?)")
-          .bind(episodeId, result.summary, JSON.stringify(result.topics), JSON.stringify(result.scriptures), result.model, new Date().toISOString(), result.mainScripture),
+          .bind(episodeId, result.summary, JSON.stringify(result.topics), JSON.stringify(result.scriptures), result.model, new Date().toISOString(), mainScripture),
         redone(db, episodeId, "summary"),
       ]);
     }));

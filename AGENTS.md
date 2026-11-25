@@ -23,6 +23,7 @@ before anything in the "Ask first" list below.
 | `src/links.ts` | Emailed sign-in links |
 | `src/imports.ts` | Import step with cost estimate, episodes dashboard (filtered by text and status, 200 a page), schedule page, hourly cron logic |
 | `src/audio.ts` | Copies episode audio into the `AUDIO` R2 bucket, signs short-lived links for the transcription service, serves `/audio/:id` with ranges |
+| `src/upload.ts` | Admin → Upload a sermon (`/admin/episodes/upload`): the form, reading the multipart upload as it arrives (`readMultipart`), writing the MP3 into R2 a part at a time (`AudioUpload`), and the `episodes` row it queues |
 | `src/episodes.ts` | Episode rows from the feed, the queue, re-processing requests (`requestRedo`), the dashboard's filter, and starting workflow runs (up to the admin's "episodes at once" setting) |
 | `src/pipeline.ts` | The per-episode steps: transcribe (Mistral in one step, or Muse a part at a time) into `transcripts_draft`, clean up into `transcripts`, summarize and identify the speaker (answers AI), chunk, embed and write to Vectorize |
 | `src/mp3.ts`, `src/mp3.wasm` | Decodes the stored MP3 to 16 kHz mono for Muse, inside the Worker. The `.wasm` is minimp3 (public domain, `vendor/minimp3`) with the small wrapper in `wasm/mp3.c`; it's committed, and `scripts/build-mp3-wasm.sh` rebuilds it with Zig |
@@ -329,6 +330,38 @@ first request after each deploy.
   doesn't return JSON (pick a stronger model). Fix the cause, then press Retry.
   Workflow runs are listed under Workers & Pages → Workflows →
   `sermon-research-episode`.
+- **Upload a sermon that isn't in the feed:** Admin → Upload a sermon (also
+  linked from Admin → Episodes). The admin chooses an MP3 and enters the
+  title and the date preached, and optionally the preacher, series, main
+  Scripture passage and a description. The row gets guid `upload:<id>`, no
+  `audio_url`, `audio_key = episodes/<id>.mp3`, status `queued`, and the date
+  at noon UTC; a series is added to the title as " - Series", which is how
+  series are read everywhere (`seriesOf`). A preacher entered here is saved
+  with `speaker_source = 'admin'`, so the AI never changes it; left blank,
+  the AI names them as usual, reading the description. A passage entered
+  here is kept in `episodes.main_scripture` (null for feed episodes) and the
+  summary step uses it instead of the AI's choice, on re-processing too.
+  From there it's an ordinary episode: it waits its turn under "Episodes at
+  once", shows in Admin → Episodes marked "Uploaded", can be retried and
+  re-processed, and works with Mistral, Muse and the admin's own server,
+  since each reads the R2 copy. The feed check matches on the feed's guid,
+  so it never updates or duplicates an upload, and `recordFeed` counts only
+  rows with an `audio_url` when deciding whether this is the first import.
+  Limits: MP3 only (the file must start with an ID3 tag or an MPEG audio
+  frame, `looksLikeMp3`), and 100 MB (`MAX_UPLOAD_BYTES`), because
+  Cloudflare refuses larger request bodies on its Free and Pro plans before
+  the Worker runs; the page checks the size in the browser so the person
+  sees a message rather than Cloudflare's bare 413 page. For a bigger
+  recording, export it at a lower bitrate: 64 kbps mono is plenty for
+  speech. The Worker never holds the file in memory: `request.formData()`
+  would, so `readMultipart` reads the body as a stream and `AudioUpload`
+  sends it to R2 as a multipart upload 10 MB at a time (one plain `put`
+  for a file under 10 MB). When the form has an error, whatever reached R2
+  is removed and the person has to choose the file again, since browsers
+  don't keep a chosen file. There's no page for deleting a sermon or
+  replacing its audio or details afterwards (the speaker can be changed on
+  the sermon page); if the R2 copy of an upload is lost, the episode fails
+  saying to upload it again.
 - **Re-process a sermon:** on its page (Summary tab, admins only), choose the
   transcript from the audio, the transcript rewrite (grammar, names,
   capitals), the summary or the search vectors. Each also redoes the ones

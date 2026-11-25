@@ -71,6 +71,11 @@ assistant at this repo. [AGENTS.md](AGENTS.md) tells it how to help.
   transcribes it from a short-lived signed link to that copy (or Muse, a part
   at a time, or your own server, which gets MP3s the same way and other formats whole), the answers AI writes a summary with topics and scripture references,
   and the transcript is split into timestamped passages and indexed for search
+- Upload a sermon that isn't in the podcast feed: in Admin → Upload a sermon,
+  an admin chooses an MP3 (up to 100 MB) and enters its title, the date it was
+  preached and, optionally, the preacher, series, main Scripture passage and
+  a description. It's then transcribed, summarized and indexed like any
+  other episode, and the feed check never touches it
 - The Bible on its own tab: an admin adds the World English Bible (public
   domain, from eBible.org) in Admin → Bible, and people read it by book and
   chapter and search it by reference, by words or by meaning. Questions can

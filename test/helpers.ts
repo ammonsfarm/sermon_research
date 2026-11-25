@@ -45,7 +45,7 @@ export interface TestApp {
   readonly bibleRuns: string[];
   /** Objects in the fake AUDIO bucket, by key. */
   readonly audio: Map<string, { bytes: Uint8Array; contentType: string | undefined }>;
-  request(path: string, init?: { method?: string; form?: Record<string, string | string[]>; cookie?: string; headers?: Record<string, string> }): Promise<Response>;
+  request(path: string, init?: { method?: string; form?: Record<string, string | string[]>; body?: BodyInit; cookie?: string; headers?: Record<string, string> }): Promise<Response>;
 }
 
 export function createApp(overrides: Partial<AppEnv> = {}): TestApp {
@@ -97,10 +97,31 @@ export function createApp(overrides: Partial<AppEnv> = {}): TestApp {
   };
   const audio: TestApp["audio"] = new Map();
   const AUDIO = {
-    async put(key: string, value: ReadableStream | ArrayBuffer, options: { httpMetadata?: { contentType?: string } } = {}) {
-      const bytes = new Uint8Array(value instanceof ArrayBuffer ? value : await new Response(value).arrayBuffer());
+    async put(key: string, value: ReadableStream | ArrayBuffer | Uint8Array, options: { httpMetadata?: { contentType?: string } } = {}) {
+      const bytes = value instanceof Uint8Array ? value.slice() : new Uint8Array(value instanceof ArrayBuffer ? value : await new Response(value).arrayBuffer());
       audio.set(key, { bytes, contentType: options.httpMetadata?.contentType });
       return { key, size: bytes.byteLength };
+    },
+    async delete(key: string) {
+      audio.delete(key);
+    },
+    async createMultipartUpload(key: string, options: { httpMetadata?: { contentType?: string } } = {}) {
+      const parts = new Map<number, Uint8Array>();
+      return {
+        key,
+        async uploadPart(partNumber: number, value: Uint8Array) {
+          parts.set(partNumber, value.slice());
+          return { partNumber, etag: `etag-${partNumber}` };
+        },
+        async complete(uploaded: { partNumber: number }[]) {
+          const bytes = new Uint8Array(await new Blob(uploaded.map((part) => parts.get(part.partNumber)!)).arrayBuffer());
+          audio.set(key, { bytes, contentType: options.httpMetadata?.contentType });
+          return { key, size: bytes.byteLength };
+        },
+        async abort() {
+          parts.clear();
+        },
+      };
     },
     async head(key: string) {
       const stored = audio.get(key);
@@ -130,9 +151,9 @@ export function createApp(overrides: Partial<AppEnv> = {}): TestApp {
     request(path, init = {}) {
       const headers = new Headers(init.headers);
       if (init.cookie) headers.set("Cookie", init.cookie);
-      const method = init.method ?? (init.form ? "POST" : "GET");
+      const method = init.method ?? (init.form || init.body ? "POST" : "GET");
       if (method === "POST" && !headers.has("Origin")) headers.set("Origin", ORIGIN);
-      const body = init.form ? new URLSearchParams(Object.entries(init.form).flatMap(([name, value]) => (Array.isArray(value) ? value : [value]).map((each): [string, string] => [name, each]))) : undefined;
+      const body = init.body ?? (init.form ? new URLSearchParams(Object.entries(init.form).flatMap(([name, value]) => (Array.isArray(value) ? value : [value]).map((each): [string, string] => [name, each]))) : undefined);
       return worker.fetch(new Request(ORIGIN + path, { method, headers, ...(body ? { body } : {}) }), env);
     },
   };

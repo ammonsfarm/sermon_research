@@ -332,6 +332,13 @@ export const MIGRATIONS: readonly Migration[] = [
       ) WITHOUT ROWID`,
     ],
   },
+  {
+    version: 19,
+    statements: [],
+    // The main passage an admin gave when uploading a sermon (src/upload.ts). The summary step
+    // keeps it instead of the AI's choice; it's null for feed episodes.
+    columns: [{ table: "episodes", name: "main_scripture", definition: "TEXT" }],
+  },
 ];
 
 /**

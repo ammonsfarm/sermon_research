@@ -68,10 +68,12 @@ function newestFirst(episodes: readonly FeedEpisode[]): FeedEpisode[] {
  * Records feed episodes we haven't seen. On the first import only the newest
  * `backfill` episodes are queued; later, every new episode is queued.
  * Episodes already recorded get the feed's current description and author.
+ * Uploaded sermons (guid "upload:<id>", no audio_url) are never matched.
  * Returns how many episodes were queued.
  */
 export async function recordFeed(db: D1Database, feed: Feed, options: { backfill?: number } = {}): Promise<number> {
-  const known = await db.prepare("SELECT count(*) AS n FROM episodes").first<{ n: number }>();
+  // Sermons an admin uploaded have no feed link, and don't make this a later check.
+  const known = await db.prepare("SELECT count(*) AS n FROM episodes WHERE audio_url IS NOT NULL").first<{ n: number }>();
   const firstImport = (known?.n ?? 0) === 0 && options.backfill !== undefined;
   const now = new Date().toISOString();
   const rows = newestFirst(feed.episodes).filter((episode) => episode.audioUrl).map((episode, index) => ({
