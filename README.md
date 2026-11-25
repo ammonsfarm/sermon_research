@@ -74,7 +74,9 @@ assistant at this repo. [AGENTS.md](AGENTS.md) tells it how to help.
 - The Bible on its own tab: an admin adds the World English Bible (public
   domain, from eBible.org) in Admin → Bible, and people read it by book and
   chapter and search it by reference, by words or by meaning. Questions can
-  be answered from the sermons, the Bible, or both, with every Bible passage cited
+  be answered from the sermons, the Bible, or both, with every Bible passage cited.
+  The Greek New Testament (SBLGNT) and the Hebrew Bible (Leningrad Codex,
+  from Tanach.us) can be added too, read beside the English, and brought into answers
 - A live episodes dashboard that refreshes itself while work runs, showing
   each episode's current step, retry errors and when the background worker
   last ran, with retry (one or all failed), "check now" and importing older

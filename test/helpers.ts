@@ -205,6 +205,25 @@ export const BIBLE_VERSES = [
 ].join("\r\n");
 export const BIBLE_ZIP = zipOf({ "engwebp_about.htm": "<p>About</p>", "engwebp_vpl.txt": BIBLE_VERSES, "engwebp_vpl.xml": "<verseFile/>" });
 
+/** SBLGNT books as its repository serves them; any other book gets a single verse. */
+export const GREEK_FILES: Record<string, string> = {
+  John: "ΚΑΤΑ ΙΩΑΝΝΗΝ\nJohn 3:16\tΟὕτως γὰρ ἠγάπησεν ὁ θεὸς τὸν κόσμον ὥστε τὸν υἱὸν τὸν μονογενῆ ἔδωκεν, ἵνα πᾶς ὁ πιστεύων εἰς αὐτὸν μὴ ἀπόληται ἀλλὰ ἔχῃ ζωὴν αἰώνιον. \nJohn 3:17\tοὐ γὰρ ἀπέστειλεν ὁ θεὸς τὸν ⸀υἱὸν εἰς τὸν κόσμον ἵνα κρίνῃ τὸν κόσμον, ἀλλʼ ἵνα σωθῇ ὁ κόσμος διʼ αὐτοῦ. \n",
+  Acts: "ΠΡΑΞΕΙΣ ΑΠΟΣΤΟΛΩΝ\nActs 8:36\tὡς δὲ ἐπορεύοντο κατὰ τὴν ὁδόν, ἦλθον ἐπί τι ὕδωρ, \nActs 8:38\tκαὶ ἐκέλευσεν στῆναι τὸ ἅρμα, \n",
+};
+
+/** A Tanach.us book file around its chapters. */
+export function hebrewBook(chapters: string): string {
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<Tanach><teiHeader><title>Tanach</title></teiHeader>\n<tanach><book><names><name>Book</name></names>${chapters}<vs>2</vs></book></tanach><notes><note><code>t</code></note></notes></Tanach>`;
+}
+
+/** Tanach.us books; any other gets a single verse. Psalm 23 has the same numbers as the English; Psalm 51's first two verses are its heading. */
+export const HEBREW_FILES: Record<string, string> = {
+  Genesis: `<c n="1"><v n="1"><w>בְּרֵאשִׁ֖ית</w><w>בָּרָ֣א</w><w>אֱלֹהִ֑ים</w><w>אֵ֥ת</w><w>הַשָּׁמַ֖יִם</w><w>וְאֵ֥ת</w><w>הָאָֽרֶץ׃</w></v>
+<v n="2"><w>וְהָאָ֗רֶץ</w><w>הָיְתָ֥ה</w><w>תֹ֙הוּ֙</w><w>וָבֹ֔הוּ</w><pe/></v><vs>2</vs></c>`,
+  Psalms: `<c n="23"><v n="1"><w>מִזְמ֥וֹר</w><w>לְדָוִ֑ד</w><w>יְהוָ֥ה</w><w>רֹ֝עִ֗י</w><w>לֹ֣א</w><w>אֶחְסָֽר׃</w></v><v n="2"><w>בִּנְא֣וֹת</w><w>דֶּ֭שֶׁא</w><w>יַרְבִּיצֵ֑נִי</w><w>עַל־</w><w>מֵ֖י</w><w>מְנֻח֣וֹת</w><w>יְנַהֲלֵֽנִי׃</w></v></c>
+<c n="51"><v n="1"><w>לַמְנַצֵּ֗חַ</w><w>מִזְמ֥וֹר</w><w>לְדָוִֽד׃</w></v><v n="2"><w>בְּֽבוֹא־</w><w>אֵ֭לָיו</w></v><v n="3"><w>חָנֵּ֣נִי</w><w>אֱלֹהִ֣ים</w><w>כְּחַסְדֶּ֑ךָ</w></v></c>`,
+};
+
 /** What the fake church website serves for every episode's MP3. */
 export const AUDIO_BYTES = new TextEncoder().encode("ID3 fake mp3 audio bytes");
 /** A real MP3, 44.1 kHz stereo: 2.5 s of tone, 0.6 s of silence, 2.4 s of tone. */
@@ -349,6 +368,10 @@ export function fakeProviders(fail: Record<string, number> = {}): { calls: FakeC
     const failure = Object.entries(fail).find(([prefix]) => url.startsWith(prefix));
     if (failure) return new Response("{\"error\":\"nope\"}", { status: failure[1] });
     if (url.startsWith("https://cdn.example.org/")) return new Response(AUDIO_BYTES, { headers: { "Content-Type": "audio/mpeg", "Content-Length": String(AUDIO_BYTES.byteLength) } });
+    const greek = /^https:\/\/raw\.githubusercontent\.com\/Faithlife\/SBLGNT\/master\/data\/sblgnt\/text\/(\w+)\.txt$/u.exec(url);
+    if (greek) return new Response(GREEK_FILES[greek[1]!] ?? `TITLE\n${greek[1]} 1:1\tλόγος \n`);
+    const hebrew = /^https:\/\/tanach\.us\/Books\/(\w+)\.xml$/u.exec(url);
+    if (hebrew) return new Response(hebrewBook(HEBREW_FILES[hebrew[1]!] ?? `<c n="1"><v n="1"><w>דָּבָר</w></v></c>`));
     if (url === BIBLE.url) return new Response(BIBLE_ZIP, { headers: { "Content-Type": "application/zip" } });
     if (url === FEED_URL) return new Response(FEED_XML, { headers: { "Content-Type": "application/rss+xml" } });
     if (url.endsWith("/chat/completions")) {

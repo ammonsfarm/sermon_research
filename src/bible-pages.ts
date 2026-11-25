@@ -1,4 +1,5 @@
 import { BIBLE, type BiblePassage, bibleState, type BibleState, type Book, bookByNumber, bookBySlug, BOOKS, chapterPath, chapterVerses, findVerses, parseReference, passageLabel, searchBible, startBibleImport, type Verse } from "./bible.ts";
+import { type AlignedVerse, ORIGINALS, originalOf, originalsReady, originalsState, type OriginalsState, originalVerses, startOriginalsImport } from "./originals.ts";
 import { chrome, clientIp, type Context, redirect, requireAdmin } from "./context.ts";
 import { html, type Html, page } from "./html.ts";
 import { gate, SEARCHES_PER_HOUR } from "./research.ts";
@@ -120,20 +121,69 @@ export async function bibleChapterPage(context: Context, slug: string, chapter: 
     return book && !state?.verses ? notAdded(context, state) : page("Not found", notFoundView(), { status: 404, ...chrome(context) });
   }
   const heading = book.chapters === 1 ? book.name : `${book.name} ${chapter}`;
+  // ?text=both sets the Greek or Hebrew under each verse, ?text=original shows it alone.
+  const source = originalOf(book);
+  const asked = context.url.searchParams.get("text");
+  const view = (asked === "both" || asked === "original") && originalsReady(await originalsState(context.db)) ? asked : "english";
+  const aligned = view === "english" ? [] : await originalVerses(context.db, book.number, chapter, 1, verses.at(-1)!.verse);
+  const suffix = view === "english" ? "" : `?text=${view}`;
+  const at = (place: { book: Book; chapter: number }) => `/bible/${place.book.slug}/${place.chapter}${suffix}`;
   const before = neighbour(book, chapter, -1);
   const after = neighbour(book, chapter, 1);
   const label = (place: { book: Book; chapter: number }) => place.book.chapters === 1 ? place.book.name : `${place.book.name} ${place.chapter}`;
   const turn = html`<nav class="bible-turn" aria-label="Chapters">
-${before ? html`<a href="${chapterPath(before.book, before.chapter)}" rel="prev">← ${label(before)}</a>` : html`<span></span>`}
-${after ? html`<a href="${chapterPath(after.book, after.chapter)}" rel="next">${label(after)} →</a>` : ""}
+${before ? html`<a href="${at(before)}" rel="prev">← ${label(before)}</a>` : html`<span></span>`}
+${after ? html`<a href="${at(after)}" rel="next">${label(after)} →</a>` : ""}
 </nav>`;
   return page(heading, html`<p class="meta"><a href="/bible">Bible</a>${book.chapters > 1 ? html` › <a href="/bible/${book.slug}">${book.name}</a>` : ""}</p>
 <h1>${heading}</h1>
 ${searchForm()}
-<div class="scripture chapter">${verses.map((verse) => html`<span class="verse" id="v${verse.verse}"><sup>${verse.verse}</sup>${verse.text}</span> `)}</div>
+${await viewSwitch(context, book, chapter, view)}
+${view === "english" ? html`<div class="scripture chapter">${verses.map((verse) => html`<span class="verse" id="v${verse.verse}"><sup>${verse.verse}</sup>${verse.text}</span> `)}</div>`
+    : view === "original" ? originalOnly(aligned, chapter, source) : sideBySide(verses, aligned, chapter, source)}
 ${turn}
 <p class="meta"><a href="/episodes?${new URLSearchParams({ q: heading }).toString()}">Sermons on ${heading}</a></p>
-${credit()}`, chrome(context));
+${credit()}${view === "english" ? "" : html`<p class="hint">${source.credit} <a href="${source.about}" rel="noopener">About this text</a></p>`}`, chrome(context));
+}
+
+/** Links between the English, the two together, and the Greek or Hebrew alone; nothing until those texts are added. */
+async function viewSwitch(context: Context, book: Book, chapter: number, view: "english" | "both" | "original"): Promise<Html> {
+  if (!originalsReady(await originalsState(context.db))) return html``;
+  const language = originalOf(book).language;
+  const link = (key: typeof view, label: string) => html`<a href="/bible/${book.slug}/${chapter}${key === "english" ? "" : `?text=${key}`}"${key === view ? html` aria-current="true"` : ""}>${label}</a>`;
+  return html`<nav class="bible-views" aria-label="Text">${link("english", "English")}${link("both", `English and ${language}`)}${link("original", language)}</nav>`;
+}
+
+/** A verse's number in the Greek or Hebrew text, with its chapter when that isn't the English Bible's. */
+function ownNumber(aligned: AlignedVerse, chapter: number): string {
+  return aligned.original.chapter === chapter ? String(aligned.original.verse) : `${aligned.original.chapter}:${aligned.original.verse}`;
+}
+
+/** The Greek or Hebrew alone, numbered as that text numbers it. Each verse keeps the English verse's anchor. */
+function originalOnly(aligned: readonly AlignedVerse[], chapter: number, source: ReturnType<typeof originalOf>): Html {
+  return html`<div class="scripture chapter original" lang="${source.lang}" dir="${source.lang === "he" ? "rtl" : "ltr"}">${aligned.map((each) =>
+    html`<span class="verse"${each.verse ? html` id="v${each.verse}"` : ""}><sup>${ownNumber(each, chapter)}</sup>${each.original.text}</span> `)}</div>`;
+}
+
+/** Each English verse with its Greek or Hebrew under it. A psalm's heading, which the Hebrew counts as a verse, comes first. */
+function sideBySide(verses: readonly Verse[], aligned: readonly AlignedVerse[], chapter: number, source: ReturnType<typeof originalOf>): Html {
+  const original = (each: AlignedVerse) => html`<p class="original" lang="${source.lang}" dir="${source.lang === "he" ? "rtl" : "ltr"}">${ownNumber(each, chapter) === String(each.verse) ? "" : html`<sup>${ownNumber(each, chapter)}</sup>`}${each.original.text}</p>`;
+  const byVerse = new Map(aligned.map((each) => [each.verse, each]));
+  return html`<div class="scripture chapter parallel">${aligned.filter((each) => each.verse === 0).map((each) => html`<div class="pair">${original(each)}</div>`)}
+${verses.map((verse) => {
+    const match = byVerse.get(verse.verse);
+    return html`<div class="pair verse" id="v${verse.verse}"><p><sup>${verse.verse}</sup>${verse.text}</p>${match ? original(match) : ""}</div>`;
+  })}</div>
+<p class="hint">Where a verse has no ${source.language} under it, the ${source.name} either doesn't have it or gives it with the verse before. A small number before the ${source.language} is that verse's number in the ${source.name}, where it differs.</p>`;
+}
+
+function originalsView(state: OriginalsState | null): Html {
+  if (!state) return html`<p class="empty">The Greek and Hebrew texts haven't been added yet.</p>`;
+  const counts = `${state.hebrew.toLocaleString("en-US")} Hebrew verses and ${state.greek.toLocaleString("en-US")} Greek verses.`;
+  if (state.status === "working") return html`<p class="busy-note">${state.detail ?? "Working"}</p><p class="hint">This takes a minute or two and carries on if you leave the page.</p>`;
+  if (state.status === "failed") return html`<p class="alert">Adding the Greek and Hebrew stopped: ${state.error ?? "Unknown error."}</p>`;
+  return html`<div class="alert-ok"><p><strong>The Greek and Hebrew texts are on the site.</strong> ${counts}</p></div>
+<p class="hint">Last added ${state.updatedAt.slice(0, 10)}.</p>`;
 }
 
 function statusView(state: BibleState | null): Html {
@@ -151,16 +201,29 @@ export async function bibleAdmin(context: Context): Promise<Response> {
   if (denied) return denied;
   let state = await bibleState(context.db);
   const busy = state?.status === "working" && Date.now() - Date.parse(state.updatedAt) < QUIET_MS;
+  let originals = await originalsState(context.db);
+  const originalsBusy = originals?.status === "working" && Date.now() - Date.parse(originals.updatedAt) < QUIET_MS;
   if (context.request.method === "POST") {
-    if (!busy) await startBibleImport(context.env);
+    const texts = (await context.request.formData()).get("texts");
+    if (texts === "originals") {
+      if (!originalsBusy) await startOriginalsImport(context.env);
+    } else if (!busy) await startBibleImport(context.env);
     return redirect("/admin/bible");
   }
   state = await bibleState(context.db);
+  originals = await originalsState(context.db);
   return page("Bible", html`<h1>Bible</h1>
 <p class="lead">Add the ${BIBLE.name} so people can read it on the Bible tab and search it by reference, by words, or by meaning.</p>
 ${statusView(state)}
 <form method="post" action="/admin/bible">
 <button type="submit"${busy ? html` disabled` : ""}>${state?.verses ? "Add it again" : `Add the ${BIBLE.name}`}</button>
 </form>
-<p class="hint">The text is downloaded from <a href="${BIBLE.about}" rel="noopener">eBible.org</a>, where it's in the public domain: all 66 books, without the Apocrypha. Preparing it for search by meaning uses your embeddings key once, for about a million tokens (a few cents at OpenAI's list price when this was written). Adding it again replaces the text with eBible.org's current edition.</p>`, { ...(state?.status === "working" ? { refreshSeconds: 5 } : {}), ...chrome(context) });
+<p class="hint">The text is downloaded from <a href="${BIBLE.about}" rel="noopener">eBible.org</a>, where it's in the public domain: all 66 books, without the Apocrypha. Preparing it for search by meaning uses your embeddings key once, for about a million tokens (a few cents at OpenAI's list price when this was written). Adding it again replaces the text with eBible.org's current edition.</p>
+<h2>Greek and Hebrew</h2>
+<p>Add the texts the Bible is translated from: the ${ORIGINALS.greek.name} for the New Testament and the ${ORIGINALS.hebrew.name} for the Old. Each chapter on the Bible tab can then be read in English, in ${ORIGINALS.greek.language} or ${ORIGINALS.hebrew.language}, or with the two together, and people can ask questions answered from the Bible with its original wording.</p>
+${originalsView(originals)}
+<form method="post" action="/admin/bible"><input type="hidden" name="texts" value="originals">
+<button type="submit"${originalsBusy || !state?.verses ? html` disabled` : ""}>${originalsReady(originals) ? "Add them again" : "Add the Greek and Hebrew"}</button>
+</form>
+<p class="hint">${state?.verses ? "" : "Add the English Bible first. "}The Greek comes from <a href="https://github.com/Faithlife/SBLGNT" rel="noopener">the SBLGNT's own repository</a> (CC BY 4.0, shown with its credit) and the Hebrew from <a href="${ORIGINALS.hebrew.about}" rel="noopener">Tanach.us</a>, which lets it be copied freely. Nothing is sent to your AI providers, so adding them costs nothing. These are edited texts, not a list of manuscripts: the notes on variant readings aren't part of either download.</p>`, { ...(state?.status === "working" || originals?.status === "working" ? { refreshSeconds: 5 } : {}), ...chrome(context) });
 }

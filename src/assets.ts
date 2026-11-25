@@ -161,6 +161,17 @@ details.add-provider summary { cursor: pointer; font-weight: 600; color: var(--a
 .bible-results li { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px; }
 .bible-results a { font-weight: 600; }
 .bible-results p { margin: 4px 0 0; }
+.bible-views { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 16px; }
+.bible-views a { padding: 3px 12px; border: 1px solid var(--line); border-radius: 999px; font-size: .9rem; text-decoration: none; background: var(--surface); }
+.bible-views a[aria-current] { background: var(--accent-soft); border-color: var(--accent); font-weight: 600; }
+.scripture [lang="he"], .scripture.original[lang="he"] { font-family: "SBL Hebrew", "Ezra SIL", "Times New Roman", var(--serif); font-size: 1.3em; line-height: 2; }
+.scripture.original[lang="he"] { font-size: 1.5rem; }
+.scripture [lang="grc"], .scripture.original[lang="grc"] { font-family: "Gentium Plus", "SBL Greek", var(--serif); }
+.scripture.parallel .pair { margin: 0 0 14px; border-radius: 4px; scroll-margin-top: 96px; }
+.scripture.parallel .pair p { margin: 0; }
+.scripture.parallel .pair p.original { color: var(--muted); }
+.scripture.parallel .pair:target { background: color-mix(in srgb, var(--gold-bright) 28%, transparent); }
+.quote.original { margin-top: 4px; }
 .bible-turn { display: flex; justify-content: space-between; gap: 16px; margin: 0 0 20px; padding-top: 14px; border-top: 1px solid var(--line); }
 
 /* Ask */

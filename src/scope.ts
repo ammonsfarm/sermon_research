@@ -15,6 +15,20 @@ export interface Scope {
   readonly full?: readonly string[];
   /** What an answer draws on besides or instead of the sermons: "bible" is the Bible alone, "both" is the sermons and the Bible. Unset means the sermons. */
   readonly sources?: "bible" | "both";
+  /** With `sources`: each Bible passage comes with its Greek or Hebrew. */
+  readonly original?: true;
+}
+
+/** The "Answer from" choices, as the form sends them. "" is the sermons alone. */
+export const SOURCE_CHOICES = ["", "both", "bible", "both-original", "bible-original"] as const;
+export type SourceChoice = (typeof SOURCE_CHOICES)[number];
+
+export function sourceChoice(scope: Scope): SourceChoice {
+  return scope.sources ? `${scope.sources}${scope.original ? "-original" : ""}` : "";
+}
+
+export function parseSourceChoice(value: unknown): SourceChoice {
+  return (SOURCE_CHOICES as readonly unknown[]).includes(value) ? value as SourceChoice : "";
 }
 
 export interface CatalogEntry {
@@ -67,9 +81,10 @@ export function parseScope(values: FormData | URLSearchParams): Scope {
   const episodes = [...new Set(values.getAll("scope_episode").map(String).filter((id) => ID.test(id)))].slice(0, MAX_PICKED);
   const mode = text("scope_text");
   const full = [...new Set(values.getAll("scope_full").map(String).filter((id) => ID.test(id)))].slice(0, MAX_PICKED);
-  const sources = text("scope_sources");
+  const choice = parseSourceChoice(text("scope_sources"));
   return {
-    ...(sources === "bible" || sources === "both" ? { sources } : {}),
+    ...(choice ? { sources: choice.startsWith("both") ? "both" as const : "bible" as const } : {}),
+    ...(choice.endsWith("-original") ? { original: true as const } : {}),
     ...(mode === "full" || mode === "search" ? { text: mode } : {}),
     ...(full.length ? { full } : {}),
     ...(series ? { series } : {}),
@@ -82,7 +97,7 @@ export function parseScope(values: FormData | URLSearchParams): Scope {
 
 /** The scope without its choice of sources: just which sermons. */
 export function sermonScope(scope: Scope): Scope {
-  const { sources: _sources, ...sermons } = scope;
+  const { sources: _sources, original: _original, ...sermons } = scope;
   return sermons;
 }
 
@@ -107,8 +122,9 @@ export function scopeIds(scope: Scope, entries: readonly CatalogEntry[]): string
 
 /** A short description, like "Series: Matthew, Speaker: Jane Doe, from 2026-01-01" or "“Grace Alone”". */
 export function describeScope(scope: Scope, entries: readonly CatalogEntry[]): string {
-  if (scope.sources === "bible") return "The Bible";
-  if (scope.sources === "both") return `${describeScope(sermonScope(scope), entries)}, and the Bible`;
+  const bible = scope.original ? "the Bible with its Greek and Hebrew" : "the Bible";
+  if (scope.sources === "bible") return `T${bible.slice(1)}`;
+  if (scope.sources === "both") return `${describeScope(sermonScope(scope), entries)}, and ${bible}`;
   if (isAll(scope)) return "All sermons";
   const parts: string[] = [];
   if (scope.episodes?.length) {
@@ -125,7 +141,7 @@ export function describeScope(scope: Scope, entries: readonly CatalogEntry[]): s
 
 /** Hidden fields that carry a scope into a follow-up question. */
 export function scopeFields(scope: Scope): Html {
-  return html`${scope.sources ? html`<input type="hidden" name="scope_sources" value="${scope.sources}">` : ""}${scope.series ? html`<input type="hidden" name="scope_series" value="${scope.series}">` : ""}${scope.speaker ? html`<input type="hidden" name="scope_speaker" value="${scope.speaker}">` : ""}${scope.from ? html`<input type="hidden" name="scope_from" value="${scope.from}">` : ""}${scope.to ? html`<input type="hidden" name="scope_to" value="${scope.to}">` : ""}${(scope.episodes ?? []).map((id) => html`<input type="hidden" name="scope_episode" value="${id}">`)}${scope.text ? html`<input type="hidden" name="scope_text" value="${scope.text}">` : ""}${(scope.full ?? []).map((id) => html`<input type="hidden" name="scope_full" value="${id}">`)}`;
+  return html`${scope.sources ? html`<input type="hidden" name="scope_sources" value="${sourceChoice(scope)}">` : ""}${scope.series ? html`<input type="hidden" name="scope_series" value="${scope.series}">` : ""}${scope.speaker ? html`<input type="hidden" name="scope_speaker" value="${scope.speaker}">` : ""}${scope.from ? html`<input type="hidden" name="scope_from" value="${scope.from}">` : ""}${scope.to ? html`<input type="hidden" name="scope_to" value="${scope.to}">` : ""}${(scope.episodes ?? []).map((id) => html`<input type="hidden" name="scope_episode" value="${id}">`)}${scope.text ? html`<input type="hidden" name="scope_text" value="${scope.text}">` : ""}${(scope.full ?? []).map((id) => html`<input type="hidden" name="scope_full" value="${id}">`)}`;
 }
 
 /** The "Scope" disclosure in the ask box: series, dates and specific sermons. */
