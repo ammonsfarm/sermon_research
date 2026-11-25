@@ -92,6 +92,8 @@ export function field(options: {
   hint?: string;
   required?: boolean;
   autocomplete?: string;
+  /** The id of a <datalist> of suggestions. */
+  list?: string;
 }): Html {
   const id = `f-${options.name}`;
   return html`<div class="field${options.error ? " invalid" : ""}">
@@ -99,7 +101,7 @@ export function field(options: {
 ${options.hint ? html`<p class="hint">${options.hint}</p>` : ""}
 ${options.type === "textarea"
     ? html`<textarea id="${id}" name="${options.name}" rows="3">${options.value ?? ""}</textarea>`
-    : html`<input id="${id}" name="${options.name}" type="${options.type ?? "text"}" value="${options.value ?? ""}"${options.required ? html` required` : ""}${options.autocomplete ? html` autocomplete="${options.autocomplete}"` : ""}>`}
+    : html`<input id="${id}" name="${options.name}" type="${options.type ?? "text"}" value="${options.value ?? ""}"${options.required ? html` required` : ""}${options.autocomplete ? html` autocomplete="${options.autocomplete}"` : ""}${options.list ? html` list="${options.list}"` : ""}>`}
 ${options.error ? html`<p class="error">${options.error}</p>` : ""}
 </div>`;
 }

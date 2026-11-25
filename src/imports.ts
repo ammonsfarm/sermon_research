@@ -282,6 +282,7 @@ ${reprocessing + counts.redo.failed ? html`<dt>Re-processing</dt><dd>${counts.re
 </form>
 <div class="row">
 <form class="inline" method="post" action="/admin/episodes/check"><button class="quiet" type="submit">Check for new episodes now</button></form>
+<a href="/admin/episodes/upload">Upload a sermon</a>
 ${failed > 0 ? html`<form class="inline" method="post" action="/admin/episodes/queue"><input type="hidden" name="failed" value="1"><button class="quiet" type="submit">Retry all ${failed} failed</button></form>` : ""}
 ${counts.not_imported > 0 ? html`<form class="inline" method="post" action="/admin/episodes/queue"><input type="hidden" name="all" value="1"><button class="quiet" type="submit">Import all ${counts.not_imported} older episodes</button></form>` : ""}
 </div>
@@ -290,7 +291,7 @@ ${episodeFilter(query, counts, total)}
 <thead><tr><th>Episode</th><th>Status</th><th></th></tr></thead>
 <tbody>
 ${episodes.map((episode) => html`<tr>
-<td>${episode.status === "done" ? html`<a href="/episodes/${episode.id}">${episode.title}</a>` : episode.title}<br><span class="hint">${episode.published_at?.slice(0, 10) ?? ""}${episode.speaker ? ` · ${episode.speaker}` : ""}</span></td>
+<td>${episode.status === "done" ? html`<a href="/episodes/${episode.id}">${episode.title}</a>` : episode.title}<br><span class="hint">${episode.published_at?.slice(0, 10) ?? ""}${episode.speaker ? ` · ${episode.speaker}` : ""}${episode.audio_url ? "" : " · Uploaded"}</span></td>
 <td>${episodeStatus(episode)}</td>
 <td>${episode.status === "failed" || episode.status === "not_imported" || (episode.redo && !episode.stage && episode.error)
     ? html`<form method="post" action="/admin/episodes/queue"><input type="hidden" name="id" value="${episode.id}"><button class="quiet" type="submit">${episode.status === "not_imported" ? "Import" : "Retry"}</button></form>`

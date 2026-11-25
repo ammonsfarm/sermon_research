@@ -35,6 +35,7 @@ import { acceptInvite, membersPage, reinviteMember, removeMember, showInvite } f
 import { canViewResearch, researchAdmin, researchSettings, sourcesAdmin } from "./research.ts";
 import { confirmLink, emailSignInEnabled, requestLink, showLink } from "./links.ts";
 import { ensureSchema } from "./schema.ts";
+import { uploadSermon } from "./upload.ts";
 import { MODE_COOKIE, modeCookie, parseMode, safeBack } from "./theme.ts";
 import {
   type CheckedSettings,
@@ -133,6 +134,8 @@ async function route(context: Context): Promise<Response> {
     case "POST /admin/episodes/queue": return queueFromDashboard(context);
     case "POST /admin/episodes/restart": return restartFromDashboard(context);
     case "POST /admin/episodes/concurrency": return saveConcurrency(context);
+    case "GET /admin/episodes/upload":
+    case "POST /admin/episodes/upload": return uploadSermon(context);
     case "GET /admin/schedule":
     case "POST /admin/schedule": return scheduleSettings(context);
     case "GET /research": return researchRedirect();

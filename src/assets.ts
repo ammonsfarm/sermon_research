@@ -280,6 +280,7 @@ label.choice.scheme:has(input:checked) { border-color: var(--accent); box-shadow
  * The site's only script, served at /assets/app.js. Every page works without
  * it; it adds:
  * - a "working" state on forms that call the AI (data-busy);
+ * - a warning when a file chosen for upload is too large to send;
  * - tabs (.tabs);
  * - the episode read-along, which highlights the sentence being played and
  *   estimates the word by spreading the sentence's time evenly across its
@@ -298,6 +299,15 @@ export const APP_SCRIPT = `(() => {
         note.textContent = form.dataset.busy;
         form.append(note);
       }
+    });
+  }
+
+  // Upload a sermon: say a file is too large before it's sent, since Cloudflare turns it away with a bare error page.
+  for (const input of document.querySelectorAll("input[type=file][data-max-bytes]")) {
+    input.addEventListener("change", () => {
+      const tooLarge = [...input.files].some((file) => file.size > Number(input.dataset.maxBytes));
+      input.setCustomValidity(tooLarge ? input.dataset.tooLarge : "");
+      input.reportValidity();
     });
   }
 
