@@ -39,6 +39,7 @@ before anything in the "Ask first" list below.
 | `src/documents.ts`, `src/markdown.ts` | Markdown documents written from the sermons (outline, study questions, custom): starting one, its page (live progress while it's written, Try again if it failed) and `.md` download; a small Markdown renderer that escapes everything it doesn't handle |
 | `src/writing.ts` | How a document is written, in the background: the answers AI picks the sermons from a catalog (titles, dates, scripture, topics) and splits long requests into parts, then each part is written from the full transcripts of its sermons, and the parts are joined with their citations renumbered |
 | `src/bible.ts` | The Bible: the 66 books, reading references ("John 3:16"), the import from eBible.org (unzip, verses into `bible_verses`, runs of verses into `bible_passages`, embeddings into Vectorize), and search by meaning or by words |
+| `src/originals.ts` | The Greek New Testament (SBLGNT) and the Hebrew Bible (UXLC, from Tanach.us): reading their files, the import into `bible_originals`, and `toOriginal`, which turns an English Bible chapter and verse into the Hebrew or Greek text's own |
 | `src/bible-pages.ts` | The Bible tab (`/bible`, `/bible/:book`, `/bible/:book/:chapter`) and Admin → Bible |
 | `src/api.ts` | The read-only JSON API under `/api/v1` (search, sermons, one sermon, filters) and its OpenAPI description |
 | `src/api-keys.ts` | API keys (only a SHA-256 is stored), the per-key hourly limit, and Admin → API keys |
@@ -156,6 +157,32 @@ first request after each deploy.
   Documents (outlines, study questions) and the API are still written from
   the sermons alone, as are questions asked on a sermon's own page. Asking
   both costs two embeddings calls instead of one.
+- **Greek and Hebrew:** Admin → Bible has a second button, "Add the Greek
+  and Hebrew". A `sermon-research-bible` run with `texts: "originals"`
+  fetches the SBL Greek New Testament a book at a time from its GitHub
+  repository (27 text files) and the Unicode/XML Leningrad Codex from
+  `tanach.us/Books/<Book>.xml` (39 files), and stores about 31,000 verses in
+  `bible_originals` in each text's own numbering. No AI provider is called,
+  so it costs nothing. Each chapter on the Bible tab then has English,
+  "English and Greek" (or Hebrew) and Greek-only views (`?text=both`,
+  `?text=original`). The Ask box gains "The Bible, with Greek and Hebrew" and
+  "Sermons and the Bible, with Greek and Hebrew" (`original: true` in the
+  scope): passages are still found through the English, and each one's Greek
+  or Hebrew verses are added under it for the answers AI, Hebrew without its
+  cantillation marks to save room. The AI is told it may explain the
+  original wording from its own knowledge of the languages, to say when it
+  does, and not to make claims about manuscripts or variants. Hebrew
+  numbering differs from the English Bible's in places (Joel has four
+  chapters, Malachi three, a psalm's heading is verse 1): `SHIFTS` and the
+  psalm lists in `src/originals.ts` hold every difference, checked verse by
+  verse against the World English Bible, UXLC 2.6 and SBLGNT 1.2. Don't edit
+  them by hand without re-checking. Licences: the SBLGNT is CC BY 4.0 and its
+  credit line (`ORIGINALS.greek.credit`) must stay on pages that show it; its
+  apparatus marks are stripped, which the credit says. Tanach.us lets the
+  Hebrew be copied freely, asks to be cited, and asks that it not be called
+  the Westminster Leningrad Codex. These are edited texts: neither download
+  has variant readings or manuscript lists, so the site can't answer
+  questions about which manuscripts read what.
 - **How much text an answer gets:** Admin → Answer sources (the `sources`
   setting; `sourceSettings` and `DEFAULT_SOURCES` in `src/research.ts`). For
   sermons and for the Bible separately it sets how many of the closest

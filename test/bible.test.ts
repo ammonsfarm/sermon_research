@@ -179,7 +179,7 @@ test("Ask answers from the Bible, or from the sermons and the Bible together", a
 
     await importBible(app.env, inlineStep);
     const page = await (await app.request("/", { cookie })).text();
-    assert.match(page, /<select id="f-sources" name="scope_sources"><option value="">Sermons<\/option><option value="both">Sermons and the Bible<\/option><option value="bible">The Bible<\/option>/);
+    assert.match(page, /<select id="f-sources" name="scope_sources"><option value="" selected>Sermons<\/option><option value="both">Sermons and the Bible<\/option><option value="bible">The Bible<\/option><\/select>/);
 
     await app.request("/research", { cookie, form: { question: "What is grace?" } });
     assert.doesNotMatch(prompts().at(-1)![1]!.content, /The Bible,/, "sermons alone unless asked");

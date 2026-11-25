@@ -3,6 +3,7 @@ import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloud
 import { dispatchQueued } from "./episodes.ts";
 import { importBible } from "./bible.ts";
 import type { AppEnv } from "./env.ts";
+import { importOriginals } from "./originals.ts";
 import { runEpisode } from "./pipeline.ts";
 import { ensureSchema } from "./schema.ts";
 import { writeDocument } from "./writing.ts";
@@ -34,10 +35,16 @@ export class DocumentWorkflow extends WorkflowEntrypoint<AppEnv, DocumentParams>
   }
 }
 
-/** One run each time an admin adds the Bible: store the text, then embed its passages. */
-export class BibleWorkflow extends WorkflowEntrypoint<AppEnv> {
-  override async run(_event: WorkflowEvent<unknown>, step: WorkflowStep): Promise<void> {
+export interface BibleParams {
+  /** "originals" adds the Greek and Hebrew texts; otherwise the run adds the English Bible. */
+  readonly texts?: "originals";
+}
+
+/** One run each time an admin adds the Bible (store the text, then embed its passages) or the Greek and Hebrew texts. */
+export class BibleWorkflow extends WorkflowEntrypoint<AppEnv, BibleParams | undefined> {
+  override async run(event: WorkflowEvent<BibleParams | undefined>, step: WorkflowStep): Promise<void> {
     await ensureSchema(this.env.DB);
-    await importBible(this.env, step);
+    if (event.payload?.texts === "originals") await importOriginals(this.env, step);
+    else await importBible(this.env, step);
   }
 }

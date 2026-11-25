@@ -319,6 +319,19 @@ export const MIGRATIONS: readonly Migration[] = [
       `CREATE INDEX IF NOT EXISTS bible_passages_pending ON bible_passages(indexed, book, chapter, verse_start)`,
     ],
   },
+  {
+    version: 18,
+    statements: [
+      // The Greek New Testament and the Hebrew Bible (src/originals.ts), in each text's own chapter and verse numbers.
+      `CREATE TABLE IF NOT EXISTS bible_originals (
+        book INTEGER NOT NULL,
+        chapter INTEGER NOT NULL,
+        verse INTEGER NOT NULL,
+        text TEXT NOT NULL,
+        PRIMARY KEY (book, chapter, verse)
+      ) WITHOUT ROWID`,
+    ],
+  },
 ];
 
 /**

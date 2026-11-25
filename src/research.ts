@@ -3,8 +3,10 @@ import { html, type Html, page } from "./html.ts";
 import { renderMarkdown } from "./markdown.ts";
 import { ProviderError } from "./providers.ts";
 import { embed, requireKey, type Segment } from "./pipeline.ts";
+import { originalOf, originalVerses, withoutCantillation } from "./originals.ts";
 import { BIBLE, BIBLE_VECTOR_OWNER, bibleForQuestion, bibleState, bookByNumber, chapterPath, passageLabel } from "./bible.ts";
 import { chatWithFallback, type LlmAction, resolveTargets } from "./llm.ts";
+import { parseSourceChoice, SOURCE_CHOICES, type SourceChoice } from "./scope.ts";
 import { getSetting, getSetupStep, type Ministry, putSetting } from "./settings.ts";
 import { HOUR_MS, recordUse, startOfUtcDay, usedSince } from "./usage.ts";
 import type { AppEnv } from "./env.ts";
@@ -39,7 +41,7 @@ export interface SourceLimits {
 /** Admin → Answer sources: what a question is answered from when nobody chooses, and how much each search brings back. */
 export interface SourceSettings {
   /** "" is the sermons alone. */
-  readonly defaultSources: "" | "both" | "bible";
+  readonly defaultSources: SourceChoice;
   readonly sermons: SourceLimits;
   readonly bible: SourceLimits;
 }
@@ -137,6 +139,8 @@ export interface Passage {
   readonly start: number | null;
   readonly text: string;
   readonly href?: string;
+  /** For a Bible passage, when asked for: the same verses in Greek or Hebrew, each with its number in that text. */
+  readonly original?: { readonly language: string; readonly name: string; readonly text: string };
 }
 
 /** A source as saved with an answer or document, so it survives re-indexing. */
@@ -144,7 +148,10 @@ export type StoredSource = Omit<Passage, "chunkId">;
 const STORED_SOURCE_CHARS = 600;
 
 export function toStored(passages: readonly Passage[]): StoredSource[] {
-  return passages.map(({ chunkId: _chunkId, ...passage }) => ({ ...passage, text: passage.text.slice(0, STORED_SOURCE_CHARS) }));
+  return passages.map(({ chunkId: _chunkId, ...passage }) => ({
+    ...passage, text: passage.text.slice(0, STORED_SOURCE_CHARS),
+    ...(passage.original ? { original: { ...passage.original, text: passage.original.text.slice(0, STORED_SOURCE_CHARS) } } : {}),
+  }));
 }
 
 /** Vectorize filters are limited in size, so larger scopes filter the results instead. */
@@ -315,11 +322,19 @@ async function searched(
 }
 
 /** The Bible's passages for a question, as sources: any it names, then the closest in meaning with the passages around them. Number them with `numbered`. */
-export async function biblePassages(env: AppEnv, question: string, limits: SourceLimits = DEFAULT_SOURCES.bible): Promise<Passage[]> {
-  return (await bibleForQuestion(env, question, limits)).map((passage) => ({
-    n: 0, chunkId: passage.id, episodeId: "", title: passageLabel(passage), publishedAt: null, speaker: null, kind: "bible" as const, seq: 0, start: null, text: passage.text,
-    href: chapterPath(bookByNumber(passage.book)!, passage.chapter, passage.verseStart),
-  }));
+export async function biblePassages(env: AppEnv, question: string, limits: SourceLimits = DEFAULT_SOURCES.bible, withOriginal = false): Promise<Passage[]> {
+  const passages: Passage[] = [];
+  for (const passage of await bibleForQuestion(env, question, limits)) {
+    const source = originalOf(passage.book);
+    const verses = withOriginal ? await originalVerses(env.DB, passage.book, passage.chapter, passage.verseStart, passage.verseEnd) : [];
+    passages.push({
+      n: 0, chunkId: passage.id, episodeId: "", title: passageLabel(passage), publishedAt: null, speaker: null, kind: "bible", seq: 0, start: null, text: passage.text,
+      href: chapterPath(bookByNumber(passage.book)!, passage.chapter, passage.verseStart),
+      // Each verse carries its own number, since the Hebrew's isn't always the English Bible's. Cantillation marks are left out to save the model's room.
+      ...(verses.length ? { original: { language: source.language, name: source.name, text: verses.map(({ original }) => `${original.chapter}:${original.verse} ${withoutCantillation(original.text)}`).join(" ") } } : {}),
+    });
+  }
+  return passages;
 }
 
 /** Sources from several places as one list, numbered from 1 in order. */
@@ -336,7 +351,7 @@ export function preamble(ministry: Ministry | null): string {
 
 /** The numbered sources block every prompt shares. */
 export function sourcesPrompt(passages: readonly Passage[]): string {
-  return passages.map((passage) => passage.kind === "bible" ? `[${passage.n}] The Bible, ${passage.title} (${BIBLE.name}):\n${passage.text}` :
+  return passages.map((passage) => passage.kind === "bible" ? `[${passage.n}] The Bible, ${passage.title} (${BIBLE.name}):\n${passage.text}${passage.original ? `\nThe same verses in ${passage.original.language} (${passage.original.name}), numbered as that text numbers them:\n${passage.original.text}` : ""}` :
     `[${passage.n}] "${passage.title}" (${[passage.publishedAt?.slice(0, 10) ?? "undated", passage.speaker].filter(Boolean).join(", ")})${passage.kind === "summary" ? ", summary" : passage.start !== null ? `, at ${formatTime(passage.start)}` : ""}:\n${passage.text}`).join("\n\n");
 }
 
@@ -393,7 +408,10 @@ export async function answer(
   env: AppEnv, ministry: Ministry | null, question: string, passages: readonly Passage[], history: readonly Exchange[] = [], who: { userId?: string | null; model?: string | null } = {},
 ): Promise<string> {
   const onlyBible = passages.every((passage) => passage.kind === "bible");
-  const system = `${onlyBible ? `You help people at ${ministry?.churchName ?? "this church"} study the Bible.` : preamble(ministry)} Answer only from the numbered sources, ${sourcesAre(passages)}. Cite every claim with the source number in square brackets, like [2]. If the sources don't answer the question, say so plainly and don't guess. Keep answers under 250 words, in plain paragraphs.${history.length ? " This is a follow-up: use the earlier conversation to understand what the question refers to, but cite only the numbered sources below." : ""}`;
+  const original = passages.some((passage) => passage.original)
+    ? " Bible sources also give the same verses in Greek or Hebrew. Where it helps the question, explain what the original says: its words, their forms, the word order, and where the translation had to choose. Quote the Greek or Hebrew you're explaining and give its plain meaning. You may use your knowledge of the languages to read these verses, but say when a point is your reading of the original rather than something the translation states, and don't make claims about manuscripts or variant readings, which the sources don't show."
+    : "";
+  const system = `${onlyBible ? `You help people at ${ministry?.churchName ?? "this church"} study the Bible.` : preamble(ministry)} Answer only from the numbered sources, ${sourcesAre(passages)}.${original} Cite every claim with the source number in square brackets, like [2]. If the sources don't answer the question, say so plainly and don't guess. Keep answers under 250 words, in plain paragraphs.${history.length ? " This is a follow-up: use the earlier conversation to understand what the question refers to, but cite only the numbered sources below." : ""}`;
   const earlier = history.slice(-HISTORY_TURNS).map((turn) => `Q: ${turn.question}\nA: ${turn.answer}`).join("\n\n");
   return chat(env, system, `${earlier ? `Earlier in this conversation:\n\n${earlier}\n\n` : ""}Sources:\n\n${sourcesPrompt(passages)}\n\nQuestion: ${question}`, { maxTokens: ANSWER_MAX_TOKENS, timeoutMs: passages.reduce((sum, passage) => sum + passage.text.length, 0) > SCOPED_FULL_CHARS ? 180_000 : 60_000, ...who });
 }
@@ -403,8 +421,9 @@ export function sourcesList(passages: readonly Omit<Passage, "chunkId">[], optio
   const prefix = options.prefix ?? "source";
   const list = html`<ol class="sources">
 ${passages.map((passage) => passage.kind === "bible" ? html`<li id="${prefix}-${passage.n}"><span class="n">${passage.n}</span> <a href="${passage.href ?? "/bible"}">${passage.title}</a>
-<span class="hint">${BIBLE.name}</span>
-<p class="quote">${passage.text.length > 400 ? `${passage.text.slice(0, 400)}…` : passage.text}</p></li>` : html`<li id="${prefix}-${passage.n}"><span class="n">${passage.n}</span> <a href="/episodes/${passage.episodeId}#t-${passage.seq}">${passage.title}</a>
+<span class="hint">${BIBLE.name}${passage.original ? ` · ${passage.original.name}` : ""}</span>
+<p class="quote">${passage.text.length > 400 ? `${passage.text.slice(0, 400)}…` : passage.text}</p>
+${passage.original ? html`<p class="quote original" dir="auto">${passage.original.text.length > 400 ? `${passage.original.text.slice(0, 400)}…` : passage.original.text}</p>` : ""}</li>` : html`<li id="${prefix}-${passage.n}"><span class="n">${passage.n}</span> <a href="/episodes/${passage.episodeId}#t-${passage.seq}">${passage.title}</a>
 <span class="hint">${passage.publishedAt?.slice(0, 10) ?? ""}${passage.speaker ? ` · ${passage.speaker}` : ""}${passage.kind === "summary" ? " · summary" : passage.start !== null ? ` · ${formatTime(passage.start)}` : ""}</span>
 <p class="quote">${passage.text.length > 400 ? `${passage.text.slice(0, 400)}…` : passage.text}</p></li>`)}
 </ol>`;
@@ -469,6 +488,12 @@ function reach(limits: SourceLimits, passageChars: number): string {
   return `${Math.min(most, limits.maxChars).toLocaleString("en-US")} characters, roughly ${Math.round(Math.min(most, limits.maxChars) / 4).toLocaleString("en-US")} tokens`;
 }
 
+/** What each "Answer from" choice is called. */
+export const SOURCE_LABELS: Readonly<Record<SourceChoice, string>> = {
+  "": "Sermons", both: "Sermons and the Bible", bible: "The Bible",
+  "both-original": "Sermons and the Bible, with Greek and Hebrew", "bible-original": "The Bible, with Greek and Hebrew",
+};
+
 /** GET/POST /admin/sources : what answers draw on by default, and how much each search brings to the answers AI. */
 export async function sourcesAdmin(context: Context): Promise<Response> {
   const denied = requireAdmin(context);
@@ -486,8 +511,7 @@ export async function sourcesAdmin(context: Context): Promise<Response> {
       if (!Number.isInteger(value) || value < low || value > high) errors.push(`${label}: “${title}” must be a whole number from ${low.toLocaleString("en-US")} to ${high.toLocaleString("en-US")}.`);
       return [name, value];
     })) as unknown as SourceLimits;
-    const chosen = String(form.get("defaultSources") ?? "");
-    settings = { defaultSources: chosen === "both" || chosen === "bible" ? chosen : "", sermons: read("sermons", "Sermons"), bible: read("bible", "The Bible") };
+    settings = { defaultSources: parseSourceChoice(form.get("defaultSources")), sermons: read("sermons", "Sermons"), bible: read("bible", "The Bible") };
     if (errors.length === 0) {
       await putSetting(context.db, "sources", settings);
       return redirect("/admin/sources?saved=1");
@@ -508,7 +532,8 @@ ${errors.map((error) => html`<p class="alert">${error}</p>`)}
 <form method="post" action="/admin/sources">
 <div class="field"><label for="f-defaultSources">Answer from, unless the person chooses</label>
 <p class="hint">The Ask box starts on this once the Bible has been added. Anyone can change it for their own question.</p>
-<select id="f-defaultSources" name="defaultSources">${from("", "Sermons")}${from("both", "Sermons and the Bible")}${from("bible", "The Bible")}</select></div>
+<select id="f-defaultSources" name="defaultSources">${SOURCE_CHOICES.map((choice) => from(choice, SOURCE_LABELS[choice]))}</select>
+<p class="hint">The choices with Greek and Hebrew need those texts added in Admin → Bible. They add each Bible passage's original wording, about as much text again, which isn't counted in the Bible's character limit below.</p></div>
 ${group("sermons", "Sermons", "A sermon passage is about 1,200 characters of the transcript. These apply when sermons are searched; a narrow scope, or “Full sermons”, sends whole sermons instead, up to what the model can take.", 1_200)}
 ${group("bible", "The Bible", "A Bible passage is up to 900 characters, about five verses. Passages before and after stay inside the chapter. Verses a question names, like “John 17”, are read as well and come first.", 900)}
 <button type="submit">Save</button>
